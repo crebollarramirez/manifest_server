@@ -26,15 +26,11 @@ class ModelParams:
 
 # PART-START: wall_plate
 @cad_part(
-    id="wall_plate",
+    semantic_id="wall_plate",
     role="structural_base",
     library="cadquery",
-    editable=True,
-    protected_regions=("mounting_face", "mounting_holes"),
     parameters=("wall_plate_width_mm", "wall_plate_height_mm", "wall_plate_thickness_mm", "corner_radius_mm"),
     depends_on=(),
-    consumes_tags=(),
-    produces_tags=("wall_back_face", "wall_front_face", "wall_top_edge", "wall_bottom_edge"),
     search_keys=("rectangular bracket", "wall plate", "base plate"),
 )
 def build_wall_plate(params: ModelParams):
@@ -56,15 +52,11 @@ def build_wall_plate(params: ModelParams):
 
 # PART-START: mount_holes
 @cad_part(
-    id="mount_holes",
+    semantic_id="mount_holes",
     role="fastener_features",
     library="cadquery",
-    editable=True,
-    protected_regions=("mounting_face", "mounting_holes"),
     parameters=("screw_hole_diameter_mm", "screw_head_counterbore_diameter_mm", "screw_head_counterbore_depth_mm", "mount_hole_edge_offset_mm"),
     depends_on=("wall_plate",),
-    consumes_tags=("wall_front_face",),
-    produces_tags=(),
     search_keys=("four screws", "corner holes", "counterbore"),
 )
 def cut_mounting_holes(params: ModelParams, wall_plate):
@@ -98,15 +90,11 @@ def cut_mounting_holes(params: ModelParams, wall_plate):
 
 # PART-START: hook_arm
 @cad_part(
-    id="hook_arm",
+    semantic_id="hook_arm",
     role="load_bearing_arm",
     library="cadquery",
-    editable=True,
-    protected_regions=("headphone_contact_face",),
     parameters=("top_hook_width_mm", "top_hook_depth_mm", "top_hook_height_mm", "top_hook_thickness_mm", "top_hook_clearance_radius_mm"),
     depends_on=("wall_plate",),
-    consumes_tags=(),
-    produces_tags=(),
     search_keys=("headphone holder", "support arm", "hanger"),
 )
 def build_hook_arm(params: ModelParams, wall_plate):
@@ -137,15 +125,11 @@ def build_hook_arm(params: ModelParams, wall_plate):
 
 # PART-START: bottom_lip
 @cad_part(
-    id="bottom_lip",
+    semantic_id="bottom_lip",
     role="anti_slip_retainer",
     library="cadquery",
-    editable=True,
-    protected_regions=("headphone_contact_face",),
     parameters=("bottom_lip_width_mm", "bottom_lip_depth_mm", "bottom_lip_height_mm"),
     depends_on=("hook_arm",),
-    consumes_tags=(),
-    produces_tags=(),
     search_keys=("support lip", "retainer", "stop"),
 )
 def build_bottom_lip(params: ModelParams, hook_arm):
@@ -170,15 +154,11 @@ def build_bottom_lip(params: ModelParams, hook_arm):
 
 # PART-START: edge_fillets
 @cad_part(
-    id="edge_fillets",
+    semantic_id="edge_fillets",
     role="finishing",
     library="cadquery",
-    editable=True,
-    protected_regions=(),
     parameters=("corner_radius_mm",),
     depends_on=("bottom_lip",),
-    consumes_tags=(),
-    produces_tags=(),
     search_keys=("fillet", "finish"),
 )
 def apply_edge_fillets(params: ModelParams, bottom_lip):

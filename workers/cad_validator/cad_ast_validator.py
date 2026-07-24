@@ -6,24 +6,17 @@ from typing import Any
 
 REPORT_SCHEMA_VERSION = 1
 REQUIRED_DECORATOR_FIELDS = (
-    "id",
+    "semantic_id",
     "role",
     "library",
-    "editable",
-    "protected_regions",
     "parameters",
     "depends_on",
-    "consumes_tags",
-    "produces_tags",
     "search_keys",
 )
-STRING_FIELDS = {"id", "role", "library"}
+STRING_FIELDS = {"semantic_id", "role", "library"}
 TUPLE_FIELDS = {
-    "protected_regions",
     "parameters",
     "depends_on",
-    "consumes_tags",
-    "produces_tags",
     "search_keys",
 }
 ALLOWED_IMPORT_ROOTS = {"cadquery_runtime", "dataclasses", "math", "typing"}
@@ -101,7 +94,7 @@ def decorator_name(node: ast.AST) -> str | None:
 
 
 def literal_value(node: ast.AST) -> Any:
-    if isinstance(node, ast.Constant) and type(node.value) in {str, bool}:
+    if isinstance(node, ast.Constant) and type(node.value) is str:
         return node.value
     if isinstance(node, ast.Tuple):
         values: list[str] = []
@@ -290,7 +283,7 @@ def decorator_literal_check(decorators: list[tuple[ast.AST, ast.Call]]) -> dict:
                     validation_error(
                         "decorator_nonliteral",
                         f"{function.name}.{keyword.arg} must be a literal string, "
-                        "Boolean, or tuple of literal strings.",
+                        "or tuple of literal strings.",
                         keyword.value,
                     )
                 )
@@ -328,9 +321,9 @@ def decorator_fields_check(
             parsed.append((function, values))
 
     feature_ids = {
-        values["id"]
+        values["semantic_id"]
         for _function, values in parsed
-        if type(values.get("id")) is str and values["id"]
+        if type(values.get("semantic_id")) is str and values["semantic_id"]
     }
     seen_ids: set[str] = set()
     for function, values in parsed:
@@ -352,15 +345,6 @@ def decorator_fields_check(
                     function,
                 )
             )
-        if type(values["editable"]) is not bool:
-            errors.append(
-                validation_error(
-                    "decorator_editable",
-                    f"{function.name}.editable must be a literal Boolean.",
-                    function,
-                )
-            )
-
         for field in TUPLE_FIELDS:
             value = values[field]
             if type(value) is not tuple or any(
@@ -374,13 +358,13 @@ def decorator_fields_check(
                     )
                 )
 
-        feature_id = values["id"]
+        feature_id = values["semantic_id"]
         if type(feature_id) is str and feature_id:
             if feature_id in seen_ids:
                 errors.append(
                     validation_error(
-                        "duplicate_feature_id",
-                        f'Duplicate cad_part id "{feature_id}".',
+                        "duplicate_semantic_id",
+                        f'Duplicate cad_part semantic_id "{feature_id}".',
                         function,
                     )
                 )
@@ -406,7 +390,7 @@ def decorator_fields_check(
                 errors.append(
                     validation_error(
                         "unknown_dependencies",
-                        f"{function.name} references unknown cad_part ids: "
+                        f"{function.name} references unknown cad_part semantic_ids: "
                         f"{', '.join(unknown_dependencies)}.",
                         function,
                     )

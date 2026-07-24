@@ -142,16 +142,12 @@ Every public CAD feature function must have a `@cad_part(...)` decorator.
 
 Every `@cad_part(...)` decorator must use this strict field set in this exact order:
 
-1. `id`
+1. `semantic_id`
 2. `role`
 3. `library`
-4. `editable`
-5. `protected_regions`
-6. `parameters`
-7. `depends_on`
-8. `consumes_tags`
-9. `produces_tags`
-10. `search_keys`
+4. `parameters`
+5. `depends_on`
+6. `search_keys`
 
 Do not omit a required decorator field. Use an empty tuple when a feature has no values for a tuple field. `library` must always be the literal string `"cadquery"`. Keep the trailing comma in single-item tuples.
 
@@ -159,15 +155,11 @@ Required decorator format example:
 
 ```python
 @cad_part(
-    id="wall_plate",
+    semantic_id="wall_plate",
     role="primary_mounting_plate",
     library="cadquery",
-    editable=True,
-    protected_regions=("plate_back",),
     parameters=("plate_width_mm", "plate_height_mm", "plate_thickness_mm"),
     depends_on=(),
-    consumes_tags=(),
-    produces_tags=("plate_top", "plate_back"),
     search_keys=("plate", "mount plate", "back plate"),
 )
 ```
@@ -175,7 +167,6 @@ Required decorator format example:
 Decorator metadata must use literal values only:
 
 - strings
-- booleans
 - tuples of strings
 - empty tuples
 
@@ -183,15 +174,11 @@ Do not compute decorator values at runtime.
 
 Use stable semantic metadata with all required fields:
 
-- `id`
+- `semantic_id`
 - `role`
 - `library`
-- `editable`
-- `protected_regions`
 - `parameters`
 - `depends_on`
-- `consumes_tags`
-- `produces_tags`
 - `search_keys`
 
 Every metadata value must be literal and semantically meaningful.
@@ -217,15 +204,14 @@ MODELING RULES
 
 PROTECTED REGION RULES
 
-- Critical regions such as mating faces, mounting holes, clearance faces, and wall-contact faces should be marked in metadata and, when practical, tagged in geometry.
+- Critical regions such as mating faces, mounting holes, clearance faces, and wall-contact faces should be tagged in geometry when practical.
 - If a region is protected, do not modify it indirectly by mixing unrelated edits into the same function.
 - Protected regions should be isolated in their own function or clearly tagged anchor where practical.
 
 DEPENDENCY RULES
 
 - Every feature that relies on previous geometry must declare `depends_on`.
-- If a feature uses a prior tag, list it under `consumes_tags`.
-- If a feature creates a reusable tag, list it under `produces_tags`.
+- Keep any geometric tags stable and document their use in the relevant function.
 - `build_model(params)` must orchestrate feature order explicitly.
 
 FINISHING RULES
@@ -275,7 +261,7 @@ Before finalizing, verify that:
 - `ModelParams` exists and uses `@dataclass(frozen=True)`
 - every important dimension is parameterized
 - every public feature has a `@cad_part(...)` decorator
-- every `@cad_part(...)` decorator contains all ten required fields in the required order
+- every `@cad_part(...)` decorator contains all six required fields in the required order
 - decorator metadata uses literal values only
 - every public feature has stable semantic naming
 - `build_model(params: ModelParams)` exists
