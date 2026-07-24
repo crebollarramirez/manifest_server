@@ -1,0 +1,16 @@
+name: geom
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - cadquery
+  - trimesh
+  - pymeshlab
+  - numpy
+  - scipy
+  - pip
+  - pip:
+      - supabase
+      - pydantic
+      - python-dotenv
+      - manifold3d

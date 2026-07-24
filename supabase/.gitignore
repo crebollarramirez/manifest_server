@@ -1,0 +1,17 @@
+# === Supabase Local Development ===
+# Core CLI temporary data and local DB states
+.supabase/
+supabase/.temp/
+
+# Edge Functions local secrets and dependencies
+supabase/functions/.env
+supabase/functions/*/.env
+supabase/functions/.import_map.json
+
+# Generated TypeScript types (Optional: remove if you want them tracked)
+supabase/functions/_shared/types.ts
+
+# === Environment Variables ===
+.env
+.env.local
+.env.*.local

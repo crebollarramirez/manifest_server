@@ -1,0 +1,18 @@
+name: manifest-cad-validator
+
+services:
+  cad-validator:
+    image: manifest-cad-validator:local
+    build:
+      context: ./
+      dockerfile: Dockerfile
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL_DOCKER:-http://host.docker.internal:54321}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?SUPABASE_SERVICE_ROLE_KEY is required}
+      CAD_VALIDATION_TIMEOUT_SECONDS: ${CAD_VALIDATION_TIMEOUT_SECONDS:-60}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./:/app
+    init: true
+    restart: unless-stopped

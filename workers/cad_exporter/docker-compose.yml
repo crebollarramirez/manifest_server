@@ -1,0 +1,15 @@
+services:
+  cad-worker:
+    image: manifest-cad-exporter:local
+    build:
+      context: ./
+      dockerfile: Dockerfile
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL_DOCKER:-http://host.docker.internal:54321}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      BLENDER_JOB_TIMEOUT_SECONDS: ${BLENDER_JOB_TIMEOUT_SECONDS:-300}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./:/app
+    restart: unless-stopped
