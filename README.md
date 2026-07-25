@@ -62,6 +62,26 @@ Stop it:
 docker compose -f workers/cad_exporter/docker-compose.yml down
 ```
 
+### CAD indexer worker
+
+The indexer uses `workers/indexer/.env`, connects to Supabase with the service
+role, and runs one worker process. It indexes only CAD parts and stores the
+project index at `<projectId>/index/semantic_index.json` in the `3dProjects`
+bucket. See the [indexer technical overview](workers/indexer/README.md) for
+the build, retrieval, and integration logic.
+
+Start it:
+
+```bash
+docker compose --env-file workers/indexer/.env -f workers/indexer/docker-compose.yml up --build
+```
+
+Stop it:
+
+```bash
+docker compose -f workers/indexer/docker-compose.yml down
+```
+
 ### CLI
 
 The terminal client talks to the local `cad-agent` function and loads variables from a repo-root `.env` file. At minimum, set:
@@ -96,10 +116,15 @@ Supported commands:
 - `/list -parts`: List parts in the current linked project.
 - `/export <partId>`: Queue a manual export job for a part by ID.
 - `/validate <partId>`: Queue a manual validation job for a part by ID.
+- `/index <projectId>`: Queue an index build for every CAD part in a project.
+- `/index -test <request>`: Test retrieval against the linked project's current index and print ranked matches plus focused context.
 - `/delete -project <name>`: Delete a project after confirmation.
 - `/delete -part <name>`: Delete a part in the current project after confirmation.
 - `exit` or `quit`: Close the CLI.
 - `<plain text>`: Send a normal chat message to the AI agent for the currently linked project and part.
+
+The Getter test rejects missing or stale indexes. Run `/index <projectId>`
+again after adding, deleting, renaming, or changing a CAD part.
 
 ### Optional: run validator tests without Docker
 

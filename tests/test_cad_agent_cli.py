@@ -61,6 +61,11 @@ class CommandParsingTests(unittest.TestCase):
             "/list -parts": ("list_parts", ""),
             f"/export {PART['id']}": ("export_part", PART["id"]),
             f"/validate {PART['id']}": ("validate_part", PART["id"]),
+            f"/index {PROJECT['id']}": ("index_project", PROJECT["id"]),
+            "/index -test make the mounting holes bigger": (
+                "test_index",
+                "make the mounting holes bigger",
+            ),
             "/delete -project Desk Mount": ("delete_project", "Desk Mount"),
             "/delete -part Left Bracket": ("delete_part", "Left Bracket"),
         }
@@ -81,6 +86,8 @@ class CommandParsingTests(unittest.TestCase):
             cad_agent_cli.parse_command("/export")
         with self.assertRaises(cad_agent_cli.CommandError):
             cad_agent_cli.parse_command(f"/validate {PART['id']} extra")
+        with self.assertRaises(cad_agent_cli.CommandError):
+            cad_agent_cli.parse_command("/index -test")
 
 
 class LinkedStateTests(unittest.TestCase):
@@ -242,6 +249,53 @@ class LinkedStateTests(unittest.TestCase):
         )
         self.assertIsNone(state.project)
         self.assertIsNone(state.part)
+
+    def test_index_build_and_getter_test_commands(self):
+        build_job_id = "88888888-8888-4888-8888-888888888888"
+        build_supabase = FakeSupabase([
+            {"message": f"Index job queued. Job: {build_job_id}"},
+        ])
+        build_message = cad_agent_cli.handle_command(
+            build_supabase,
+            cad_agent_cli.CliState(),
+            cad_agent_cli.parse_command(f"/index {PROJECT['id']}"),
+        )
+        self.assertIn(build_job_id, build_message)
+        self.assertEqual(
+            build_supabase.functions.calls[0][1]["body"],
+            {"action": "index_project", "project_id": PROJECT["id"]},
+        )
+
+        test_job_id = "99999999-9999-4999-8999-999999999999"
+        test_supabase = FakeSupabase([
+            {"message": "queued", "job_id": test_job_id},
+            {
+                "message": "completed",
+                "job": {
+                    "status": "completed",
+                    "result": {"status": "ok", "matches": []},
+                },
+            },
+        ])
+        state = cad_agent_cli.CliState(project=PROJECT.copy())
+        result = cad_agent_cli.handle_command(
+            test_supabase,
+            state,
+            cad_agent_cli.parse_command("/index -test make holes larger"),
+        )
+        self.assertIn('"status": "ok"', result)
+        self.assertEqual(
+            test_supabase.functions.calls[0][1]["body"],
+            {
+                "action": "test_index",
+                "project_id": PROJECT["id"],
+                "request_text": "make holes larger",
+            },
+        )
+        self.assertEqual(
+            test_supabase.functions.calls[1][1]["body"]["action"],
+            "get_index_job",
+        )
 
 
 class ChatTests(unittest.TestCase):

@@ -1,0 +1,18 @@
+name: manifest-indexer
+
+services:
+  indexer:
+    image: manifest-indexer:local
+    build:
+      context: ./
+      dockerfile: Dockerfile
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL_DOCKER:-http://host.docker.internal:54321}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?SUPABASE_SERVICE_ROLE_KEY is required}
+      INDEX_POLL_INTERVAL_SECONDS: ${INDEX_POLL_INTERVAL_SECONDS:-2}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./:/app
+    init: true
+    restart: unless-stopped

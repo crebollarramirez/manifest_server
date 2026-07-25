@@ -44,6 +44,9 @@ type Action =
   | "list_parts"
   | "export_part"
   | "validate_part"
+  | "index_project"
+  | "test_index"
+  | "get_index_job"
   | "delete_project"
   | "delete_part"
   | "chat";
@@ -55,6 +58,7 @@ type ChatMessage = {
 
 type PartType = "cad" | "mesh";
 type GenerationJobType = "validate_cad" | "export_cad" | "export_mesh";
+type IndexJobType = "build_index" | "test_getter";
 
 type PartConfig = {
   defaultModelBody: string;
@@ -127,6 +131,9 @@ function requestAction(body: Record<string, unknown>): Action {
     "list_parts",
     "export_part",
     "validate_part",
+    "index_project",
+    "test_index",
+    "get_index_job",
     "delete_project",
     "delete_part",
     "chat",
@@ -361,6 +368,21 @@ async function findProjectByName(
     : null;
 }
 
+async function findProjectById(
+  supabase: SupabaseClient,
+  projectId: string,
+): Promise<ProjectRecord | null> {
+  const { data, error } = await supabase
+    .from("projects")
+    .select("id, project_name")
+    .eq("id", projectId)
+    .maybeSingle();
+  if (error) {
+    throw new Error(`Project lookup failed: ${error.message}`);
+  }
+  return data as ProjectRecord | null;
+}
+
 async function findPartByName(
   supabase: SupabaseClient,
   projectId: string,
@@ -441,6 +463,52 @@ async function queueGenerationJob(
   return String(job.id);
 }
 
+async function queueIndexJob(
+  supabase: SupabaseClient,
+  projectId: string,
+  jobType: IndexJobType,
+  requestText: string | null = null,
+): Promise<{ id: string; status: string }> {
+  const { data: job, error } = await supabase
+    .from("index_jobs")
+    .insert({
+      project_id: projectId,
+      type: jobType,
+      request_text: requestText,
+      status: "queued",
+    })
+    .select("id, status")
+    .single();
+
+  if (!error && job?.id) {
+    return { id: String(job.id), status: String(job.status) };
+  }
+
+  if (jobType === "build_index" && error?.code === "23505") {
+    const { data: existing, error: lookupError } = await supabase
+      .from("index_jobs")
+      .select("id, status")
+      .eq("project_id", projectId)
+      .eq("type", "build_index")
+      .in("status", ["queued", "running"])
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (lookupError || !existing?.id) {
+      throw new Error(
+        `Could not resolve active index job: ${
+          lookupError?.message ?? "missing job"
+        }`,
+      );
+    }
+    return { id: String(existing.id), status: String(existing.status) };
+  }
+
+  throw new Error(
+    `Could not queue ${jobType} job: ${error?.message ?? "missing job id"}`,
+  );
+}
+
 async function currentCadSourceSha256(
   supabase: SupabaseClient,
   part: PartRecord,
@@ -494,18 +562,66 @@ async function cancelQueuedJobs(
   }
 }
 
+async function hasRunningIndexJobs(
+  supabase: SupabaseClient,
+  projectId: string,
+): Promise<boolean> {
+  const { data, error } = await supabase
+    .from("index_jobs")
+    .select("id")
+    .eq("project_id", projectId)
+    .eq("status", "running")
+    .limit(1);
+  if (error) {
+    throw new Error(`Could not inspect running index jobs: ${error.message}`);
+  }
+  return (data?.length ?? 0) > 0;
+}
+
+async function cancelQueuedIndexJobs(
+  supabase: SupabaseClient,
+  projectId: string,
+): Promise<void> {
+  const { error } = await supabase
+    .from("index_jobs")
+    .update({
+      status: "cancelled",
+      completed_at: new Date().toISOString(),
+    })
+    .eq("project_id", projectId)
+    .eq("status", "queued");
+  if (error) {
+    throw new Error(`Could not cancel queued index jobs: ${error.message}`);
+  }
+}
+
 async function prepareForDeletion(
   supabase: SupabaseClient,
   projectId: string,
   partId?: string,
 ): Promise<void> {
+  if (!partId && await hasRunningIndexJobs(supabase, projectId)) {
+    throw new RequestError(
+      "Deletion is blocked while an index job is running. Try again after it finishes.",
+      409,
+    );
+  }
   if (await hasRunningJobs(supabase, projectId, partId)) {
     throw new RequestError(
       "Deletion is blocked while an export job is running. Try again after it finishes.",
       409,
     );
   }
+  if (!partId) {
+    await cancelQueuedIndexJobs(supabase, projectId);
+  }
   await cancelQueuedJobs(supabase, projectId, partId);
+  if (!partId && await hasRunningIndexJobs(supabase, projectId)) {
+    throw new RequestError(
+      "Deletion is blocked because an index job started. Try again after it finishes.",
+      409,
+    );
+  }
   if (await hasRunningJobs(supabase, projectId, partId)) {
     throw new RequestError(
       "Deletion is blocked because an export job started. Try again after it finishes.",
@@ -817,6 +933,110 @@ async function handleValidatePart(
   };
 }
 
+async function requireProject(
+  supabase: SupabaseClient,
+  projectId: string,
+): Promise<ProjectRecord> {
+  const project = await findProjectById(supabase, projectId);
+  if (!project) {
+    throw new RequestError(
+      `No project was found with id "${projectId}".`,
+      404,
+    );
+  }
+  return project;
+}
+
+async function requireIndexableProject(
+  supabase: SupabaseClient,
+  projectId: string,
+): Promise<ProjectRecord> {
+  const project = await requireProject(supabase, projectId);
+  const { data, error } = await supabase
+    .from("parts")
+    .select("id")
+    .eq("project_id", projectId)
+    .eq("part_type", "cad")
+    .limit(1);
+  if (error) {
+    throw new Error(`Could not inspect project CAD parts: ${error.message}`);
+  }
+  if (!data?.length) {
+    throw new RequestError(
+      `Project "${project.project_name}" does not contain any CAD parts.`,
+      400,
+    );
+  }
+  return project;
+}
+
+async function handleIndexProject(
+  supabase: SupabaseClient,
+  body: Record<string, unknown>,
+): Promise<unknown> {
+  const projectId = requiredUuid(body, "project_id");
+  const project = await requireIndexableProject(supabase, projectId);
+  const job = await queueIndexJob(supabase, projectId, "build_index");
+  return {
+    message:
+      `Index job for project "${project.project_name}" is ${job.status}. Job: ${job.id}`,
+    status: job.status,
+    job_type: "build_index",
+    project_id: projectId,
+    job_id: job.id,
+  };
+}
+
+async function handleTestIndex(
+  supabase: SupabaseClient,
+  body: Record<string, unknown>,
+): Promise<unknown> {
+  const projectId = requiredUuid(body, "project_id");
+  const requestText = requiredName(body, "request_text");
+  const project = await requireProject(supabase, projectId);
+  const job = await queueIndexJob(
+    supabase,
+    projectId,
+    "test_getter",
+    requestText,
+  );
+  return {
+    message:
+      `Queued index Getter test for project "${project.project_name}". Job: ${job.id}`,
+    status: job.status,
+    job_type: "test_getter",
+    project_id: projectId,
+    job_id: job.id,
+  };
+}
+
+async function handleGetIndexJob(
+  supabase: SupabaseClient,
+  body: Record<string, unknown>,
+): Promise<unknown> {
+  const projectId = requiredUuid(body, "project_id");
+  const jobId = requiredUuid(body, "job_id");
+  const { data: job, error } = await supabase
+    .from("index_jobs")
+    .select(
+      "id, project_id, type, request_text, status, result, error_message, created_at, started_at, completed_at",
+    )
+    .eq("project_id", projectId)
+    .eq("id", jobId)
+    .maybeSingle();
+  if (error) {
+    throw new Error(`Could not inspect index job: ${error.message}`);
+  }
+  if (!job) {
+    throw new RequestError(`No index job was found with id "${jobId}".`, 404);
+  }
+  return {
+    message: `Index job ${jobId} is ${job.status}.`,
+    status: job.status,
+    job,
+  };
+}
+
 async function handleDeleteProject(
   supabase: SupabaseClient,
   body: Record<string, unknown>,
@@ -989,6 +1209,9 @@ Deno.serve(async (req) => {
       list_parts: () => handleListParts(supabase, body),
       export_part: () => handleExportPart(supabase, body),
       validate_part: () => handleValidatePart(supabase, body),
+      index_project: () => handleIndexProject(supabase, body),
+      test_index: () => handleTestIndex(supabase, body),
+      get_index_job: () => handleGetIndexJob(supabase, body),
       delete_project: () => handleDeleteProject(supabase, body),
       delete_part: () => handleDeletePart(supabase, body),
       chat: () => handleChat(supabase, body),

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -17,6 +19,8 @@ ROOT = Path(__file__).resolve().parent
 ENV_PATH = ROOT / ".env"
 SUPABASE_FUNCTION_NAME = "cad-agent"
 MAX_HISTORY_MESSAGES = 8
+INDEX_TEST_TIMEOUT_SECONDS = 60.0
+INDEX_TEST_POLL_INTERVAL_SECONDS = 0.5
 
 
 class CommandError(ValueError):
@@ -102,6 +106,10 @@ def parse_command(value: str) -> CliCommand:
         return CliCommand("export_part", "part", tokens[1])
     if verb == "/validate" and len(tokens) == 2:
         return CliCommand("validate_part", "part", tokens[1])
+    if verb == "/index" and len(tokens) >= 3 and tokens[1] == "-test":
+        return CliCommand("test_index", "index", _command_name(tokens, 2))
+    if verb == "/index" and len(tokens) == 2 and tokens[1] != "-test":
+        return CliCommand("index_project", "index", tokens[1])
     if verb == "/delete" and len(tokens) >= 3 and tokens[1] == "-project":
         return CliCommand("delete_project", "project", _command_name(tokens, 2))
     if verb == "/delete" and len(tokens) >= 3 and tokens[1] == "-part":
@@ -113,6 +121,7 @@ def parse_command(value: str) -> CliCommand:
         "`/link -project <name>`, "
         "`/link -part <name>`, `/list -projects`, `/list -parts`, "
         "`/export <partId>`, `/validate <partId>`, "
+        "`/index <projectId>`, `/index -test <request>`, "
         "`/delete -project <name>`, or "
         "`/delete -part <name>`."
     )
@@ -196,11 +205,71 @@ def confirm_delete(
     return answer == "y"
 
 
+def response_job_id(payload: dict[str, Any]) -> str:
+    job_id = payload.get("job_id")
+    if not isinstance(job_id, str):
+        raise RuntimeError("Supabase response must include a string `job_id` field.")
+    return job_id
+
+
+def wait_for_index_job(
+    supabase: Any,
+    project_id: str,
+    job_id: str,
+    *,
+    timeout_seconds: float = INDEX_TEST_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = INDEX_TEST_POLL_INTERVAL_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> str:
+    deadline = monotonic() + timeout_seconds
+    while True:
+        payload = invoke_action(
+            supabase,
+            {
+                "action": "get_index_job",
+                "project_id": project_id,
+                "job_id": job_id,
+            },
+        )
+        job = payload.get("job")
+        if not isinstance(job, dict):
+            raise RuntimeError("Supabase response must include an index job object.")
+        status = job.get("status")
+        if not isinstance(status, str):
+            raise RuntimeError("Index job response must include a string status.")
+
+        if status == "completed":
+            result = job.get("result")
+            if not isinstance(result, dict):
+                raise RuntimeError("Completed index job must include a JSON result.")
+            return (
+                f"Index Getter test completed. Job: {job_id}\n"
+                f"{json.dumps(result, indent=2, sort_keys=True)}"
+            )
+        if status in {"failed", "cancelled"}:
+            error = job.get("error_message")
+            detail = error if isinstance(error, str) and error else "No error detail."
+            return f"Index Getter test {status}. Job: {job_id}\n{detail}"
+
+        now = monotonic()
+        if now >= deadline:
+            return (
+                f"Index Getter test is still {status} after "
+                f"{timeout_seconds:g} seconds. Job: {job_id}"
+            )
+        sleep(min(poll_interval_seconds, deadline - now))
+
+
 def handle_command(
     supabase: Any,
     state: CliState,
     command: CliCommand,
     read_input: Callable[[str], str] = input,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+    index_timeout_seconds: float = INDEX_TEST_TIMEOUT_SECONDS,
 ) -> str:
     if command.action == "create_project":
         payload = invoke_action(
@@ -228,6 +297,34 @@ def handle_command(
             {"action": command.action, "part_id": command.name},
         )
         return response_message(payload)
+
+    if command.action == "index_project":
+        payload = invoke_action(
+            supabase,
+            {"action": "index_project", "project_id": command.name},
+        )
+        return response_message(payload)
+
+    if command.action == "test_index":
+        if not state.project:
+            raise CommandError("A linked project is required to test the index.")
+        payload = invoke_action(
+            supabase,
+            {
+                "action": "test_index",
+                "project_id": state.project["id"],
+                "request_text": command.name,
+            },
+        )
+        job_id = response_job_id(payload)
+        return wait_for_index_job(
+            supabase,
+            state.project["id"],
+            job_id,
+            timeout_seconds=index_timeout_seconds,
+            sleep=sleep,
+            monotonic=monotonic,
+        )
 
     if command.action in {"create_part", "link_part", "list_parts", "delete_part"}:
         if not state.project:
@@ -331,9 +428,7 @@ def send_chat(supabase: Any, state: CliState, user_message: str) -> tuple[str, s
         },
     )
     message = response_message(payload)
-    job_id = payload.get("job_id")
-    if not isinstance(job_id, str):
-        raise RuntimeError("Supabase response must include a string `job_id` field.")
+    job_id = response_job_id(payload)
 
     state.history = [
         *request_messages,
@@ -357,6 +452,8 @@ def main() -> int:
     print("Use /create or /link to select a project and CAD or mesh part.")
     print("Use /list -projects or /list -parts to see available links.")
     print("Use /export <partId> or /validate <partId> to queue manual jobs.")
+    print("Use /index <projectId> to index CAD parts in a project.")
+    print("Use /index -test <request> to test the linked project's Getter.")
     print("Type `exit` or `quit` to stop.\n")
 
     while True:

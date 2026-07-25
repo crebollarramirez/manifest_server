@@ -25,6 +25,13 @@ class WorkerComposeContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn('CMD ["python", "cad_validation_worker.py"]', dockerfile)
 
+        indexer = (
+            ROOT / "workers" / "indexer" / "docker-compose.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("name: manifest-indexer", indexer)
+        self.assertEqual(indexer.count("\n  indexer:\n"), 1)
+        self.assertNotIn("getter:", indexer)
+
 
 if __name__ == "__main__":
     unittest.main()
