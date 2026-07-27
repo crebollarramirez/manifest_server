@@ -1,0 +1,325 @@
+{
+  "id": "backend-system-overview",
+  "title": "Backend System Design Overview",
+  "summary": "The top backend layer: a Supabase Edge Function validates API actions, manages project resources, creates durable worker jobs, serves status reads, and handles the direct mesh-generation path.",
+  "scope": "system",
+  "direction": "RIGHT",
+  "nodes": [
+    {
+      "id": "api-clients",
+      "label": "API Clients",
+      "description": "CLI and other HTTP callers that submit action-based JSON requests and consume immediate responses.",
+      "type": "client",
+      "icon": "terminal",
+      "foundation": true,
+      "position": { "column": 0, "row": 1 },
+      "mobileOrder": 1,
+      "details": {
+        "responsibility": "Choose an API action, supply its JSON fields, and retain returned project, part, or job identifiers.",
+        "inputs": [
+          { "name": "HTTP response", "description": "Immediate result, durable job reference, current job state, or error." }
+        ],
+        "outputs": [
+          { "name": "POST request", "description": "A JSON object with one of the cad-agent action names." }
+        ],
+        "evidence": [
+          { "path": "cad_agent_cli.py", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "cad-agent",
+      "label": "cad-agent",
+      "description": "The current Supabase Edge Function and top-level backend API for project, part, job, status, deletion, and chat actions.",
+      "type": "api",
+      "icon": "api",
+      "position": { "column": 1, "row": 1 },
+      "mobileOrder": 2,
+      "details": {
+        "responsibility": "Validate one action-based POST request, run its request-scoped orchestration, and return a JSON response.",
+        "ownedBy": "Manifest backend",
+        "runsIn": "Supabase Deno Edge Runtime",
+        "trigger": ["An HTTP POST request reaches the cad-agent function."],
+        "preconditions": [
+          "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be configured.",
+          "OPENAI_API_KEY is required only for direct mesh chat generation.",
+          "Gateway JWT verification is currently disabled for this function."
+        ],
+        "inputs": [
+          { "name": "action request", "description": "One of 15 supported actions plus action-specific names, UUIDs, messages, or request text." }
+        ],
+        "outputs": [
+          { "name": "JSON response", "description": "Synchronous resource data, a queued job ID, status details, or a typed HTTP error." }
+        ],
+        "decisionPoints": [
+          "Project and part actions perform direct catalog CRUD and storage lifecycle work.",
+          "CAD part creation initializes blank source and also queues build_index; explicit index, validation, export, and CAD chat actions create durable database jobs and return immediately.",
+          "Mesh chat is the only path that calls OpenAI and replaces model.py directly in this function."
+        ],
+        "shortCircuit": "Non-POST requests return 405; invalid bodies, actions, names, UUIDs, or unsupported part operations return request errors before the handler completes.",
+        "operations": {
+          "concurrency": "The Edge Runtime may execute independent requests concurrently; the function keeps no process-local workflow state.",
+          "retry": "No request-level retry is implemented. Active build-index insertion can resolve and return an existing queued/running job after a uniqueness conflict.",
+          "observability": ["HTTP status and JSON error message", "returned project/part/job IDs", "durable job state read through status actions"],
+          "controls": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "OPENAI_API_KEY", "OPENAI_MODEL"]
+        },
+        "evidence": [
+          { "path": "supabase/functions/cad-agent/index.ts", "symbol": "Deno.serve / handlers", "kind": "source" },
+          { "path": "supabase/config.toml", "symbol": "functions.cad-agent", "kind": "configuration" }
+        ]
+      }
+    },
+    {
+      "id": "project-catalog",
+      "label": "Project Catalog",
+      "description": "Postgres projects and parts tables holding project identity, part identity, names, and CAD/mesh type.",
+      "type": "database",
+      "icon": "database",
+      "foundation": true,
+      "position": { "column": 2, "row": 0 },
+      "mobileOrder": 3,
+      "details": {
+        "responsibility": "Durably own projects and their CAD or mesh part records.",
+        "ownedBy": "Postgres projects and parts",
+        "durableReads": ["project and part lookup by ID or name", "ordered project and part lists", "part type used to select validation/export/chat behavior"],
+        "durableWrites": ["project insert/delete", "part insert/delete"],
+        "evidence": [
+          { "path": "supabase/migrations/20260712000000_create_generation_jobs.sql", "symbol": "projects / parts", "kind": "migration" },
+          { "path": "supabase/functions/cad-agent/index.ts", "symbol": "handleCreateProject / handleCreatePart / handleDeleteProject / handleDeletePart", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "job-tables",
+      "label": "Workflow Job Tables",
+      "description": "Postgres index_jobs, generation_jobs, and edit_jobs rows used for asynchronous index, validation, export, retrieval-test, and CAD-edit work.",
+      "type": "database",
+      "icon": "database",
+      "foundation": true,
+      "position": { "column": 2, "row": 1 },
+      "mobileOrder": 4,
+      "details": {
+        "responsibility": "Durably own queued work and expose job status/results without the Edge Function calling workers directly.",
+        "ownedBy": "Postgres index_jobs, generation_jobs, and edit_jobs",
+        "inputs": [
+          { "name": "index work", "description": "build_index or test_getter row." },
+          { "name": "generation work", "description": "validate_cad, export_cad, or export_mesh row." },
+          { "name": "edit work", "description": "An initial_design request bound to a linked blank CAD part; an established linked request with requested_part_id; or an unlinked project-resolved request with up to eight normalized messages." }
+        ],
+        "outputs": [
+          { "name": "job reference", "description": "Durable UUID and initial status." },
+          { "name": "status record", "description": "Selected index or edit job fields safe for the API response." }
+        ],
+        "durableWrites": ["automatic build_index row during CAD part creation", "explicitly queued job rows", "queued-job cancellation during deletion preparation"],
+        "downstream": ["Independent workers claim these rows outside the Edge Function layer."],
+        "evidence": [
+          { "path": "supabase/functions/cad-agent/index.ts", "symbol": "queueGenerationJob / queueIndexJob / queueEditJob", "kind": "source" },
+          { "path": "supabase/migrations/20260724000000_add_index_jobs.sql", "symbol": "index_jobs", "kind": "migration" },
+          { "path": "supabase/migrations/20260725000000_add_cad_edit_workflow.sql", "symbol": "edit_jobs", "kind": "migration" },
+          { "path": "supabase/migrations/20260726000000_add_initial_cad_design.sql", "symbol": "workflow_mode", "kind": "migration" },
+          { "path": "supabase/migrations/20260726010000_add_requested_cad_part.sql", "symbol": "requested_part_id", "kind": "migration" }
+        ]
+      }
+    },
+    {
+      "id": "project-storage",
+      "label": "3dProjects Storage",
+      "description": "Private object storage for part source, generated exports, edit candidates, and project index artifacts.",
+      "type": "storage",
+      "icon": "object-storage",
+      "contents": ["model.py", "params.json", "exports", "candidates", "semantic_index.json"],
+      "foundation": true,
+      "position": { "column": 2, "row": 2 },
+      "mobileOrder": 5,
+      "details": {
+        "responsibility": "Durably own project files manipulated or inspected by top-layer API actions.",
+        "ownedBy": "Supabase Storage bucket 3dProjects",
+        "durableReads": ["CAD model.py for source SHA-256 and exact blank-part detection", "mesh model.py for direct chat generation", "recursive object listings for deletion"],
+        "durableWrites": ["blank CAD model.py containing only the system runtime import and params.json during CAD part creation", "mesh starter source and params.json during mesh part creation", "replacement mesh model.py", "recursive project/part source, export, and candidate deletion"],
+        "failureConditions": [
+          { "condition": "Part source initialization fails", "outcome": "The function attempts to remove the source prefix and delete the new parts row." },
+          { "condition": "A later cross-resource step fails", "outcome": "Database and storage changes are not covered by one transaction." }
+        ],
+        "evidence": [
+          { "path": "supabase/functions/cad-agent/index.ts", "symbol": "createPartFiles / uploadText / deleteStoragePrefix", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "openai",
+      "label": "OpenAI Responses API",
+      "description": "External structured-output dependency used only when chat targets a linked mesh part.",
+      "type": "external",
+      "icon": "external",
+      "foundation": true,
+      "position": { "column": 1, "row": 3 },
+      "mobileOrder": 6,
+      "details": {
+        "responsibility": "Return a strict generated_code string containing the complete replacement mesh model body.",
+        "ownedBy": "OpenAI",
+        "inputs": [
+          { "name": "mesh conversation", "description": "At most eight normalized messages plus the current mesh model.py source." }
+        ],
+        "outputs": [
+          { "name": "model_agent_response", "description": "Strict JSON schema with one non-empty generated_code field." }
+        ],
+        "shortCircuit": "Empty output, invalid JSON, missing code, or a status-only value fails the HTTP request before storage replacement.",
+        "operations": {
+          "retry": "No Edge Function retry is implemented.",
+          "controls": ["OPENAI_MODEL defaults to gpt-5.4-mini."]
+        },
+        "evidence": [
+          { "path": "supabase/functions/cad-agent/index.ts", "symbol": "handleChat / RESPONSE_SCHEMA", "kind": "source" }
+        ]
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "client-request",
+      "source": "api-clients",
+      "target": "cad-agent",
+      "label": "action request",
+      "protocol": "http",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": {
+        "label": "action-specific JSON body",
+        "type": "POST /functions/v1/cad-agent",
+        "exampleBody": "{\"action\":\"index_project\",\"project_id\":\"00000000-0000-4000-8000-000000000001\"}"
+      },
+      "response": {
+        "label": "immediate result or durable job reference",
+        "type": "JSON HTTP response",
+        "exampleBody": "{\"status\":\"queued\",\"job_type\":\"build_index\",\"job_id\":\"00000000-0000-4000-8000-000000000002\"}"
+      },
+      "details": {
+        "summary": "Every public operation enters through the single action router and completes within one HTTP request.",
+        "preconditions": ["Request method is POST and the body is a JSON object with a supported action."],
+        "failureBehavior": "RequestError responses preserve their 400, 404, or 409 status; other errors return 500 with a JSON error field.",
+        "trustBoundary": "Supabase gateway JWT verification is disabled in config; the function itself creates a service-role Supabase client for every accepted request.",
+        "evidence": [
+          { "path": "supabase/functions/cad-agent/index.ts", "symbol": "Deno.serve / requestAction", "kind": "source" },
+          { "path": "supabase/config.toml", "symbol": "functions.cad-agent.verify_jwt", "kind": "configuration" }
+        ]
+      }
+    },
+    {
+      "id": "catalog-operations",
+      "source": "cad-agent",
+      "target": "project-catalog",
+      "label": "project and part CRUD",
+      "protocol": "database",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": {
+        "label": "insert, lookup, list, or delete",
+        "type": "PostgREST query or lookup RPC",
+        "exampleBody": "{\"action\":\"create_part\",\"project_id\":\"project-uuid\",\"part_name\":\"Bracket\",\"part_type\":\"cad\"}"
+      },
+      "response": {
+        "label": "project or part records",
+        "type": "projects / parts rows",
+        "exampleBody": "{\"id\":\"part-uuid\",\"project_id\":\"project-uuid\",\"part_name\":\"Bracket\",\"part_type\":\"cad\"}"
+      },
+      "details": {
+        "summary": "The Edge Function initiates every catalog read and write.",
+        "failureBehavior": "Duplicate names return 409 and missing resources return 404; backend query errors become HTTP 500.",
+        "evidence": [
+          { "path": "supabase/functions/cad-agent/index.ts", "symbol": "handleCreateProject / handleCreatePart / handleListProjects / handleListParts", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "job-operations",
+      "source": "cad-agent",
+      "target": "job-tables",
+      "label": "queue, inspect, or cancel durable work",
+      "protocol": "database",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": {
+        "label": "job insert, status select, or queued cancellation",
+        "type": "PostgREST table operation",
+        "exampleBody": "{\"type\":\"validate_cad\",\"part_id\":\"part-uuid\",\"status\":\"queued\",\"source_sha256\":\"…\"}"
+      },
+      "response": {
+        "label": "job ID, current state, or acknowledgement",
+        "type": "index_jobs / generation_jobs / edit_jobs data",
+        "exampleBody": "{\"id\":\"job-uuid\",\"status\":\"queued\"}"
+      },
+      "details": {
+        "summary": "The Edge Function creates durable handoffs and reads their state; it does not synchronously invoke a worker.",
+        "durability": "Accepted index, validation, export, Getter-test, and CAD-edit actions remain represented by database rows after the HTTP response.",
+        "failureBehavior": "Most failed inserts or lookups fail the request. If only automatic indexing fails after CAD creation, the part remains and the response reports index_status=not_queued with a manual /index warning. Deletion preparation cancels queued rows but blocks while applicable work is running.",
+        "evidence": [
+          { "path": "supabase/functions/cad-agent/index.ts", "symbol": "queueGenerationJob / queueIndexJob / queueEditJob / prepareForDeletion", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "storage-operations",
+      "source": "cad-agent",
+      "target": "project-storage",
+      "label": "initialize, read, replace, or delete project files",
+      "protocol": "storage",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": {
+        "label": "object upload, download, list, or remove",
+        "type": "Supabase Storage operation",
+        "exampleBody": "{\"bucket\":\"3dProjects\",\"path\":\"project/parts/cad/part/model.py\"}"
+      },
+      "response": {
+        "label": "stored object data or operation result",
+        "type": "Supabase Storage response",
+        "exampleBody": "{\"success\":true}"
+      },
+      "details": {
+        "summary": "The Edge Function initiates every storage operation; storage never initiates a request.",
+        "operation": "Create blank CAD or mesh starter files, detect an exact blank CAD source for initial design, hash accepted CAD source, read/replace mesh source, and recursively remove project or part prefixes.",
+        "durability": "Mesh chat replaces model.py before its export job insert. Those two effects are not atomic.",
+        "failureBehavior": "A storage error fails the request. Part creation attempts compensating storage and database cleanup.",
+        "evidence": [
+          { "path": "supabase/functions/cad-agent/index.ts", "symbol": "uploadText / downloadModelSource / deleteStoragePrefix", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "mesh-generation",
+      "source": "cad-agent",
+      "target": "openai",
+      "label": "mesh source generation exchange",
+      "protocol": "http",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": {
+        "label": "conversation and current mesh model.py",
+        "type": "Responses API JSON-schema request",
+        "exampleBody": "{\"messages\":[{\"role\":\"user\",\"content\":\"Make the bracket wider\"}],\"current_model_source\":\"…\"}"
+      },
+      "response": {
+        "label": "complete replacement mesh body",
+        "type": "model_agent_response",
+        "exampleBody": "{\"generated_code\":\"def build_model(params):\\n    ...\"}"
+      },
+      "details": {
+        "summary": "Only linked mesh chat takes this direct synchronous AI path. CAD chat queues edit_jobs instead.",
+        "trustBoundary": "Current mesh model.py and recent conversation cross to the external API.",
+        "failureBehavior": "Any API or response-contract failure returns HTTP 500 and leaves model.py unchanged.",
+        "evidence": [
+          { "path": "supabase/functions/cad-agent/index.ts", "symbol": "handleChat / buildResponseInput / generatedModelBody", "kind": "source" }
+        ]
+      }
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "edge-function-layer",
+      "label": "Supabase Edge Functions",
+      "kind": "service",
+      "description": "The current top backend layer contains one deployed request-scoped function.",
+      "nodeIds": ["cad-agent"]
+    }
+  ]
+}

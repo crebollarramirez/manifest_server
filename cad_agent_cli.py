@@ -110,6 +110,8 @@ def parse_command(value: str) -> CliCommand:
         return CliCommand("test_index", "index", _command_name(tokens, 2))
     if verb == "/index" and len(tokens) == 2 and tokens[1] != "-test":
         return CliCommand("index_project", "index", tokens[1])
+    if verb == "/edit-status" and len(tokens) == 2:
+        return CliCommand("get_edit_job", "edit", tokens[1])
     if verb == "/delete" and len(tokens) >= 3 and tokens[1] == "-project":
         return CliCommand("delete_project", "project", _command_name(tokens, 2))
     if verb == "/delete" and len(tokens) >= 3 and tokens[1] == "-part":
@@ -122,6 +124,7 @@ def parse_command(value: str) -> CliCommand:
         "`/link -part <name>`, `/list -projects`, `/list -parts`, "
         "`/export <partId>`, `/validate <partId>`, "
         "`/index <projectId>`, `/index -test <request>`, "
+        "`/edit-status <jobId>`, "
         "`/delete -project <name>`, or "
         "`/delete -part <name>`."
     )
@@ -210,6 +213,21 @@ def response_job_id(payload: dict[str, Any]) -> str:
     if not isinstance(job_id, str):
         raise RuntimeError("Supabase response must include a string `job_id` field.")
     return job_id
+
+
+def format_edit_job(payload: dict[str, Any]) -> str:
+    job = payload.get("job")
+    if not isinstance(job, dict):
+        raise RuntimeError("Supabase response must include a CAD edit job object.")
+    job_id = job.get("id")
+    status = job.get("status")
+    state = job.get("state")
+    if not all(isinstance(value, str) for value in (job_id, status, state)):
+        raise RuntimeError("CAD edit job response is malformed.")
+    return (
+        f"CAD edit job {job_id}: {status} ({state})\n"
+        f"{json.dumps(job, indent=2, sort_keys=True)}"
+    )
 
 
 def wait_for_index_job(
@@ -304,6 +322,13 @@ def handle_command(
             {"action": "index_project", "project_id": command.name},
         )
         return response_message(payload)
+
+    if command.action == "get_edit_job":
+        payload = invoke_action(
+            supabase,
+            {"action": "get_edit_job", "job_id": command.name},
+        )
+        return format_edit_job(payload)
 
     if command.action == "test_index":
         if not state.project:
@@ -411,21 +436,23 @@ def handle_command(
 
 
 def send_chat(supabase: Any, state: CliState, user_message: str) -> tuple[str, str]:
-    if not state.project or not state.part:
-        raise CommandError("Link a project and part before sending AI messages.")
+    if not state.project:
+        raise CommandError("Link a project before sending AI messages.")
 
     request_messages = [
         *state.history[-(MAX_HISTORY_MESSAGES - 1):],
         {"role": "user", "content": user_message},
     ]
+    body: dict[str, Any] = {
+        "action": "chat",
+        "project_id": state.project["id"],
+        "messages": request_messages,
+    }
+    if state.part and state.part.get("part_type") == "mesh":
+        body["part_id"] = state.part["id"]
     payload = invoke_action(
         supabase,
-        {
-            "action": "chat",
-            "project_id": state.project["id"],
-            "part_id": state.part["id"],
-            "messages": request_messages,
-        },
+        body,
     )
     message = response_message(payload)
     job_id = response_job_id(payload)
@@ -454,6 +481,8 @@ def main() -> int:
     print("Use /export <partId> or /validate <partId> to queue manual jobs.")
     print("Use /index <projectId> to index CAD parts in a project.")
     print("Use /index -test <request> to test the linked project's Getter.")
+    print("Use /edit-status <jobId> to inspect a CAD edit workflow.")
+    print("CAD requests require a project; mesh requests require a linked mesh part.")
     print("Type `exit` or `quit` to stop.\n")
 
     while True:

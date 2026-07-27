@@ -1,0 +1,161 @@
+---
+import ArchitecturePage from '../../components/ArchitecturePage.astro';
+import BoundaryMatrix from '../../components/service-docs/BoundaryMatrix.astro';
+import FailureMatrix from '../../components/service-docs/FailureMatrix.astro';
+import KeyGuarantees from '../../components/service-docs/KeyGuarantees.astro';
+import ModeMatrix from '../../components/service-docs/ModeMatrix.astro';
+import OperationsAndSource from '../../components/service-docs/OperationsAndSource.astro';
+import ServiceAtGlance from '../../components/service-docs/ServiceAtGlance.astro';
+import cadExporter from '../../data/architecture/cad-exporter.json';
+import '../../styles/service-docs.css';
+
+const glance = [
+	{ label: 'Trigger', value: 'Queued export_cad or export_mesh generation job' },
+	{ label: 'Reads', value: 'Current model.py and params.json from the matching CAD or mesh part prefix' },
+	{ label: 'Produces', value: 'STEP/STL for CAD or STL/GLB for mesh' },
+	{ label: 'Executes source', value: 'CAD inside the worker process; mesh inside a sanitized Blender subprocess' },
+	{ label: 'Publishes to', value: '3dProjects <project>/exports/<part>/ objects using sequential upserts' },
+	{ label: 'Durable state', value: 'Export objects and generation_jobs terminal status' },
+];
+
+const modes = [
+	{
+		name: 'export_cad',
+		source: 'parts/cad/<part>/model.py and params.json.',
+		success: 'Imports source in the worker, constructs ModelParams, builds the model, then upserts model.step followed by model.stl.',
+		downstream: 'Marks the job completed only after both upload calls return.',
+	},
+	{
+		name: 'export_mesh',
+		source: 'parts/mesh/<part>/model.py and params.json.',
+		success: 'Runs Blender, validates local STL/GLB output and STL geometry, then upserts model.stl followed by model.glb.',
+		downstream: 'Marks the job completed only after validation and both upload calls return.',
+	},
+];
+
+const guarantees = [
+	{
+		title: 'Supported claims are atomic',
+		description: 'Postgres selects the oldest queued supported row with FOR UPDATE SKIP LOCKED and changes it to running before return.',
+		evidence: 'supabase/migrations/20260716000000_add_mesh_export_jobs.sql',
+	},
+	{
+		title: 'Hash-bound CAD jobs reject newer source',
+		description: 'When export_cad supplies source_sha256, staged model.py must match it or the job is cancelled before execution and upload.',
+		evidence: 'workers/cad_exporter/run_export_job.py — verify_source_hash',
+	},
+	{
+		title: 'Mesh output is checked before publication',
+		description: 'Both files must be non-empty and the STL must pass structural, finite-geometry, extent, and face-area checks before upload starts.',
+		evidence: 'workers/cad_exporter/run_export_job.py — validate_mesh_artifacts',
+	},
+	{
+		title: 'Blender execution is bounded',
+		description: 'The subprocess uses factory startup, a sanitized environment, job-local HOME/TMPDIR, and a configurable positive timeout.',
+		evidence: 'workers/cad_exporter/run_export_job.py — run_blender',
+	},
+	{
+		title: 'Temporary workspaces are removed',
+		description: 'The complete /tmp/jobs/<job-id> directory is removed before processing and again in a finally block.',
+		evidence: 'workers/cad_exporter/run_export_job.py — run_export_job',
+	},
+];
+
+const failures = [
+	{
+		condition: 'Supplied CAD source hash differs',
+		durableOutcome: 'Job cancelled with source_superseded result and error message.',
+		runtime: 'CAD source does not execute.',
+		downstream: 'No new upload is attempted; existing exports remain.',
+	},
+	{
+		condition: 'CAD import, build, or local export fails',
+		durableOutcome: 'Job failed with the first 4,000 traceback characters.',
+		runtime: 'Runs in the worker process until failure.',
+		downstream: 'No later operation runs; no upload occurs unless failure happened during upload.',
+	},
+	{
+		condition: 'Blender missing, timed out, or exited non-zero',
+		durableOutcome: 'Job failed with bounded persisted traceback text.',
+		runtime: 'Subprocess did not complete successfully.',
+		downstream: 'Mesh checks and uploads do not run.',
+	},
+	{
+		condition: 'Mesh artifact validation fails',
+		durableOutcome: 'Job failed with bounded persisted traceback text.',
+		runtime: 'Blender completed.',
+		downstream: 'Neither generated mesh file is uploaded.',
+	},
+	{
+		condition: 'Second artifact upload fails',
+		durableOutcome: 'Job failed.',
+		runtime: 'The build path completed.',
+		downstream: 'The first object may already be upserted; no rollback is implemented.',
+	},
+	{
+		condition: 'Claim request fails',
+		durableOutcome: 'No per-job terminal update is attempted by this process.',
+		runtime: 'No export starts.',
+		downstream: 'The unhandled claim exception terminates the worker process.',
+	},
+];
+---
+
+<ArchitecturePage
+	title="CAD Exporter"
+	summary="A polling generation worker that executes current CAD or mesh source, sequentially upserts its export artifacts, and records the terminal job status."
+	section="Service view"
+	active="cad-exporter"
+	document={cadExporter}
+	fallback="Loading the CAD Exporter diagram…"
+	showExampleNotice={false}
+	sidebarNote="Production generation worker: in-process CadQuery export, bounded Blender execution, mesh validation, sequential object upserts, and terminal generation-job state."
+>
+	<div slot="beforeDiagram">
+		<ServiceAtGlance items={glance} />
+
+		<article class="doc-prose">
+			<h2>Purpose and boundaries</h2>
+			<p>The CAD Exporter claims <code>export_cad</code> and <code>export_mesh</code> rows, stages the current source, executes the selected model contract, publishes path-specific artifacts, and writes the terminal job status. It processes one job at a time per worker process.</p>
+			<p>It does not edit or validate candidate source, schedule its own jobs, provide multi-file publication transactions, or retain durable state outside <code>generation_jobs</code> and 3dProjects storage.</p>
+		</article>
+
+		<BoundaryMatrix
+			owns={[
+				'Active export execution and the job-local temporary workspace.',
+				'CadQuery and Blender export orchestration.',
+				'Mesh artifact validation, storage upload calls, and terminal status update.',
+			]}
+			doesNotOwn={[
+				'Source editing, candidate validation, or export-job scheduling.',
+				'Atomic publication or rollback across multiple artifact objects.',
+				'Durable source, artifacts, or lifecycle state outside external stores.',
+			]}
+			dependsOn={[
+				'generation_jobs claim and update operations.',
+				'3dProjects CAD/mesh source and export storage.',
+				'CadQuery in the worker image and Blender for export_mesh.',
+			]}
+		/>
+	</div>
+
+	<ModeMatrix title="CAD versus mesh export" modes={modes} />
+	<KeyGuarantees items={guarantees} />
+	<FailureMatrix items={failures} />
+	<OperationsAndSource
+		facts={[
+			{ label: 'Polling', value: 'An empty claim sleeps for two seconds; one job runs at a time per process.' },
+			{ label: 'CAD execution', value: 'Runs inline in the worker process with no configured timeout or per-job retry.' },
+			{ label: 'Blender timeout', value: '300 seconds by default through BLENDER_JOB_TIMEOUT_SECONDS; BLENDER_BIN selects the executable.' },
+			{ label: 'Publication', value: 'Artifact uploads use upsert=true and occur sequentially without cross-object rollback.' },
+			{ label: 'Observe', value: 'Claim failures, cancellations, tracebacks, Blender timeout/non-zero output, mesh validation failures, storage errors, and terminal update failures.' },
+		]}
+		sources={[
+			{ path: 'workers/cad_exporter/cad_worker.py', symbol: 'main / claim_next_job / mark_*', description: 'Polling, job dispatch, outcome classification, logging, and terminal generation_jobs updates.' },
+			{ path: 'workers/cad_exporter/run_export_job.py', symbol: 'run_export_job / run_cad_export_job / run_mesh_export_job', description: 'Workspace lifecycle, source staging, both export paths, validation, and uploads.' },
+			{ path: 'workers/cad_exporter/blender_export_runner.py', symbol: 'main / collect_export_objects', description: 'Blender model contract, selected-object traversal, STL export, and GLB export.' },
+			{ path: 'workers/cad_exporter/blender_runtime.py', symbol: 'prepare_scene', description: 'Blender scene reset, generated-model collection, and metric unit setup.' },
+			{ path: 'supabase/migrations/20260716000000_add_mesh_export_jobs.sql', symbol: 'claim_next_supported_generation_job', description: 'Supported-type atomic claim semantics.' },
+		]}
+	/>
+</ArchitecturePage>

@@ -1,6 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import OpenAI from "openai";
-import { DEFAULT_MODEL_BODY } from "./model_template.ts";
 import { DEFAULT_MESH_MODEL_BODY } from "./mesh_model_template.ts";
 import { MESH_SYSTEM_PROMPT } from "./mesh_prompt.ts";
 import { SYSTEM_PROMPT } from "./prompt.ts";
@@ -13,7 +12,6 @@ const STORAGE_DELETE_BATCH_SIZE = 100;
 const JSON_HEADERS = { "Content-Type": "application/json" };
 const CAD_MODEL_RUNTIME_IMPORT =
   "from cadquery_runtime import cad_part, cq, dataclass";
-const CAD_MODEL_DATACLASS_IMPORT = "from dataclasses import dataclass";
 const MESH_MODEL_RUNTIME_IMPORT =
   "from blender_runtime import bpy, bmesh, dataclass, Vector, Matrix, Euler, mesh_part, mm, get_or_create_collection, link_object";
 const UUID_PATTERN =
@@ -47,6 +45,7 @@ type Action =
   | "index_project"
   | "test_index"
   | "get_index_job"
+  | "get_edit_job"
   | "delete_project"
   | "delete_part"
   | "chat";
@@ -61,7 +60,6 @@ type GenerationJobType = "validate_cad" | "export_cad" | "export_mesh";
 type IndexJobType = "build_index" | "test_getter";
 
 type PartConfig = {
-  defaultModelBody: string;
   instructions: string;
   jobType: "validate_cad" | "export_mesh";
   runtimeImports: string[];
@@ -81,13 +79,11 @@ type PartRecord = {
 
 const PART_CONFIGS: Record<PartType, PartConfig> = {
   cad: {
-    defaultModelBody: DEFAULT_MODEL_BODY,
     instructions: SYSTEM_PROMPT,
     jobType: "validate_cad",
-    runtimeImports: [CAD_MODEL_RUNTIME_IMPORT, CAD_MODEL_DATACLASS_IMPORT],
+    runtimeImports: [CAD_MODEL_RUNTIME_IMPORT],
   },
   mesh: {
-    defaultModelBody: DEFAULT_MESH_MODEL_BODY,
     instructions: MESH_SYSTEM_PROMPT,
     jobType: "export_mesh",
     runtimeImports: [MESH_MODEL_RUNTIME_IMPORT],
@@ -134,6 +130,7 @@ function requestAction(body: Record<string, unknown>): Action {
     "index_project",
     "test_index",
     "get_index_job",
+    "get_edit_job",
     "delete_project",
     "delete_part",
     "chat",
@@ -160,6 +157,23 @@ function requiredUuid(body: Record<string, unknown>, field: string): string {
   if (typeof value !== "string" || !UUID_PATTERN.test(value)) {
     throw new RequestError(
       `Request body must include valid UUID \`${field}\`.`,
+      400,
+    );
+  }
+  return value;
+}
+
+function optionalUuid(
+  body: Record<string, unknown>,
+  field: string,
+): string | null {
+  const value = body[field];
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+  if (typeof value !== "string" || !UUID_PATTERN.test(value)) {
+    throw new RequestError(
+      `Request body must include valid UUID \`${field}\` when provided.`,
       400,
     );
   }
@@ -216,8 +230,7 @@ function composeModelSource(partType: PartType, modelBody: string): string {
     .split("\n")
     .filter((line) => {
       const trimmed = line.trim();
-      return !runtimeImports.includes(trimmed) &&
-        trimmed !== CAD_MODEL_DATACLASS_IMPORT;
+      return !runtimeImports.includes(trimmed);
     })
     .join("\n")
     .trim();
@@ -260,11 +273,13 @@ async function createPartFiles(
   partId: string,
   partType: PartType,
 ): Promise<void> {
-  const config = PART_CONFIGS[partType];
+  const initialSource = partType === "cad"
+    ? `${CAD_MODEL_RUNTIME_IMPORT}\n`
+    : composeModelSource(partType, DEFAULT_MESH_MODEL_BODY);
   await uploadText(
     supabase,
     partSourcePath(projectId, partType, partId, "model.py"),
-    composeModelSource(partType, config.defaultModelBody),
+    initialSource,
     "text/x-python",
     false,
   );
@@ -509,6 +524,60 @@ async function queueIndexJob(
   );
 }
 
+async function queueEditJob(
+  supabase: SupabaseClient,
+  projectId: string,
+  messages: ChatMessage[],
+  requestedPart?: PartRecord,
+  workflowMode: "edit" | "initial_design" = "edit",
+): Promise<{ id: string; status: string }> {
+  const latestRequest = messages.at(-1)?.content.trim();
+  if (!latestRequest) {
+    throw new RequestError(
+      "Messages must end with a non-empty user message.",
+      400,
+    );
+  }
+
+  const initialDesign = workflowMode === "initial_design";
+  const { data: job, error } = await supabase
+    .from("edit_jobs")
+    .insert({
+      project_id: projectId,
+      request_text: latestRequest,
+      messages: messages.slice(-MAX_HISTORY_MESSAGES),
+      status: "queued",
+      state: "received",
+      workflow_mode: workflowMode,
+      requested_part_id: requestedPart?.id ?? null,
+      ...(initialDesign && requestedPart
+        ? {
+          resolved_part_id: requestedPart.id,
+          resolved_targets: [{
+            part_id: requestedPart.id,
+            part_name: requestedPart.part_name,
+            semantic_ids: [],
+            confidence: 1,
+            reason: "Linked blank CAD part selected for initial design.",
+            candidates: [],
+          }],
+        }
+        : {}),
+    })
+    .select("id, status")
+    .single();
+  if (error || !job?.id) {
+    throw new Error(
+      `Could not queue CAD edit job: ${error?.message ?? "missing job id"}`,
+    );
+  }
+  return { id: String(job.id), status: String(job.status) };
+}
+
+function isBlankCadSource(source: string): boolean {
+  return source === `${CAD_MODEL_RUNTIME_IMPORT}\n`;
+}
+
 async function currentCadSourceSha256(
   supabase: SupabaseClient,
   part: PartRecord,
@@ -595,6 +664,57 @@ async function cancelQueuedIndexJobs(
   }
 }
 
+async function hasRunningEditJobs(
+  supabase: SupabaseClient,
+  projectId: string,
+  partId?: string,
+): Promise<boolean> {
+  let query = supabase
+    .from("edit_jobs")
+    .select("id")
+    .eq("project_id", projectId)
+    .eq("status", "running")
+    .limit(1);
+  if (partId) {
+    query = query.or(
+      `resolved_part_id.is.null,resolved_part_id.eq.${partId}`,
+    );
+  }
+  const { data, error } = await query;
+  if (error) {
+    throw new Error(`Could not inspect running edit jobs: ${error.message}`);
+  }
+  return (data?.length ?? 0) > 0;
+}
+
+async function cancelQueuedEditJobs(
+  supabase: SupabaseClient,
+  projectId: string,
+  partId?: string,
+): Promise<void> {
+  let query = supabase
+    .from("edit_jobs")
+    .update({
+      status: "cancelled",
+      state: "cancelled",
+      error_code: "CANCELLED_FOR_DELETION",
+      error_message:
+        "The edit was cancelled because its project or part was deleted.",
+      completed_at: new Date().toISOString(),
+    })
+    .eq("project_id", projectId)
+    .eq("status", "queued");
+  if (partId) {
+    query = query.or(
+      `resolved_part_id.is.null,resolved_part_id.eq.${partId}`,
+    );
+  }
+  const { error } = await query;
+  if (error) {
+    throw new Error(`Could not cancel queued edit jobs: ${error.message}`);
+  }
+}
+
 async function prepareForDeletion(
   supabase: SupabaseClient,
   projectId: string,
@@ -603,6 +723,12 @@ async function prepareForDeletion(
   if (!partId && await hasRunningIndexJobs(supabase, projectId)) {
     throw new RequestError(
       "Deletion is blocked while an index job is running. Try again after it finishes.",
+      409,
+    );
+  }
+  if (await hasRunningEditJobs(supabase, projectId, partId)) {
+    throw new RequestError(
+      "Deletion is blocked while a CAD edit is running. Try again after it finishes.",
       409,
     );
   }
@@ -615,10 +741,17 @@ async function prepareForDeletion(
   if (!partId) {
     await cancelQueuedIndexJobs(supabase, projectId);
   }
+  await cancelQueuedEditJobs(supabase, projectId, partId);
   await cancelQueuedJobs(supabase, projectId, partId);
   if (!partId && await hasRunningIndexJobs(supabase, projectId)) {
     throw new RequestError(
       "Deletion is blocked because an index job started. Try again after it finishes.",
+      409,
+    );
+  }
+  if (await hasRunningEditJobs(supabase, projectId, partId)) {
+    throw new RequestError(
+      "Deletion is blocked because a CAD edit started. Try again after it finishes.",
       409,
     );
   }
@@ -776,10 +909,30 @@ async function handleCreatePart(
     throw error;
   }
 
+  let indexJob: { id: string; status: string } | null = null;
+  const warnings: string[] = [];
+  if (part.part_type === "cad") {
+    try {
+      indexJob = await queueIndexJob(supabase, projectId, "build_index");
+    } catch (_error) {
+      warnings.push(
+        `Automatic indexing could not be queued; run /index ${projectId}.`,
+      );
+    }
+  }
+
   return {
     message: `Created and linked ${part.part_type} part "${part.part_name}".`,
     status: "created",
     part,
+    ...(part.part_type === "cad"
+      ? {
+        index_job_id: indexJob?.id ?? null,
+        index_status: indexJob?.status ?? "not_queued",
+        index_job_type: "build_index",
+        warnings,
+      }
+      : {}),
   };
 }
 
@@ -1037,6 +1190,57 @@ async function handleGetIndexJob(
   };
 }
 
+async function handleGetEditJob(
+  supabase: SupabaseClient,
+  body: Record<string, unknown>,
+): Promise<unknown> {
+  const jobId = requiredUuid(body, "job_id");
+  const { data: job, error } = await supabase
+    .from("edit_jobs")
+    .select(
+      "id, project_id, requested_part_id, workflow_mode, resolved_part_id, resolved_targets, status, state, attempt_count, max_attempts, validation_job_id, index_job_id, export_job_id, history, result, error_code, error_message, created_at, started_at, heartbeat_at, completed_at",
+    )
+    .eq("id", jobId)
+    .maybeSingle();
+  if (error) {
+    throw new Error(`Could not inspect CAD edit job: ${error.message}`);
+  }
+  if (!job) {
+    throw new RequestError(
+      `No CAD edit job was found with id "${jobId}".`,
+      404,
+    );
+  }
+  const safeHistory = Array.isArray(job.history)
+    ? job.history.map((event: Record<string, unknown>) => {
+      const allowed = [
+        "recorded_at",
+        "event",
+        "attempt",
+        "part_id",
+        "semantic_ids",
+        "confidence",
+        "reason",
+        "candidate_hash",
+        "changed_symbols",
+        "validation_job_id",
+        "validation_status",
+        "validation_result",
+      ];
+      return Object.fromEntries(
+        allowed
+          .filter((key) => event[key] !== undefined)
+          .map((key) => [key, event[key]]),
+      );
+    })
+    : [];
+  return {
+    message: `CAD edit job ${jobId} is ${job.status} (${job.state}).`,
+    status: job.status,
+    job: { ...job, history: safeHistory },
+  };
+}
+
 async function handleDeleteProject(
   supabase: SupabaseClient,
   body: Record<string, unknown>,
@@ -1086,6 +1290,10 @@ async function handleDeletePart(
     partSourcePath(projectId, part.part_type, part.id),
   );
   await deleteStoragePrefix(supabase, partExportPath(projectId, part.id));
+  await deleteStoragePrefix(
+    supabase,
+    projectPath(projectId, "candidates", "cad", part.id),
+  );
   const { error } = await supabase.from("parts").delete().eq("id", part.id);
   if (error) {
     throw new Error(`Could not delete part: ${error.message}`);
@@ -1102,7 +1310,7 @@ async function handleChat(
   body: Record<string, unknown>,
 ): Promise<unknown> {
   const projectId = requiredUuid(body, "project_id");
-  const partId = requiredUuid(body, "part_id");
+  const partId = optionalUuid(body, "part_id");
   const messages = normalizeMessages(body.messages);
   if (messages.length === 0 || messages.at(-1)?.role !== "user") {
     throw new RequestError(
@@ -1111,13 +1319,57 @@ async function handleChat(
     );
   }
 
-  const part = await findPartInProject(supabase, projectId, partId);
-  if (!part) {
-    throw new RequestError(
-      "The linked part no longer exists in this project.",
-      404,
-    );
+  let part: PartRecord | null = null;
+  if (partId) {
+    part = await findPartInProject(supabase, projectId, partId);
+    if (!part) {
+      throw new RequestError(
+        "The linked part no longer exists in this project.",
+        404,
+      );
+    }
   }
+
+  if (part?.part_type === "cad") {
+    const source = await downloadModelSource(supabase, projectId, part.id, "cad");
+    if (isBlankCadSource(source)) {
+      const job = await queueEditJob(
+        supabase,
+        projectId,
+        messages,
+        part,
+        "initial_design",
+      );
+      return {
+        message: `Queued an initial CAD design for "${part.part_name}". Job: ${job.id}`,
+        status: job.status,
+        job_type: "initial_cad_design",
+        project_id: projectId,
+        part_id: part.id,
+        job_id: job.id,
+      };
+    }
+  }
+
+  if (!part || part.part_type === "cad") {
+    const project = await requireIndexableProject(supabase, projectId);
+    const job = await queueEditJob(
+      supabase,
+      projectId,
+      messages,
+      part ?? undefined,
+    );
+    return {
+      message:
+        `Queued a project-scoped CAD edit for "${project.project_name}". Job: ${job.id}`,
+      status: job.status,
+      job_type: "edit_cad",
+      project_id: projectId,
+      part_id: null,
+      job_id: job.id,
+    };
+  }
+
   const apiKey = Deno.env.get("OPENAI_API_KEY");
   if (!apiKey) {
     throw new Error("Missing OPENAI_API_KEY secret.");
@@ -1125,7 +1377,7 @@ async function handleChat(
   const currentModelSource = await downloadModelSource(
     supabase,
     projectId,
-    partId,
+    part.id,
     part.part_type,
   );
   const config = PART_CONFIGS[part.part_type];
@@ -1149,13 +1401,9 @@ async function handleChat(
     part.part_type,
     generatedModelBody(response.output_text),
   );
-  const sourceSha256 = part.part_type === "cad"
-    ? await sha256Hex(generatedSource)
-    : null;
-
   await uploadText(
     supabase,
-    partSourcePath(projectId, part.part_type, partId, "model.py"),
+    partSourcePath(projectId, part.part_type, part.id, "model.py"),
     generatedSource,
     "text/x-python",
     true,
@@ -1164,17 +1412,15 @@ async function handleChat(
     supabase,
     part,
     config.jobType,
-    sourceSha256,
+    null,
   );
 
   return {
-    message: part.part_type === "cad"
-      ? `Updated cad part "${part.part_name}" and queued its validation.`
-      : `Updated mesh part "${part.part_name}" and queued its export.`,
-    status: part.part_type === "cad" ? "validating" : "queued",
+    message: `Updated mesh part "${part.part_name}" and queued its export.`,
+    status: "queued",
     job_type: config.jobType,
     project_id: projectId,
-    part_id: partId,
+    part_id: part.id,
     job_id: jobId,
   };
 }
@@ -1212,6 +1458,7 @@ Deno.serve(async (req) => {
       index_project: () => handleIndexProject(supabase, body),
       test_index: () => handleTestIndex(supabase, body),
       get_index_job: () => handleGetIndexJob(supabase, body),
+      get_edit_job: () => handleGetEditJob(supabase, body),
       delete_project: () => handleDeleteProject(supabase, body),
       delete_part: () => handleDeletePart(supabase, body),
       chat: () => handleChat(supabase, body),

@@ -1,0 +1,161 @@
+---
+import ArchitecturePage from '../../components/ArchitecturePage.astro';
+import BoundaryMatrix from '../../components/service-docs/BoundaryMatrix.astro';
+import FailureMatrix from '../../components/service-docs/FailureMatrix.astro';
+import KeyGuarantees from '../../components/service-docs/KeyGuarantees.astro';
+import ModeMatrix from '../../components/service-docs/ModeMatrix.astro';
+import OperationsAndSource from '../../components/service-docs/OperationsAndSource.astro';
+import ServiceAtGlance from '../../components/service-docs/ServiceAtGlance.astro';
+import cadValidator from '../../data/architecture/cad-validator.json';
+import '../../styles/service-docs.css';
+
+const glance = [
+	{ label: 'Trigger', value: 'Queued validate_cad generation job' },
+	{ label: 'Reads', value: 'model.py and params.json from 3dProjects storage' },
+	{ label: 'Produces', value: 'Schema-v2 validation report and durable job outcome' },
+	{ label: 'Executes source', value: 'Only after path, SHA-256, and static safety proof' },
+	{ label: 'Downstream', value: 'CAD Editor for candidate proof; CAD Exporter after accepted proof' },
+	{ label: 'Durable state', value: 'generation_jobs status, result, error text, and accepted export job' },
+];
+
+const modes = [
+	{
+		name: 'Candidate source',
+		source: 'Edit-scoped candidate model.py plus canonical part params.json.',
+		success: 'Completes the running candidate validation row with its schema-v2 report.',
+		downstream: 'CAD Editor can verify and consume the proof. No export row is inserted by this path.',
+	},
+	{
+		name: 'Accepted source',
+		source: 'Canonical part model.py plus params.json.',
+		success: 'Completes validation and inserts a queued export_cad row in one database function.',
+		downstream: 'CAD Exporter can independently claim the queued export job.',
+	},
+];
+
+const guarantees = [
+	{
+		title: 'Source identity is hash-bound',
+		description: 'Downloaded model.py must match the source_sha256 stored on the active job; mismatch cancels validation as superseded.',
+		evidence: 'workers/cad_validator/validate_cad_job.py — validate_cad_job',
+	},
+	{
+		title: 'Candidate paths are edit-scoped',
+		description: 'Candidate model.py must remain under the owning project, part, and edit-job prefix and cannot contain traversal segments.',
+		evidence: 'workers/cad_validator/validate_cad_job.py — validation_source_path',
+	},
+	{
+		title: 'Unsafe source does not execute',
+		description: 'The runtime starts only when the ordered static checks set safe_to_execute to true.',
+		evidence: 'workers/cad_validator/cad_ast_validator.py — validate_cad_source',
+	},
+	{
+		title: 'Runtime output is bounded',
+		description: 'Captured stdout and stderr retain at most the last 16,000 characters each.',
+		evidence: 'workers/cad_validator/validate_cad_job.py — bounded_output',
+	},
+	{
+		title: 'Accepted completion schedules export transactionally',
+		description: 'The completion function verifies job type, source kind, running state, and source hash before inserting export and completing validation.',
+		evidence: 'supabase/migrations/20260725000000_add_cad_edit_workflow.sql',
+	},
+];
+
+const failures = [
+	{
+		condition: 'Candidate path is invalid',
+		durableOutcome: 'Unexpected worker-error report with failed status.',
+		runtime: 'Does not run.',
+		downstream: 'No candidate proof and no export job.',
+	},
+	{
+		condition: 'Source SHA-256 differs',
+		durableOutcome: 'Cancelled as superseded with expected and actual hashes.',
+		runtime: 'Skipped.',
+		downstream: 'No candidate proof and no export job.',
+	},
+	{
+		condition: 'Static safety gate fails',
+		durableOutcome: 'Failed schema-v2 report with stage diagnostics.',
+		runtime: 'Skipped.',
+		downstream: 'No candidate proof and no export job.',
+	},
+	{
+		condition: 'Runtime timeout or exception',
+		durableOutcome: 'Failed report with bounded runtime diagnostics.',
+		runtime: 'Started; failed or timed out.',
+		downstream: 'No candidate proof and no export job.',
+	},
+	{
+		condition: 'Return value is invalid or has no solids',
+		durableOutcome: 'Failed geometry-stage report.',
+		runtime: 'Completed execution checks.',
+		downstream: 'No candidate proof and no export job.',
+	},
+	{
+		condition: 'Claim RPC fails',
+		durableOutcome: 'No worker-side recovery write is attempted for an unclaimed row.',
+		runtime: 'Does not run.',
+		downstream: 'The polling process exits because claim exceptions are not caught.',
+	},
+];
+---
+
+<ArchitecturePage
+	title="CAD Validator"
+	summary="An independent polling worker that proves hash-bound accepted or candidate CAD source before allowing an edit commit or scheduling accepted-source export."
+	section="Service view"
+	active="cad-validator"
+	document={cadValidator}
+	fallback="Loading the CAD Validator diagram…"
+	showExampleNotice={false}
+	sidebarNote="Production CAD validation: source proof, ordered static gates, isolated CadQuery execution, and structured durable outcomes."
+>
+	<div slot="beforeDiagram">
+		<ServiceAtGlance items={glance} />
+
+		<article class="doc-prose">
+			<h2>Purpose and boundaries</h2>
+			<p>The CAD Validator consumes <code>validate_cad</code> jobs and returns a schema-v2 proof for accepted or edit-scoped candidate source. It owns the active execution and its temporary workspace, but it does not commit candidate source, plan repairs, promote canonical source, or generate final export files.</p>
+			<p>Postgres owns job lifecycle state, 3dProjects storage owns source objects and parameters, and the CAD Editor or CAD Exporter consumes the appropriate successful outcome.</p>
+		</article>
+
+		<BoundaryMatrix
+			owns={[
+				'Active validation execution and job-local temporary workspace.',
+				'Structured schema-v2 validation report.',
+				'Bounded runtime diagnostics for the active job.',
+			]}
+			doesNotOwn={[
+				'Candidate source commit or canonical-source promotion.',
+				'Repair planning.',
+				'Final STEP, STL, or GLB export generation.',
+			]}
+			dependsOn={[
+				'generation_jobs claim and completion operations.',
+				'3dProjects source storage.',
+				'The isolated CadQuery subprocess and its Python dependencies.',
+			]}
+		/>
+
+	</div>
+
+	<ModeMatrix title="Candidate versus accepted source" modes={modes} />
+	<KeyGuarantees items={guarantees} />
+	<FailureMatrix items={failures} />
+	<OperationsAndSource
+		facts={[
+			{ label: 'Polling', value: 'One job at a time per process; an empty poll sleeps for two seconds.' },
+			{ label: 'Runtime timeout', value: '60 seconds by default, configured with CAD_VALIDATION_TIMEOUT_SECONDS.' },
+			{ label: 'Runtime isolation', value: 'python -I with job-local HOME/TMPDIR and a sanitized environment.' },
+			{ label: 'Observe', value: 'Stage diagnostics, skipped runtime, hash mismatch, timeout, bounded stdout/stderr, result type, solid count, and completion latency.' },
+		]}
+		sources={[
+			{ path: 'workers/cad_validator/cad_validation_worker.py', symbol: 'main / process_job', description: 'Polling, dispatch, durable completion, and unexpected-failure reporting.' },
+			{ path: 'workers/cad_validator/validate_cad_job.py', symbol: 'validate_cad_job / run_model', description: 'Source proof, temporary workspace, isolated process, timeout, and result assembly.' },
+			{ path: 'workers/cad_validator/cad_ast_validator.py', symbol: 'validate_cad_source', description: 'Ordered static contract and safety gates.' },
+			{ path: 'workers/cad_validator/cad_validation_runner.py', symbol: 'execute / geometry_result', description: 'ModelParams construction, build_model invocation, and geometry contract.' },
+			{ path: 'supabase/migrations/20260725000000_add_cad_edit_workflow.sql', symbol: 'complete_candidate_cad_validation / complete_cad_validation_and_queue_export', description: 'Candidate and accepted completion transaction semantics.' },
+		]}
+	/>
+</ArchitecturePage>

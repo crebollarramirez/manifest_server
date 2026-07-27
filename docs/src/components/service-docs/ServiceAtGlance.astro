@@ -1,0 +1,24 @@
+---
+interface Item {
+	label: string;
+	value: string;
+}
+
+interface Props {
+	items: Item[];
+}
+
+const { items } = Astro.props;
+---
+
+<section class="service-glance" aria-labelledby="service-at-a-glance">
+	<h2 id="service-at-a-glance">At a glance</h2>
+	<dl>
+		{items.map((item) => (
+			<div>
+				<dt>{item.label}</dt>
+				<dd>{item.value}</dd>
+			</div>
+		))}
+	</dl>
+</section>

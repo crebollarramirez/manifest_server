@@ -1,0 +1,2439 @@
+:root {
+	--architecture-entry: #6eb7ff;
+	--architecture-compute: #55d6ad;
+	--architecture-worker: #ad7bff;
+	--architecture-state: #e6bc69;
+	--architecture-boundary: #c494f7;
+	--architecture-surface: color-mix(
+		in srgb,
+		var(--sl-color-bg-nav, var(--sl-color-bg)) 88%,
+		var(--sl-color-accent-low) 12%
+	);
+	--architecture-surface-raised: color-mix(
+		in srgb,
+		var(--sl-color-bg) 90%,
+		var(--sl-color-accent-low) 10%
+	);
+	--architecture-surface-muted: color-mix(
+		in srgb,
+		var(--sl-color-bg) 84%,
+		var(--sl-color-gray-6) 16%
+	);
+	--architecture-border: color-mix(
+		in srgb,
+		var(--sl-color-gray-4) 70%,
+		var(--sl-color-accent) 30%
+	);
+	--architecture-border-strong: color-mix(
+		in srgb,
+		var(--sl-color-accent) 64%,
+		var(--sl-color-white) 36%
+	);
+	--architecture-text: var(--sl-color-white);
+	--architecture-text-muted: var(--sl-color-gray-2);
+	--architecture-edge: color-mix(
+		in srgb,
+		var(--sl-color-accent) 70%,
+		#58d9ff 30%
+	);
+	--architecture-edge-data: color-mix(
+		in srgb,
+		var(--sl-color-accent-high) 62%,
+		#7edce8 38%
+	);
+	--architecture-grid: color-mix(
+		in srgb,
+		var(--sl-color-gray-4) 36%,
+		transparent
+	);
+	--architecture-canvas-dot: color-mix(
+		in srgb,
+		var(--sl-color-gray-4) 44%,
+		transparent
+	);
+	--architecture-focus-ring: color-mix(
+		in srgb,
+		var(--sl-color-accent-high) 78%,
+		#58d9ff 22%
+	);
+	--architecture-shadow: 0 18px 54px rgb(0 0 0 / 20%);
+}
+
+[data-theme='light'] {
+	--architecture-surface: color-mix(
+		in srgb,
+		var(--sl-color-bg) 93%,
+		var(--sl-color-accent-low) 7%
+	);
+	--architecture-surface-raised: var(--sl-color-gray-7);
+	--architecture-surface-muted: color-mix(
+		in srgb,
+		var(--sl-color-bg) 94%,
+		var(--sl-color-gray-5) 6%
+	);
+	--architecture-border: color-mix(
+		in srgb,
+		var(--sl-color-gray-4) 76%,
+		var(--sl-color-accent) 24%
+	);
+	--architecture-border-strong: var(--sl-color-accent);
+	--architecture-text: var(--sl-color-white);
+	--architecture-text-muted: var(--sl-color-gray-2);
+	--architecture-canvas-dot: color-mix(
+		in srgb,
+		var(--sl-color-gray-4) 54%,
+		transparent
+	);
+	--architecture-shadow: 0 18px 54px rgb(31 45 61 / 11%);
+}
+
+.architecture-diagram {
+	inline-size: 100%;
+	max-inline-size: 100%;
+	margin-block: 1.75rem 2.5rem;
+	color: var(--architecture-text);
+	transition: inline-size 180ms ease;
+}
+
+.architecture-diagram__workspace {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 1.5rem;
+	align-items: start;
+}
+
+.architecture-diagram__stage {
+	min-inline-size: 0;
+}
+
+@media (min-width: 80rem) {
+	.architecture-diagram--inspecting .architecture-diagram__workspace {
+		grid-template-columns: minmax(0, 1fr) clamp(18rem, 22vw, 20rem);
+	}
+}
+
+.architecture-diagram__header {
+	margin-block-end: 0.75rem;
+}
+
+.architecture-diagram__header h3 {
+	margin-block: 0.2rem 0.35rem;
+	font-size: clamp(1.25rem, 2vw, 1.65rem);
+	line-height: 1.15;
+}
+
+.architecture-diagram__header p {
+	max-inline-size: 44rem;
+	margin: 0;
+	color: var(--architecture-text-muted);
+	font-size: 0.9rem;
+	line-height: 1.45;
+}
+
+.architecture-diagram__header .architecture-diagram__eyebrow {
+	color: var(--sl-color-accent-high);
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	font-size: 0.68rem;
+	font-weight: 700;
+	letter-spacing: 0.1em;
+	text-transform: uppercase;
+}
+
+.architecture-diagram__canvas {
+	position: relative;
+	overflow: hidden;
+	contain: paint;
+	block-size: clamp(36rem, 68vh, 48rem);
+	min-block-size: 36rem;
+	border: 1px solid var(--architecture-border);
+	border-radius: 0.85rem;
+	background:
+		radial-gradient(
+			circle at 8% 4%,
+			color-mix(in srgb, var(--sl-color-accent-low) 26%, transparent),
+			transparent 28rem
+		),
+		var(--architecture-surface);
+	box-shadow: var(--architecture-shadow);
+	isolation: isolate;
+}
+
+.architecture-diagram__canvas::before {
+	position: absolute;
+	z-index: 1;
+	inset: 0;
+	border-radius: inherit;
+	box-shadow: inset 0 1px rgb(255 255 255 / 7%);
+	content: '';
+	pointer-events: none;
+}
+
+.architecture-diagram__hint {
+	margin: 0.6rem 0 0;
+	color: var(--architecture-text-muted);
+	font-size: 0.76rem;
+	line-height: 1.45;
+}
+
+.architecture-loading,
+.architecture-message {
+	display: flex;
+	box-sizing: border-box;
+	min-block-size: 12rem;
+	align-items: center;
+	justify-content: center;
+	color: var(--architecture-text-muted);
+}
+
+.architecture-loading {
+	position: absolute;
+	inset: 0;
+	flex-direction: column;
+	gap: 0.85rem;
+	font-size: 0.86rem;
+}
+
+.architecture-loading__indicator {
+	inline-size: 1.5rem;
+	block-size: 1.5rem;
+	border: 2px solid var(--architecture-border);
+	border-block-start-color: var(--sl-color-accent);
+	border-radius: 50%;
+	animation: architecture-spin 800ms linear infinite;
+}
+
+@keyframes architecture-spin {
+	to {
+		transform: rotate(1turn);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.architecture-loading__indicator {
+		animation: none;
+		border-block-start-color: var(--architecture-border);
+	}
+}
+
+.architecture-message {
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 0.35rem;
+	max-inline-size: 48rem;
+	margin-block: 1.5rem;
+	padding: 1rem 1.1rem;
+	border: 1px solid var(--sl-color-red);
+	border-inline-start-width: 0.28rem;
+	border-radius: 0.45rem;
+	background: color-mix(in srgb, var(--sl-color-red-low) 68%, transparent);
+	color: var(--architecture-text);
+}
+
+.architecture-diagram__canvas > .architecture-message {
+	position: absolute;
+	z-index: 2;
+	inset: 1rem;
+	justify-content: center;
+	max-inline-size: none;
+	margin: 0;
+}
+
+.architecture-message strong {
+	font-size: 0.95rem;
+}
+
+.architecture-message p,
+.architecture-message ul {
+	margin: 0;
+	font-size: 0.83rem;
+	line-height: 1.45;
+}
+
+.architecture-message ul {
+	padding-inline-start: 1.25rem;
+}
+
+.architecture-message li span {
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	font-size: 0.76rem;
+}
+
+.architecture-legend {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.7rem 1.1rem;
+	justify-content: flex-start;
+	margin-block-start: 0.65rem;
+	padding: 0.65rem 0.75rem;
+	border: 1px solid var(--architecture-border);
+	border-radius: 0.5rem;
+	background: var(--architecture-surface-muted);
+	font-size: 0.68rem;
+	line-height: 1.2;
+}
+
+.architecture-legend__group {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.38rem 0.65rem;
+	align-items: center;
+}
+
+.architecture-legend__heading {
+	color: var(--architecture-text-muted);
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	font-size: 0.61rem;
+	font-weight: 700;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+}
+
+.architecture-legend ul {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.32rem 0.65rem;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.architecture-legend li {
+	display: inline-flex;
+	gap: 0.3rem;
+	align-items: center;
+	margin: 0;
+	white-space: nowrap;
+}
+
+.architecture-legend__node {
+	display: inline-block;
+	box-sizing: border-box;
+	inline-size: 0.78rem;
+	block-size: 0.55rem;
+	border: 1px solid var(--architecture-border-strong);
+	background: var(--architecture-surface-raised);
+}
+
+.architecture-legend__node--layer {
+	inline-size: 0.95rem;
+	border-width: 2px;
+}
+
+.architecture-legend__node--api {
+	border-inline-start-width: 0.25rem;
+}
+
+.architecture-legend__node--function {
+	clip-path: polygon(10% 0, 100% 0, 90% 100%, 0 100%);
+}
+
+.architecture-legend__node--worker {
+	box-shadow: 0.14rem 0.14rem 0 -0.03rem var(--architecture-border-strong);
+}
+
+.architecture-legend__node--database {
+	border-radius: 50% / 24%;
+}
+
+.architecture-legend__node--worker {
+	border-color: var(--architecture-worker);
+}
+
+.architecture-legend__node--queue {
+	box-shadow:
+		0.12rem 0.12rem var(--architecture-surface-raised),
+		0.18rem 0.18rem 0 0.03rem var(--architecture-border);
+}
+
+.architecture-legend__node--storage {
+	border-radius: 0.12rem;
+	background: repeating-linear-gradient(
+		to bottom,
+		var(--architecture-surface-raised) 0 0.12rem,
+		var(--architecture-border) 0.13rem 0.16rem
+	);
+}
+
+.architecture-legend__node--external {
+	border-style: dashed;
+	opacity: 0.7;
+}
+
+.architecture-legend__line {
+	position: relative;
+	display: inline-block;
+	inline-size: 1.35rem;
+	border-block-start: 2px solid var(--architecture-edge);
+}
+
+.architecture-legend__line::after {
+	position: absolute;
+	inset-block-start: -0.25rem;
+	inset-inline-end: -0.08rem;
+	inline-size: 0;
+	block-size: 0;
+	border-block: 0.18rem solid transparent;
+	border-inline-start: 0.28rem solid var(--architecture-edge);
+	content: '';
+}
+
+.architecture-legend__line--asynchronous {
+	border-block-start-style: dashed;
+}
+
+.architecture-legend__line--data {
+	border-block-start-style: dotted;
+	border-block-start-color: var(--architecture-edge-data);
+}
+
+.react-flow {
+	--xy-background-color: transparent;
+	--xy-node-color: var(--architecture-text);
+	--xy-node-border: transparent;
+	--xy-edge-stroke: var(--architecture-edge);
+	--xy-edge-stroke-width: 1.7;
+	--xy-controls-button-background-color-default: var(
+		--architecture-surface-raised
+	);
+	--xy-controls-button-background-color-hover-default: var(
+		--sl-color-accent-low
+	);
+	--xy-controls-button-color-default: var(--architecture-text);
+	--xy-controls-button-border-color-default: var(--architecture-border);
+	font-family: var(--sl-font, ui-sans-serif, system-ui, sans-serif);
+}
+
+.react-flow__pane {
+	cursor: grab;
+}
+
+.react-flow__pane.dragging {
+	cursor: grabbing;
+}
+
+.react-flow__node-architectureNode {
+	border: 0;
+	background: transparent;
+	box-shadow: none;
+	cursor: default;
+}
+
+.react-flow__node-architectureNode:focus,
+.react-flow__node-architectureNode:focus-visible {
+	outline: none;
+}
+
+.architecture-node {
+	position: relative;
+	box-sizing: border-box;
+	inline-size: 100%;
+	block-size: 100%;
+	min-block-size: 4.75rem;
+	overflow: visible;
+	border: 1px solid var(--architecture-border);
+	border-radius: 0.36rem;
+	background: var(--architecture-surface-raised);
+	box-shadow: 0 9px 24px rgb(0 0 0 / 13%);
+	color: var(--architecture-text);
+}
+
+/* Shared box chrome, inspired by the systems-console reference. Every node
+   type receives its color from a family rather than a per-page style. */
+.architecture-box {
+	--architecture-box-accent: var(--architecture-entry);
+	border-color: color-mix(in srgb, var(--architecture-box-accent) 43%, var(--architecture-border));
+	background: color-mix(in srgb, var(--architecture-surface-raised) 91%, var(--architecture-box-accent) 9%);
+	box-shadow: 0 8px 21px rgb(0 0 0 / 18%);
+}
+
+.architecture-box--entry {
+	--architecture-box-accent: var(--architecture-entry);
+}
+
+.architecture-box--compute {
+	--architecture-box-accent: var(--architecture-compute);
+}
+
+.architecture-box--worker {
+	--architecture-box-accent: var(--architecture-worker);
+}
+
+.architecture-box--state {
+	--architecture-box-accent: var(--architecture-state);
+}
+
+.architecture-box--boundary {
+	--architecture-box-accent: var(--architecture-boundary);
+}
+
+.architecture-node__body,
+.architecture-node__link {
+	display: flex;
+	box-sizing: border-box;
+	inline-size: 100%;
+	block-size: 100%;
+	min-block-size: inherit;
+	flex-direction: column;
+	justify-content: center;
+	padding: 0.92rem 1rem 0.82rem;
+	color: inherit;
+	text-align: start;
+	text-decoration: none;
+}
+
+.architecture-box__stripe {
+	position: absolute;
+	inset: 0 0 auto;
+	block-size: 0.2rem;
+	background: var(--architecture-box-accent);
+	content: '';
+}
+
+.architecture-box__glyph {
+	display: grid;
+	inline-size: 1.9rem;
+	block-size: 1.45rem;
+	place-items: center;
+	margin-block-end: 0.42rem;
+	border: 1px solid color-mix(in srgb, var(--architecture-box-accent) 48%, transparent);
+	border-radius: 0.3rem;
+	background: color-mix(in srgb, var(--architecture-box-accent) 13%, transparent);
+	color: var(--architecture-box-accent);
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	font-size: 0.72rem;
+	font-weight: 700;
+	letter-spacing: -0.08em;
+	line-height: 1;
+}
+
+.architecture-node__kind {
+	display: block;
+	margin-block-end: 0.25rem;
+	color: var(--architecture-box-accent, var(--sl-color-accent-high));
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	font-size: 0.58rem;
+	font-weight: 700;
+	letter-spacing: 0.09em;
+	line-height: 1.1;
+	text-transform: uppercase;
+}
+
+.architecture-node__label {
+	display: block;
+	margin: 0;
+	color: var(--architecture-text);
+	font-size: 0.86rem;
+	font-weight: 700;
+	letter-spacing: -0.01em;
+	line-height: 1.15;
+}
+
+.architecture-node__description {
+	display: -webkit-box;
+	overflow: hidden;
+	margin-block-start: 0.3rem;
+	color: var(--architecture-text-muted);
+	font-size: 0.67rem;
+	line-height: 1.32;
+	-webkit-box-orient: vertical;
+	-webkit-line-clamp: 3;
+}
+
+.architecture-node__link-marker,
+.architecture-node__foundation-marker {
+	display: inline-flex;
+	gap: 0.22rem;
+	align-items: center;
+	align-self: flex-start;
+	margin-block-start: 0.52rem;
+	color: var(--architecture-box-accent, var(--sl-color-accent-high));
+	font-size: 0.62rem;
+	font-weight: 700;
+	line-height: 1;
+}
+
+.architecture-node__link-marker span {
+	transition: transform 150ms ease;
+}
+
+.architecture-node__foundation-marker {
+	color: var(--architecture-text-muted);
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	font-size: 0.56rem;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+}
+
+.architecture-node--linked {
+	transition:
+		border-color 150ms ease,
+		box-shadow 150ms ease,
+		transform 150ms ease;
+}
+
+.architecture-node--linked:hover {
+	border-color: var(--architecture-box-accent, var(--architecture-border-strong));
+	box-shadow:
+		0 12px 30px rgb(0 0 0 / 18%),
+		0 0 0 1px var(--architecture-box-accent, var(--architecture-border-strong)),
+		0 0 20px color-mix(in srgb, var(--architecture-box-accent, var(--architecture-border-strong)) 20%, transparent);
+	transform: translateY(-3px);
+}
+
+.architecture-node--linked:hover .architecture-node__link-marker span {
+	transform: translateX(0.16rem);
+}
+
+.architecture-node__link:focus-visible {
+	border-radius: inherit;
+	outline: 3px solid var(--sl-color-accent-high);
+	outline-offset: 4px;
+}
+
+.architecture-node--layer {
+	border-width: 2px;
+	border-color: var(--architecture-border-strong);
+	border-radius: 0.22rem;
+	background:
+		linear-gradient(
+			90deg,
+			color-mix(in srgb, var(--sl-color-accent-low) 32%, transparent),
+			transparent 42%
+		),
+		var(--architecture-surface-raised);
+	box-shadow:
+		inset 0 0 0 0.22rem color-mix(in srgb, var(--architecture-border) 25%, transparent),
+		0 11px 28px rgb(0 0 0 / 14%);
+}
+
+.architecture-node--client {
+	border-radius: 0.15rem;
+}
+
+.architecture-node--client::before {
+	position: absolute;
+	z-index: 2;
+	inset-block-start: -0.35rem;
+	inset-inline-start: 50%;
+	inline-size: 0.58rem;
+	block-size: 0.58rem;
+	border: 1px solid var(--architecture-border-strong);
+	border-radius: 50%;
+	background: var(--architecture-surface-raised);
+	content: '';
+	transform: translateX(-50%);
+}
+
+.architecture-node--api {
+	border-inline-start: 0.32rem solid var(--architecture-box-accent);
+	border-radius: 0.2rem 0.45rem 0.45rem 0.2rem;
+}
+
+.architecture-node--function {
+	border: 0;
+	border-radius: 0;
+	background: var(--architecture-box-accent);
+	clip-path: polygon(7% 0, 100% 0, 93% 100%, 0 100%);
+	padding: 1px;
+}
+
+.architecture-node--function .architecture-node__body,
+.architecture-node--function .architecture-node__link {
+	background: var(--architecture-surface-raised);
+	clip-path: polygon(7% 0, 100% 0, 93% 100%, 0 100%);
+	padding-inline: 1.15rem;
+}
+
+.architecture-node--service {
+	border-radius: 0.22rem;
+	box-shadow:
+		inset 0 0.22rem 0 color-mix(in srgb, var(--architecture-box-accent) 44%, var(--architecture-border)),
+		0 9px 24px rgb(0 0 0 / 13%);
+}
+
+.architecture-node--worker {
+	border-radius: 0.22rem;
+	box-shadow:
+		0.28rem 0.28rem 0 -0.08rem var(--architecture-surface),
+		0.32rem 0.32rem 0 -0.02rem color-mix(in srgb, var(--architecture-box-accent) 44%, var(--architecture-border)),
+		0 9px 24px rgb(0 0 0 / 13%);
+}
+
+.architecture-node__worker-marker {
+	position: absolute;
+	inset-block-start: 0.5rem;
+	inset-inline-end: 0.48rem;
+	padding: 0.14rem 0.27rem;
+	border: 1px solid var(--architecture-border);
+	border-radius: 0.15rem;
+	background: var(--architecture-surface-muted);
+	color: var(--architecture-text-muted);
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	font-size: 0.48rem;
+	letter-spacing: 0.06em;
+	line-height: 1;
+	text-transform: uppercase;
+}
+
+.architecture-node--database {
+	border-radius: 50% / 15%;
+	background:
+		linear-gradient(
+			to bottom,
+			color-mix(in srgb, var(--sl-color-accent-low) 20%, transparent) 0 13%,
+			transparent 14% 84%,
+			color-mix(in srgb, var(--sl-color-accent-low) 14%, transparent) 85%
+		),
+		var(--architecture-surface-raised);
+}
+
+.architecture-node--database::before {
+	position: absolute;
+	inset: 0 0 auto;
+	block-size: 18%;
+	border-block-end: 1px solid var(--architecture-border);
+	border-radius: 50%;
+	content: '';
+	pointer-events: none;
+}
+
+.architecture-node--database .architecture-node__body,
+.architecture-node--database .architecture-node__link {
+	padding-block: 1rem;
+	padding-inline: 1.1rem;
+}
+
+.architecture-node--queue {
+	border-radius: 0.18rem;
+	box-shadow:
+		0.28rem 0.28rem 0 -0.16rem var(--architecture-surface-raised),
+		0.28rem 0.28rem 0 -0.1rem var(--architecture-border),
+		0.5rem 0.5rem 0 -0.28rem var(--architecture-surface-raised),
+		0.5rem 0.5rem 0 -0.22rem var(--architecture-border);
+}
+
+.architecture-node--queue::before,
+.architecture-node--queue::after {
+	position: absolute;
+	inset-inline: 0.6rem;
+	block-size: 1px;
+	background: var(--architecture-border);
+	content: '';
+}
+
+.architecture-node--queue::before {
+	inset-block-start: 0.45rem;
+}
+
+.architecture-node--queue::after {
+	inset-block-end: 0.45rem;
+}
+
+.architecture-node--storage {
+	border-radius: 0.2rem;
+	background:
+		repeating-linear-gradient(
+			to bottom,
+			transparent 0 28%,
+			color-mix(in srgb, var(--architecture-border) 72%, transparent) 29% 30%
+		),
+		var(--architecture-surface-raised);
+}
+
+.architecture-node--storage::before {
+	position: absolute;
+	inset-block: 0;
+	inset-inline-start: 0.6rem;
+	inline-size: 0.18rem;
+	background: var(--architecture-box-accent);
+	content: '';
+}
+
+.architecture-node--storage .architecture-node__body,
+.architecture-node--storage .architecture-node__link {
+	padding-inline-start: 1.15rem;
+}
+
+.architecture-node--external {
+	border-style: dashed;
+	border-width: 1.5px;
+	background: color-mix(
+		in srgb,
+		var(--architecture-surface-muted) 78%,
+		transparent
+	);
+	box-shadow: none;
+	opacity: 0.88;
+}
+
+.architecture-node--foundation {
+	border: 3px double var(--architecture-box-accent, var(--architecture-border-strong));
+	box-shadow:
+		inset 0 -0.22rem 0
+			color-mix(in srgb, var(--architecture-border-strong) 45%, transparent),
+		0 9px 24px rgb(0 0 0 / 13%);
+}
+
+.architecture-node__handle {
+	opacity: 0;
+	pointer-events: none;
+}
+
+/* Console-card contract: one reusable card grammar across every node type.
+   Semantic type still selects the accent, while shape no longer changes the
+   reading rhythm or forces a dense graph to use tiny cards. */
+.architecture-box,
+.architecture-node--layer,
+.architecture-node--client,
+.architecture-node--api,
+.architecture-node--function,
+.architecture-node--service,
+.architecture-node--worker,
+.architecture-node--database,
+.architecture-node--queue,
+.architecture-node--storage,
+.architecture-node--external,
+.architecture-node--foundation {
+	overflow: hidden;
+	border: 1px solid color-mix(in srgb, var(--architecture-box-accent) 42%, var(--architecture-border));
+	border-radius: 0.56rem;
+	clip-path: none;
+	background: color-mix(in srgb, var(--architecture-surface-raised) 94%, var(--architecture-box-accent) 6%);
+	box-shadow: 0 8px 18px rgb(0 0 0 / 22%);
+	opacity: 1;
+}
+
+.architecture-node--layer::before,
+.architecture-node--layer::after,
+.architecture-node--client::before,
+.architecture-node--client::after,
+.architecture-node--database::before,
+.architecture-node--database::after,
+.architecture-node--queue::before,
+.architecture-node--queue::after,
+.architecture-node--storage::before,
+.architecture-node--storage::after {
+	display: none;
+}
+
+.architecture-node--function,
+.architecture-node--function .architecture-node__body,
+.architecture-node--function .architecture-node__link,
+.architecture-node--database,
+.architecture-node--storage {
+	clip-path: none;
+	background: color-mix(in srgb, var(--architecture-surface-raised) 94%, var(--architecture-box-accent) 6%);
+}
+
+.architecture-node--function { padding: 0; }
+.architecture-node--function .architecture-node__body,
+.architecture-node--function .architecture-node__link,
+.architecture-node--database .architecture-node__body,
+.architecture-node--database .architecture-node__link,
+.architecture-node--storage .architecture-node__body,
+.architecture-node--storage .architecture-node__link {
+	padding: 1.15rem 0.72rem 0.8rem;
+}
+
+.architecture-node--queue,
+.architecture-node--worker,
+.architecture-node--service,
+.architecture-node--foundation {
+	box-shadow: 0 8px 18px rgb(0 0 0 / 22%);
+}
+
+.architecture-node--foundation { border-width: 1px; }
+
+.architecture-node__body,
+.architecture-node__link {
+	align-items: center;
+	justify-content: center;
+	padding: 1.15rem 0.72rem 0.8rem;
+	text-align: center;
+}
+
+.architecture-box__stripe {
+	block-size: 0.18rem;
+}
+
+.architecture-box__status {
+	position: absolute;
+	inset-block-start: 0.5rem;
+	inset-inline-end: 0.56rem;
+	color: color-mix(in srgb, var(--architecture-box-accent) 76%, var(--architecture-text));
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	font-size: 0.47rem;
+	letter-spacing: 0.08em;
+	line-height: 1;
+	text-transform: lowercase;
+}
+
+.architecture-box__glyph {
+	inline-size: 3.35rem;
+	block-size: 3.35rem;
+	margin-block-end: 0.65rem;
+	border-color: color-mix(in srgb, var(--architecture-box-accent) 64%, transparent);
+	border-radius: 0.72rem;
+	font-size: 1rem;
+	letter-spacing: 0;
+}
+
+.architecture-box__icon {
+	display: block;
+	inline-size: 2.15rem;
+	block-size: 2.15rem;
+	flex: none;
+}
+
+.architecture-node__kind {
+	margin-block-end: 0.28rem;
+	font-size: 0.53rem;
+	letter-spacing: 0.14em;
+}
+
+.architecture-node__label {
+	max-inline-size: 9.5rem;
+	font-size: 0.82rem;
+	line-height: 1.18;
+	overflow-wrap: anywhere;
+}
+
+/* Files are shown inside the durable storage card that owns them. This keeps
+   every connector attached to a real component rather than a document-like
+   artifact node. */
+.architecture-box__contents {
+	display: flex;
+	max-inline-size: 10rem;
+	gap: 0.25rem;
+	align-items: center;
+	justify-content: center;
+	flex-wrap: wrap;
+	margin-block-start: auto;
+}
+
+.architecture-box__content {
+	display: inline-flex;
+	gap: 0.2rem;
+	align-items: center;
+	max-inline-size: 100%;
+	padding: 0.16rem 0.28rem;
+	border: 1px solid color-mix(in srgb, var(--architecture-box-accent) 40%, var(--architecture-border));
+	border-radius: 0.2rem;
+	background: color-mix(in srgb, var(--architecture-box-accent) 10%, var(--architecture-surface-muted));
+	color: var(--architecture-text-muted);
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	font-size: 0.52rem;
+	font-weight: 650;
+	line-height: 1.15;
+	overflow-wrap: anywhere;
+}
+
+.architecture-node--storage .architecture-box__content .architecture-box__icon {
+	inline-size: 0.7rem;
+	block-size: 0.7rem;
+	flex: none;
+}
+
+.architecture-node--storage .architecture-box__glyph {
+	inline-size: 2.55rem;
+	block-size: 2.55rem;
+	margin-block-end: 0.45rem;
+	border-radius: 0.58rem;
+}
+
+.architecture-node--storage .architecture-box__icon {
+	inline-size: 1.65rem;
+	block-size: 1.65rem;
+}
+
+.architecture-node--storage .architecture-node__body,
+.architecture-node--storage .architecture-node__link {
+	justify-content: flex-start;
+}
+
+.architecture-node__description {
+	position: absolute;
+	overflow: hidden;
+	inline-size: 1px;
+	block-size: 1px;
+	margin: -1px;
+	padding: 0;
+	border: 0;
+	clip: rect(0 0 0 0);
+	white-space: nowrap;
+}
+
+.architecture-node__link-marker,
+.architecture-node__foundation-marker,
+.architecture-node__worker-marker {
+	display: none;
+}
+
+.architecture-edge {
+	fill: none;
+	stroke: var(--architecture-edge);
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	stroke-width: 2.2;
+}
+
+.architecture-edge--asynchronous {
+	stroke-dasharray: 8 5;
+}
+
+.architecture-edge--data {
+	stroke: var(--architecture-edge-data);
+	stroke-dasharray: 2 5 9 5;
+	stroke-width: 2.2;
+}
+
+.architecture-edge__arrow {
+	fill: var(--architecture-edge);
+	stroke: none;
+}
+
+.react-flow__edge:has(.architecture-edge--data) .architecture-edge__arrow {
+	fill: var(--architecture-edge-data);
+}
+
+.architecture-edge-label {
+	position: absolute;
+	z-index: 5;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	max-inline-size: 10.5rem;
+	padding: 0.18rem 0.34rem;
+	border: 1px solid var(--architecture-border);
+	border-radius: 0.28rem;
+	background: color-mix(
+		in srgb,
+		var(--architecture-surface-raised) 86%,
+		transparent
+	);
+	box-shadow: 0 4px 12px rgb(0 0 0 / 15%);
+	color: var(--architecture-text);
+	line-height: 1.05;
+	pointer-events: none;
+	text-align: center;
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	white-space: nowrap;
+}
+
+.architecture-edge-label__leader {
+	position: absolute;
+	display: block;
+	background: var(--architecture-edge);
+	box-shadow: 0 0 0 1px color-mix(in srgb, var(--architecture-surface-raised) 45%, transparent);
+	content: '';
+}
+
+.architecture-edge-label--data .architecture-edge-label__leader {
+	background: var(--architecture-edge-data);
+}
+
+.architecture-edge-label--above .architecture-edge-label__leader,
+.architecture-edge-label--below .architecture-edge-label__leader {
+	inline-size: 2px;
+	block-size: 15px;
+	inset-inline-start: 50%;
+	transform: translateX(-50%);
+}
+
+.architecture-edge-label--above .architecture-edge-label__leader {
+	inset-block-start: 100%;
+}
+
+.architecture-edge-label--below .architecture-edge-label__leader {
+	inset-block-end: 100%;
+}
+
+.architecture-edge-label--left .architecture-edge-label__leader,
+.architecture-edge-label--right .architecture-edge-label__leader {
+	inline-size: 18px;
+	block-size: 2px;
+	inset-block-start: 50%;
+	transform: translateY(-50%);
+}
+
+.architecture-edge-label--left .architecture-edge-label__leader {
+	inset-inline-end: 100%;
+}
+
+.architecture-edge-label--right .architecture-edge-label__leader {
+	inset-inline-start: 100%;
+}
+
+.architecture-edge-label__title {
+	overflow: hidden;
+	max-inline-size: 9.5rem;
+	font-size: 0.52rem;
+	font-weight: 500;
+	text-overflow: ellipsis;
+}
+
+.architecture-edge-label__meta {
+	display: none;
+}
+
+/* Page-native static diagram. Cards occupy the documentation layout directly;
+   the SVG layer only supplies the relationship lines behind those cards. */
+.architecture-static {
+	position: relative;
+	margin-block: 1.1rem 0.85rem;
+	padding-block: var(--architecture-feedback-space, 0.85rem) 3.25rem;
+}
+
+.architecture-static__grid {
+	position: relative;
+	z-index: 2;
+	display: grid;
+	grid-template-columns: repeat(var(--architecture-columns), minmax(0, 1fr));
+	grid-auto-rows: minmax(10.4rem, auto);
+	gap: 4.75rem 1.5rem;
+}
+
+.architecture-static__card {
+	grid-column: var(--architecture-column);
+	grid-row: var(--architecture-row);
+	min-block-size: 10.4rem;
+	margin: 0;
+	box-shadow: 0 1px 0 color-mix(in srgb, var(--architecture-box-accent) 28%, transparent);
+}
+
+.architecture-static__card.architecture-node--linked:hover {
+	box-shadow:
+		0 2px 0 var(--architecture-box-accent),
+		0 10px 20px rgb(0 0 0 / 11%);
+}
+
+.architecture-static__edges {
+	position: absolute;
+	z-index: 1;
+	inset: 0;
+	overflow: visible;
+	inline-size: 100%;
+	block-size: 100%;
+	pointer-events: auto;
+}
+
+.architecture-static__edge path {
+	fill: none;
+	stroke: var(--architecture-edge);
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	stroke-width: 2;
+}
+
+.architecture-static__edge {
+	cursor: pointer;
+	outline: none;
+}
+
+.architecture-static__edge-hitbox {
+	stroke: transparent !important;
+	stroke-width: 22 !important;
+	pointer-events: stroke;
+}
+
+.architecture-static__edge:hover > path:first-of-type,
+.architecture-static__edge:focus-visible > path:first-of-type,
+.architecture-static__edge--selected > path:first-of-type {
+	filter: drop-shadow(0 0 4px color-mix(in srgb, var(--architecture-edge) 72%, transparent));
+	stroke-width: 3;
+}
+
+.architecture-static__edge--selected > path:first-of-type {
+	stroke: var(--sl-color-accent-high);
+}
+
+.architecture-static__edge--asynchronous path {
+	stroke-dasharray: 7 5;
+}
+
+.architecture-static__edge--data path {
+	stroke: var(--architecture-edge-data);
+	stroke-dasharray: 2 4 8 4;
+}
+
+.architecture-static__arrow {
+	fill: var(--architecture-edge);
+}
+
+.architecture-static__arrow--data {
+	fill: var(--architecture-edge-data);
+}
+
+.architecture-static__edge-expanders {
+	position: absolute;
+	z-index: 4;
+	inset: 0;
+	pointer-events: none;
+}
+
+.architecture-edge-expander {
+	position: absolute;
+	inline-size: 0;
+	block-size: 0;
+	pointer-events: auto;
+}
+
+.architecture-edge-expander__trigger {
+	display: grid;
+	place-items: center;
+	inline-size: 1.5rem;
+	block-size: 1.5rem;
+	padding: 0;
+	border: 1px solid var(--architecture-edge);
+	border-radius: 0.2rem;
+	background: var(--architecture-surface-raised);
+	box-shadow: 0 0 0 3px var(--architecture-surface);
+	color: var(--architecture-edge);
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	font-size: 0.86rem;
+	font-weight: 800;
+	line-height: 1;
+	transform: translate(-50%, -50%);
+	cursor: help;
+}
+
+.architecture-edge-expander--important .architecture-edge-expander__trigger {
+	border-width: 2px;
+}
+
+.architecture-edge-expander__trigger--link {
+	cursor: pointer;
+	text-decoration: none;
+}
+
+.architecture-edge-expander--data .architecture-edge-expander__trigger {
+	border-color: var(--architecture-edge-data);
+	color: var(--architecture-edge-data);
+}
+
+.architecture-edge-expander__trigger:hover,
+.architecture-edge-expander__trigger[aria-expanded='true'] {
+	background: color-mix(in srgb, var(--architecture-edge) 14%, var(--architecture-surface-raised));
+}
+
+.architecture-edge-expander--data .architecture-edge-expander__trigger:hover,
+.architecture-edge-expander--data .architecture-edge-expander__trigger[aria-expanded='true'] {
+	background: color-mix(in srgb, var(--architecture-edge-data) 14%, var(--architecture-surface-raised));
+}
+
+.architecture-edge-expander__trigger:focus-visible {
+	outline: 2px solid var(--sl-color-accent-high);
+	outline-offset: 3px;
+}
+
+.architecture-edge-expander__details {
+	position: absolute;
+	z-index: 1;
+	display: grid;
+	gap: 0.22rem;
+	inline-size: min(13rem, calc(100vw - 2rem));
+	padding: 0.55rem 0.65rem;
+	border: 1px solid var(--architecture-border-strong);
+	border-radius: 0.35rem;
+	background: var(--architecture-surface-raised);
+	box-shadow: 0 8px 22px rgb(0 0 0 / 18%);
+	color: var(--architecture-text);
+	font-size: 0.7rem;
+	line-height: 1.3;
+	pointer-events: auto;
+	left: var(--architecture-edge-popover-offset-x);
+	top: var(--architecture-edge-popover-offset-y);
+}
+
+.architecture-edge-expander__details strong {
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	font-size: 0.7rem;
+	font-weight: 700;
+	word-break: break-word;
+}
+
+.architecture-edge-expander__details span {
+	color: var(--architecture-text-muted);
+	font-size: 0.64rem;
+}
+
+.architecture-edge-expander__request {
+	display: grid;
+	gap: 0.18rem;
+	margin-block-start: 0.18rem;
+	padding-block-start: 0.38rem;
+	border-block-start: 1px solid var(--architecture-border);
+}
+
+.architecture-edge-expander__request > span {
+	color: var(--architecture-text-muted);
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	font-size: 0.56rem;
+	font-weight: 700;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+}
+
+.architecture-edge-expander__request code,
+.architecture-edge-expander__request pre {
+	margin: 0;
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	font-size: 0.61rem;
+	line-height: 1.35;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.architecture-edge-expander__request code {
+	color: var(--sl-color-accent-high);
+}
+
+.architecture-edge-expander__request pre {
+	padding: 0.35rem;
+	border: 1px solid var(--architecture-border);
+	border-radius: 0.22rem;
+	background: var(--architecture-surface-muted);
+	color: var(--architecture-text-muted);
+}
+
+.architecture-static__edge-summary {
+	position: absolute;
+	overflow: hidden;
+	inline-size: 1px;
+	block-size: 1px;
+	margin: -1px;
+	padding: 0;
+	border: 0;
+	clip: rect(0 0 0 0);
+	white-space: nowrap;
+}
+
+.architecture-static + .architecture-legend,
+.architecture-diagram > .architecture-legend {
+	gap: 0.55rem 1rem;
+	margin-block-start: 0;
+	padding: 0.65rem 0;
+	border: 0;
+	border-block-start: 1px solid var(--architecture-border);
+	border-radius: 0;
+	background: transparent;
+}
+
+.react-flow__controls {
+	overflow: hidden;
+	border: 1px solid var(--architecture-border);
+	border-radius: 0.4rem;
+	box-shadow: 0 7px 24px rgb(0 0 0 / 18%);
+}
+
+.react-flow__controls-button {
+	border-block-end-color: var(--architecture-border);
+}
+
+.react-flow__controls-button:focus-visible {
+	position: relative;
+	z-index: 2;
+	outline: 2px solid var(--sl-color-accent-high);
+	outline-offset: -3px;
+}
+
+.react-flow__controls-button svg {
+	fill: currentColor;
+}
+
+.react-flow__attribution {
+	border-start-start-radius: 0.25rem;
+	background: color-mix(
+		in srgb,
+		var(--architecture-surface-raised) 86%,
+		transparent
+	);
+	font-size: 0.52rem;
+}
+
+.react-flow__attribution a {
+	color: var(--architecture-text-muted);
+}
+
+@media (max-width: 52rem) {
+	.architecture-diagram {
+		inline-size: 100%;
+		max-inline-size: 100%;
+	}
+
+	.architecture-diagram__canvas {
+		block-size: clamp(30rem, 64svh, 38rem);
+		min-block-size: 30rem;
+	}
+
+	.architecture-static {
+		padding-inline: 3rem;
+		padding-block-start: 0.85rem;
+		padding-block-end: 1.5rem;
+	}
+
+	.architecture-static__grid {
+		grid-template-columns: minmax(0, 1fr);
+		grid-auto-rows: minmax(9.75rem, auto);
+		gap: 3.25rem;
+	}
+
+	.architecture-static__card {
+		grid-column: 1;
+		grid-row: var(--architecture-mobile-order);
+		min-block-size: 9.75rem;
+	}
+
+	.react-flow__controls-button {
+		inline-size: 2.75rem;
+		block-size: 2.75rem;
+	}
+}
+
+@media (max-width: 30rem) {
+	.architecture-diagram__canvas {
+		block-size: clamp(28rem, 64svh, 34rem);
+		min-block-size: 28rem;
+		border-radius: 0.65rem;
+	}
+
+	.architecture-legend {
+		padding: 0.55rem;
+		font-size: 0.64rem;
+	}
+
+	.architecture-legend__group {
+		align-items: flex-start;
+		flex-direction: column;
+	}
+
+	.architecture-edge-label {
+		padding: 0.2rem 0.32rem;
+	}
+
+	.architecture-edge-label__leader {
+		opacity: 0.85;
+	}
+
+	.architecture-static {
+		padding-inline: 2.25rem;
+	}
+
+	.architecture-edge-expander__details {
+		inline-size: min(11rem, calc(100vw - 2rem));
+	}
+}
+
+/* Interactive desktop architecture surface.
+   This treatment intentionally has no "viewer" frame: the graph, controls, and
+   cards sit on the documentation canvas in the same way as the surrounding
+   prose. The React Flow background supplies the only spatial chrome. */
+.architecture-diagram__canvas.architecture-interactive,
+.architecture-interactive {
+	position: relative;
+	overflow: hidden;
+	contain: layout paint;
+	block-size: clamp(38rem, 72vh, 50rem);
+	min-block-size: 38rem;
+	border: 0;
+	border-radius: 0;
+	background: transparent;
+	box-shadow: none;
+	isolation: isolate;
+}
+
+.architecture-diagram__canvas.architecture-interactive::before,
+.architecture-interactive::before {
+	display: none;
+}
+
+.architecture-interactive .react-flow {
+	background: transparent;
+	color: var(--architecture-text);
+}
+
+.architecture-interactive .react-flow__background {
+	opacity: 0.62;
+}
+
+.architecture-interactive .react-flow__background pattern circle,
+.architecture-interactive .react-flow__background-pattern circle {
+	fill: var(--architecture-canvas-dot);
+}
+
+.architecture-interactive .react-flow__pane {
+	cursor: grab;
+}
+
+.architecture-interactive .react-flow__pane.dragging {
+	cursor: grabbing;
+}
+
+.architecture-interactive .react-flow__node-architectureNode,
+.architecture-interactive .react-flow__node-architecture {
+	cursor: grab;
+	transition:
+		filter 180ms ease,
+		opacity 180ms ease;
+}
+
+.architecture-interactive .react-flow__node-architectureNode.dragging,
+.architecture-interactive .react-flow__node-architecture.dragging {
+	z-index: 8 !important;
+	cursor: grabbing;
+}
+
+.architecture-interactive .architecture-node__body {
+	cursor: grab;
+	user-select: none;
+}
+
+.architecture-interactive
+	.react-flow__node-architectureNode.dragging
+	.architecture-node__body,
+.architecture-interactive
+	.react-flow__node-architecture.dragging
+	.architecture-node__body {
+	cursor: grabbing;
+}
+
+.architecture-interactive .architecture-node {
+	box-shadow:
+		0 1px 0 color-mix(in srgb, var(--architecture-box-accent) 24%, transparent),
+		0 8px 20px rgb(0 0 0 / 15%);
+	transition:
+		border-color 180ms ease,
+		box-shadow 180ms ease,
+		filter 180ms ease,
+		opacity 180ms ease;
+}
+
+.architecture-interactive .architecture-node:hover {
+	border-color: color-mix(
+		in srgb,
+		var(--architecture-box-accent) 78%,
+		var(--architecture-border)
+	);
+	box-shadow:
+		0 0 0 1px color-mix(in srgb, var(--architecture-box-accent) 42%, transparent),
+		0 11px 24px rgb(0 0 0 / 18%);
+}
+
+.architecture-interactive .architecture-node--linked:hover {
+	transform: none;
+}
+
+.architecture-interactive .architecture-box__status {
+	display: none;
+}
+
+/* The whole card remains a drag surface. Navigation is deliberately isolated
+   in a small native link so dragging never accidentally changes pages. */
+.architecture-node__open-link {
+	position: absolute;
+	z-index: 4;
+	inset-block-start: 0.48rem;
+	inset-inline-end: 0.5rem;
+	display: grid;
+	box-sizing: border-box;
+	inline-size: 1.65rem;
+	block-size: 1.65rem;
+	place-items: center;
+	padding: 0;
+	border: 1px solid color-mix(
+		in srgb,
+		var(--architecture-box-accent) 52%,
+		var(--architecture-border)
+	);
+	border-radius: 0.32rem;
+	background: color-mix(
+		in srgb,
+		var(--architecture-surface-raised) 92%,
+		transparent
+	);
+	box-shadow: 0 2px 8px rgb(0 0 0 / 12%);
+	color: var(--architecture-box-accent, var(--sl-color-accent-high));
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	font-size: 0.78rem;
+	font-weight: 800;
+	line-height: 1;
+	text-decoration: none;
+	cursor: pointer;
+	transition:
+		background-color 140ms ease,
+		border-color 140ms ease,
+		box-shadow 140ms ease,
+		transform 140ms ease;
+}
+
+.architecture-node__open-link:hover {
+	border-color: var(--architecture-box-accent, var(--architecture-border-strong));
+	background: color-mix(
+		in srgb,
+		var(--architecture-box-accent) 15%,
+		var(--architecture-surface-raised)
+	);
+	box-shadow: 0 4px 12px rgb(0 0 0 / 17%);
+	transform: translateY(-1px);
+}
+
+.architecture-node__open-link:focus-visible {
+	outline: 2px solid var(--architecture-focus-ring);
+	outline-offset: 3px;
+}
+
+/* Cardinal handles are routing anchors, not authoring controls. They remain in
+   layout for React Flow but are never visible or interactive. */
+.architecture-interactive .react-flow__handle,
+.architecture-interactive .architecture-node__handle {
+	inline-size: 1px;
+	block-size: 1px;
+	min-inline-size: 1px;
+	min-block-size: 1px;
+	border: 0;
+	background: transparent;
+	opacity: 0;
+	pointer-events: none;
+}
+
+/* Focus mode: accept both the component-level and flow-wrapper class names so
+   the visual contract remains stable as node data evolves. */
+.architecture-interactive .architecture-node--focused,
+.architecture-interactive .architecture-flow-node--focused .architecture-node,
+.architecture-interactive
+	.react-flow__node-architectureNode.is-focused
+	.architecture-node,
+.architecture-interactive
+	.react-flow__node-architectureNode[data-focus='active']
+	.architecture-node {
+	border-color: var(--architecture-focus-ring);
+	box-shadow:
+		0 0 0 2px color-mix(in srgb, var(--architecture-focus-ring) 62%, transparent),
+		0 0 28px color-mix(in srgb, var(--architecture-focus-ring) 20%, transparent),
+		0 12px 28px rgb(0 0 0 / 18%);
+}
+
+.architecture-interactive .architecture-node--related,
+.architecture-interactive .architecture-flow-node--related .architecture-node,
+.architecture-interactive
+	.react-flow__node-architectureNode[data-focus='related']
+	.architecture-node {
+	border-color: color-mix(
+		in srgb,
+		var(--architecture-box-accent) 70%,
+		var(--architecture-border)
+	);
+}
+
+.architecture-interactive .architecture-node--dimmed,
+.architecture-interactive .architecture-flow-node--dimmed,
+.architecture-interactive
+	.react-flow__node-architectureNode.is-dimmed,
+.architecture-interactive
+	.react-flow__node-architectureNode[data-focus='dimmed'] {
+	filter: saturate(0.48);
+	opacity: 0.23;
+}
+
+.architecture-interactive .architecture-node--dimmed:hover,
+.architecture-interactive .architecture-flow-node--dimmed:hover,
+.architecture-interactive
+	.react-flow__node-architectureNode.is-dimmed:hover {
+	opacity: 0.46;
+}
+
+/* Live relationships. The base path retains the protocol convention; a
+   separate low-opacity dash stream supplies direction without obscuring it. */
+.architecture-interactive .architecture-edge,
+.architecture-interactive .architecture-edge__base {
+	fill: none;
+	stroke: var(--architecture-edge);
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	stroke-width: 2;
+	vector-effect: non-scaling-stroke;
+}
+
+.architecture-interactive .architecture-edge--asynchronous,
+.architecture-interactive .architecture-edge__base--asynchronous {
+	stroke-dasharray: 8 6;
+}
+
+.architecture-interactive .architecture-edge--data,
+.architecture-interactive .architecture-edge__base--data {
+	stroke: var(--architecture-edge-data);
+	stroke-dasharray: 2 5 10 5;
+}
+
+.architecture-edge__motion {
+	fill: none;
+	stroke: color-mix(in srgb, var(--architecture-edge) 86%, white 14%);
+	stroke-dasharray: 2 14;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	stroke-width: 3;
+	opacity: 0.68;
+	pointer-events: none;
+	vector-effect: non-scaling-stroke;
+}
+
+.architecture-edge__motion--forward {
+	animation: architecture-flow-forward 1.05s linear infinite;
+}
+
+.architecture-edge--data ~ .architecture-edge__motion,
+.architecture-edge__motion--data,
+.architecture-static__edge--data .architecture-edge__motion {
+	stroke: color-mix(in srgb, var(--architecture-edge-data) 88%, white 12%);
+}
+
+@keyframes architecture-flow-forward {
+	to {
+		stroke-dashoffset: -32;
+	}
+}
+
+.architecture-edge__arrow,
+.architecture-edge__arrow path,
+.architecture-edge__marker path {
+	fill: var(--architecture-edge);
+	stroke: var(--architecture-edge);
+}
+
+.architecture-edge__arrow--data,
+.architecture-edge__marker--data path {
+	fill: var(--architecture-edge-data);
+	stroke: var(--architecture-edge-data);
+}
+
+.architecture-interactive .architecture-edge--emphasized,
+.architecture-interactive .architecture-edge__base--emphasized,
+.architecture-interactive
+	.react-flow__edge.is-emphasized
+	.architecture-edge {
+	stroke-width: 2.65;
+	opacity: 1;
+}
+
+.architecture-interactive .architecture-edge--dimmed,
+.architecture-interactive .architecture-edge__base--dimmed,
+.architecture-interactive .architecture-edge__motion--dimmed,
+.architecture-interactive .react-flow__edge.is-dimmed {
+	opacity: 0.12;
+}
+
+.architecture-interactive .react-flow__edge {
+	cursor: pointer;
+}
+
+.architecture-interactive .react-flow__edge-interaction {
+	stroke-width: 22;
+}
+
+.architecture-interactive .architecture-edge--selected {
+	filter: drop-shadow(0 0 4px color-mix(in srgb, var(--sl-color-accent-high) 70%, transparent));
+	stroke: var(--sl-color-accent-high);
+	stroke-width: 3;
+	opacity: 1;
+}
+
+.architecture-interactive .react-flow__edge:focus-visible .architecture-edge,
+.architecture-interactive .react-flow__edge:hover .architecture-edge {
+	filter: drop-shadow(0 0 3px color-mix(in srgb, var(--architecture-edge) 65%, transparent));
+	stroke-width: 2.75;
+}
+
+.architecture-interactive
+	.react-flow__edge.is-dimmed
+	.architecture-edge-expander,
+.architecture-interactive
+	.react-flow__edge.is-dimmed
+	.architecture-edge__expander {
+	visibility: hidden;
+}
+
+/* React Flow renders edge controls in a transformed HTML overlay. Reuse the
+   static detail control, while making its panel placement work without
+   hand-authored connector coordinates. */
+.architecture-interactive .react-flow__edgelabel-renderer {
+	z-index: 7;
+}
+
+.architecture-interactive .architecture-edge-expander,
+.architecture-interactive .architecture-edge__expander {
+	z-index: 7;
+	pointer-events: auto;
+	transition: opacity 160ms ease;
+}
+
+.architecture-interactive .architecture-edge-expander--dimmed {
+	opacity: 0.12;
+	pointer-events: none;
+}
+
+.architecture-interactive
+	.architecture-edge-expander--emphasized
+	.architecture-edge-expander__trigger {
+	border-color: var(--architecture-focus-ring);
+	box-shadow:
+		0 0 0 3px color-mix(in srgb, var(--sl-color-bg) 82%, transparent),
+		0 0 0 1px var(--architecture-focus-ring),
+		0 4px 12px rgb(0 0 0 / 18%);
+}
+
+.architecture-interactive .architecture-edge-expander__trigger {
+	box-shadow:
+		0 0 0 3px color-mix(in srgb, var(--sl-color-bg) 82%, transparent),
+		0 3px 10px rgb(0 0 0 / 16%);
+}
+
+.architecture-interactive .architecture-edge-expander__details {
+	z-index: 12;
+	left: var(--architecture-edge-popover-offset-x, 0);
+	top: var(--architecture-edge-popover-offset-y, -0.8rem);
+	max-block-size: min(20rem, calc(72vh - 2rem));
+	overflow: auto;
+	overscroll-behavior: contain;
+}
+
+.architecture-edge-expander__reference {
+	display: inline-flex;
+	gap: 0.2rem;
+	align-items: center;
+	justify-self: start;
+	margin-block-start: 0.18rem;
+	color: var(--sl-color-accent-high);
+	font-size: 0.64rem;
+	font-weight: 700;
+	line-height: 1.25;
+	text-decoration: none;
+}
+
+.architecture-edge-expander__reference:hover {
+	text-decoration: underline;
+	text-underline-offset: 0.18rem;
+}
+
+.architecture-edge-expander__reference:focus-visible {
+	border-radius: 0.16rem;
+	outline: 2px solid var(--architecture-focus-ring);
+	outline-offset: 2px;
+}
+
+/* One reusable relationship inspector replaces all midpoint edge controls.
+   It occupies a dedicated page rail and never overlays connector geometry. */
+.architecture-connection-panel {
+	position: sticky;
+	z-index: 5;
+	top: 5rem;
+	display: flex;
+	flex-direction: column;
+	gap: 1rem;
+	inline-size: 100%;
+	max-block-size: calc(100vh - 6rem);
+	padding: 1rem;
+	border: 1px solid var(--architecture-border-strong);
+	border-radius: 0.5rem;
+	background: color-mix(in srgb, var(--architecture-surface-raised) 96%, transparent);
+	box-shadow: 0 12px 30px rgb(0 0 0 / 14%);
+	color: var(--architecture-text);
+	overflow: auto;
+	overscroll-behavior: contain;
+	animation: architecture-panel-enter 160ms ease-out;
+}
+
+@keyframes architecture-panel-enter {
+	from {
+		opacity: 0;
+		transform: translateX(0.75rem);
+	}
+}
+
+.architecture-connection-panel__header {
+	display: flex;
+	gap: 0.75rem;
+	align-items: flex-start;
+	justify-content: space-between;
+	padding-block-end: 0.8rem;
+	border-block-end: 1px solid var(--architecture-border);
+}
+
+.architecture-connection-panel__header > div {
+	min-inline-size: 0;
+}
+
+.architecture-connection-panel__header span,
+.architecture-connection-panel__message h5,
+.architecture-connection-panel__message p > span {
+	display: block;
+	margin: 0;
+	color: var(--architecture-text-muted);
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	font-size: 0.62rem;
+	font-weight: 700;
+	letter-spacing: 0.09em;
+	text-transform: uppercase;
+}
+
+.architecture-connection-panel__header h4 {
+	margin: 0.2rem 0 0;
+	color: var(--architecture-text);
+	font-size: 1rem;
+	line-height: 1.25;
+	word-break: break-word;
+}
+
+.architecture-connection-panel__close {
+	display: grid;
+	flex: 0 0 auto;
+	place-items: center;
+	inline-size: 2rem;
+	block-size: 2rem;
+	padding: 0;
+	border: 1px solid var(--architecture-border);
+	border-radius: 0.35rem;
+	background: var(--architecture-surface-muted);
+	color: var(--architecture-text);
+	font-size: 1.35rem;
+	line-height: 1;
+	cursor: pointer;
+}
+
+.architecture-connection-panel__close:hover {
+	border-color: var(--architecture-edge);
+}
+
+.architecture-connection-panel__close:focus-visible,
+.architecture-connection-panel__reference:focus-visible {
+	outline: 2px solid var(--architecture-focus-ring);
+	outline-offset: 2px;
+}
+
+.architecture-connection-panel__metadata {
+	display: grid;
+	gap: 0;
+	margin: 0;
+	border: 1px solid var(--architecture-border);
+	border-radius: 0.4rem;
+}
+
+.architecture-connection-panel__metadata > div {
+	display: grid;
+	grid-template-columns: 5rem 1fr;
+	gap: 0.65rem;
+	padding: 0.55rem 0.65rem;
+}
+
+.architecture-connection-panel__metadata > div + div {
+	border-block-start: 1px solid var(--architecture-border);
+}
+
+.architecture-connection-panel__metadata dt {
+	color: var(--architecture-text-muted);
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	font-size: 0.65rem;
+}
+
+.architecture-connection-panel__metadata dd {
+	margin: 0;
+	font-size: 0.72rem;
+	font-weight: 650;
+}
+
+.architecture-connection-panel__message {
+	display: grid;
+	gap: 0.5rem;
+}
+
+.architecture-connection-panel__message h5,
+.architecture-connection-panel__message p {
+	margin: 0;
+}
+
+.architecture-connection-panel__message > strong {
+	font-size: 0.79rem;
+	line-height: 1.35;
+}
+
+.architecture-connection-panel__message p {
+	display: flex;
+	gap: 0.45rem;
+	align-items: baseline;
+}
+
+.architecture-connection-panel__message p > span {
+	display: inline;
+}
+
+.architecture-connection-panel__message code {
+	font-size: 0.7rem;
+	overflow-wrap: anywhere;
+	word-break: break-word;
+}
+
+.architecture-connection-panel__message pre {
+	max-block-size: 15rem;
+	margin: 0;
+	padding: 0.65rem;
+	border: 1px solid var(--architecture-border);
+	border-radius: 0.35rem;
+	background: var(--architecture-surface-muted);
+	color: var(--architecture-text);
+	font-size: 0.66rem;
+	line-height: 1.45;
+	overflow: auto;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.architecture-connection-panel__reference {
+	display: inline-flex;
+	gap: 0.25rem;
+	align-items: center;
+	align-self: flex-start;
+	margin-block-start: auto;
+	color: var(--sl-color-accent-high);
+	font-size: 0.72rem;
+	font-weight: 750;
+	text-decoration: none;
+}
+
+.architecture-connection-panel__reference:hover {
+	text-decoration: underline;
+	text-underline-offset: 0.2rem;
+}
+
+.architecture-interactive
+	.architecture-edge-expander[data-placement='above']
+	.architecture-edge-expander__details {
+	transform: translate(-50%, calc(-100% - 1.05rem));
+}
+
+.architecture-interactive
+	.architecture-edge-expander[data-placement='below']
+	.architecture-edge-expander__details {
+	transform: translate(-50%, 1.05rem);
+}
+
+/* Compact page-native graph controls, including a reset action supplied by the
+   renderer. */
+.architecture-interactive .react-flow__controls {
+	overflow: hidden;
+	margin: 0.65rem;
+	border: 1px solid color-mix(in srgb, var(--architecture-border) 78%, transparent);
+	border-radius: 0.4rem;
+	background: color-mix(
+		in srgb,
+		var(--architecture-surface-raised) 90%,
+		transparent
+	);
+	box-shadow: 0 5px 16px rgb(0 0 0 / 14%);
+	backdrop-filter: blur(9px);
+	opacity: 0.86;
+	transition: opacity 140ms ease;
+}
+
+.architecture-interactive .react-flow__controls:hover,
+.architecture-interactive .react-flow__controls:focus-within {
+	opacity: 1;
+}
+
+.architecture-interactive .react-flow__controls-button {
+	inline-size: 1.9rem;
+	block-size: 1.9rem;
+	border-block-end-color: color-mix(
+		in srgb,
+		var(--architecture-border) 70%,
+		transparent
+	);
+	background: transparent;
+	color: var(--architecture-text-muted);
+}
+
+.architecture-interactive .react-flow__controls-button:hover {
+	background: color-mix(
+		in srgb,
+		var(--sl-color-accent-low) 52%,
+		transparent
+	);
+	color: var(--architecture-text);
+}
+
+.architecture-interactive__toolbar,
+.architecture-interactive .architecture-layout-controls,
+.architecture-interactive .react-flow__panel.architecture-layout-controls {
+	display: flex;
+	gap: 0.35rem;
+	align-items: center;
+	margin: 0.65rem;
+}
+
+.architecture-interactive__reset,
+.architecture-layout-reset {
+	display: inline-flex;
+	gap: 0.32rem;
+	align-items: center;
+	min-block-size: 1.9rem;
+	padding: 0.3rem 0.55rem;
+	border: 1px solid color-mix(in srgb, var(--architecture-border) 78%, transparent);
+	border-radius: 0.36rem;
+	background: color-mix(
+		in srgb,
+		var(--architecture-surface-raised) 90%,
+		transparent
+	);
+	box-shadow: 0 4px 14px rgb(0 0 0 / 12%);
+	color: var(--architecture-text-muted);
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	font-size: 0.62rem;
+	font-weight: 700;
+	line-height: 1;
+	cursor: pointer;
+	backdrop-filter: blur(9px);
+}
+
+.architecture-interactive__reset:hover,
+.architecture-layout-reset:hover {
+	border-color: var(--architecture-border-strong);
+	color: var(--architecture-text);
+}
+
+.architecture-interactive__reset:focus-visible,
+.architecture-layout-reset:focus-visible {
+	outline: 2px solid var(--architecture-focus-ring);
+	outline-offset: 2px;
+}
+
+.architecture-interactive__instructions,
+.architecture-interactive__summary,
+.architecture-visually-hidden {
+	position: absolute;
+	overflow: hidden;
+	inline-size: 1px;
+	block-size: 1px;
+	margin: -1px;
+	padding: 0;
+	border: 0;
+	clip: rect(0 0 0 0);
+	white-space: nowrap;
+}
+
+/* Boundaries are derived from member-card positions. They follow dragged
+   stages without becoming workflow endpoints or persisted layout records. */
+.architecture-interactive .react-flow__node-architectureBoundary {
+	z-index: -1 !important;
+	pointer-events: none;
+}
+
+.architecture-boundary {
+	box-sizing: border-box;
+	inline-size: 100%;
+	block-size: 100%;
+	border: 1px dashed color-mix(in srgb, var(--architecture-boundary) 52%, var(--architecture-border));
+	border-radius: 0.65rem;
+	background: color-mix(in srgb, var(--architecture-boundary) 4%, transparent);
+	color: var(--architecture-text);
+	pointer-events: none;
+}
+
+.architecture-boundary > header {
+	position: absolute;
+	inset-block-start: 0.55rem;
+	inset-inline-start: 0.7rem;
+	display: flex;
+	gap: 0.55rem;
+	align-items: baseline;
+}
+
+.architecture-boundary > header span,
+.architecture-static__boundary span {
+	color: var(--architecture-text-muted);
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	font-size: 0.52rem;
+	font-weight: 700;
+	letter-spacing: 0.09em;
+	text-transform: uppercase;
+}
+
+.architecture-boundary > header strong,
+.architecture-static__boundary strong {
+	color: color-mix(in srgb, var(--architecture-boundary) 78%, var(--architecture-text));
+	font-size: 0.7rem;
+}
+
+.architecture-boundary--runtime,
+.architecture-boundary--trust {
+	border-style: dotted;
+	border-color: color-mix(in srgb, var(--architecture-worker) 72%, var(--architecture-border));
+	background: color-mix(in srgb, var(--architecture-worker) 7%, transparent);
+}
+
+.architecture-static__boundary {
+	display: none;
+}
+
+.architecture-node[role='button'] {
+	cursor: pointer;
+}
+
+.architecture-node[role='button']:focus-visible,
+.architecture-static__card[role='button']:focus-visible {
+	outline: 3px solid var(--architecture-focus-ring);
+	outline-offset: 4px;
+}
+
+.architecture-node--variant-gate {
+	clip-path: polygon(12% 0, 88% 0, 100% 50%, 88% 100%, 12% 100%, 0 50%);
+}
+
+.architecture-node--variant-gate .architecture-node__body {
+	padding-inline: 1.35rem;
+}
+
+.architecture-node--variant-completion {
+	border-block-end: 3px double var(--architecture-box-accent);
+}
+
+.architecture-connection-panel__summary,
+.architecture-node-panel__responsibility {
+	margin: 0;
+	color: var(--architecture-text-muted);
+	font-size: 0.77rem;
+	line-height: 1.5;
+}
+
+.architecture-inspector__metadata {
+	display: grid;
+	gap: 0;
+	margin: 0;
+	border: 1px solid var(--architecture-border);
+	border-radius: 0.4rem;
+}
+
+.architecture-inspector__metadata > div {
+	display: grid;
+	grid-template-columns: 5.3rem minmax(0, 1fr);
+	gap: 0.6rem;
+	padding: 0.52rem 0.62rem;
+}
+
+.architecture-inspector__metadata > div + div {
+	border-block-start: 1px solid var(--architecture-border);
+}
+
+.architecture-inspector__metadata dt,
+.architecture-inspector__field h5,
+.architecture-inspector__field h6 {
+	color: var(--architecture-text-muted);
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	font-size: 0.59rem;
+	font-weight: 700;
+	letter-spacing: 0.07em;
+	text-transform: uppercase;
+}
+
+.architecture-inspector__metadata dd {
+	margin: 0;
+	color: var(--architecture-text);
+	font-size: 0.69rem;
+	line-height: 1.4;
+}
+
+.architecture-inspector__section {
+	border-block-start: 1px solid var(--architecture-border);
+}
+
+.architecture-inspector__section > summary {
+	padding-block: 0.68rem;
+	color: var(--architecture-text);
+	font-size: 0.76rem;
+	font-weight: 700;
+	cursor: pointer;
+}
+
+.architecture-inspector__section > summary:focus-visible {
+	outline: 2px solid var(--architecture-focus-ring);
+	outline-offset: 2px;
+}
+
+.architecture-inspector__section > div {
+	display: grid;
+	gap: 0.7rem;
+	padding-block-end: 0.8rem;
+}
+
+.architecture-inspector__field h5,
+.architecture-inspector__field h6,
+.architecture-inspector__field p,
+.architecture-inspector__field ul,
+.architecture-inspector__field ol {
+	margin: 0;
+}
+
+.architecture-inspector__field h5,
+.architecture-inspector__field h6 {
+	margin-block-end: 0.35rem;
+}
+
+.architecture-inspector__field p,
+.architecture-inspector__field li {
+	color: var(--architecture-text-muted);
+	font-size: 0.69rem;
+	line-height: 1.5;
+}
+
+.architecture-inspector__field ul,
+.architecture-inspector__field ol {
+	padding-inline-start: 1rem;
+}
+
+.architecture-inspector__contracts {
+	display: grid;
+	gap: 0.45rem;
+	margin: 0;
+}
+
+.architecture-inspector__contracts dt {
+	color: var(--architecture-text);
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	font-size: 0.65rem;
+}
+
+.architecture-inspector__contracts dd {
+	margin: 0.15rem 0 0;
+	color: var(--architecture-text-muted);
+	font-size: 0.67rem;
+	line-height: 1.4;
+}
+
+.architecture-inspector__failures {
+	display: grid;
+	gap: 0.5rem;
+	padding: 0 !important;
+	list-style: none;
+}
+
+.architecture-inspector__failures li {
+	display: grid;
+	gap: 0.12rem;
+	padding-inline-start: 0.55rem;
+	border-inline-start: 2px solid var(--architecture-state);
+}
+
+.architecture-inspector__failures strong {
+	color: var(--architecture-text);
+}
+
+.architecture-inspector__failures small {
+	color: var(--architecture-text-muted);
+}
+
+.architecture-inspector__evidence {
+	display: grid;
+	gap: 0.48rem;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.architecture-inspector__evidence li {
+	display: grid;
+	gap: 0.18rem;
+	padding: 0.52rem;
+	border: 1px solid var(--architecture-border);
+	border-radius: 0.3rem;
+	background: var(--architecture-surface-muted);
+}
+
+.architecture-inspector__evidence span {
+	color: var(--architecture-boundary);
+	font-family: var(--__sl-font-mono, ui-monospace, monospace);
+	font-size: 0.52rem;
+	font-weight: 700;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+}
+
+.architecture-inspector__evidence code {
+	color: var(--architecture-text);
+	font-size: 0.61rem;
+	overflow-wrap: anywhere;
+}
+
+.architecture-inspector__evidence strong {
+	color: var(--architecture-text-muted);
+	font-size: 0.61rem;
+	font-weight: 500;
+}
+
+/* Mobile keeps the authored vertical narrative. Its optional motion paths use
+   the same classes but never introduce panning, zooming, or drag affordances. */
+.architecture-static .architecture-edge__motion {
+	stroke-dasharray: 2 14;
+	stroke-width: 2.6;
+	opacity: 0.58;
+}
+
+@media (max-width: 52rem) {
+	/* If responsive rendering keeps both variants mounted, only the authored
+	   static stack participates in layout on narrow screens. */
+	.architecture-interactive,
+	.architecture-diagram__interactive {
+		display: none !important;
+	}
+
+	.architecture-static {
+		box-sizing: border-box;
+		inline-size: 100%;
+		max-inline-size: 100%;
+		contain: inline-size;
+	}
+
+	.architecture-static__grid {
+		inline-size: 100%;
+		max-inline-size: 100%;
+		grid-auto-rows: auto;
+	}
+
+	.architecture-static__card {
+		inline-size: 100%;
+		max-inline-size: 100%;
+	}
+
+	.architecture-static__boundary {
+		display: flex;
+		grid-column: 1;
+		grid-row: var(--architecture-mobile-order);
+		flex-direction: column;
+		gap: 0.18rem;
+		padding: 0.5rem 0.65rem;
+		border-inline-start: 2px solid var(--architecture-boundary);
+		background: color-mix(in srgb, var(--architecture-boundary) 7%, transparent);
+	}
+
+	.architecture-static__boundary--runtime,
+	.architecture-static__boundary--trust {
+		margin-inline: 0.65rem;
+		border-inline-start-color: var(--architecture-worker);
+	}
+
+	.architecture-connection-panel {
+		position: static;
+		inline-size: 100%;
+		max-block-size: none;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.architecture-edge__motion {
+		display: none;
+		animation: none;
+	}
+
+	.architecture-interactive .architecture-node,
+	.architecture-interactive .react-flow__node-architectureNode,
+	.architecture-node__open-link,
+	.architecture-interactive .react-flow__controls {
+		transition: none;
+	}
+}

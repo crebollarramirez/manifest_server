@@ -1,0 +1,50 @@
+---
+import ArchitecturePage from '../../components/ArchitecturePage.astro';
+import indexerWorker from '../../data/architecture/indexer-worker.json';
+---
+
+<ArchitecturePage title="Indexer Worker" summary="A polling worker that claims durable index jobs, analyzes CAD source without executing it, publishes semantic indexes, and serves Getter tests." section="Service view" active="indexer-worker" document={indexerWorker} fallback="Loading the Indexer Worker diagram…" showExampleNotice={false} sidebarNote="Production indexer service: static CAD-source analysis and semantic-index retrieval support.">
+	<article slot="beforeDiagram" class="doc-prose">
+		<h2>Purpose and boundaries</h2>
+		<p>The Indexer Worker processes <code>build_index</code> and <code>test_getter</code> jobs from <code>index_jobs</code>. For a build, it reads CAD <code>model.py</code> files, parses them with Python&rsquo;s built-in AST module without executing them, assembles one project-wide semantic index, verifies source freshness, stores the result, and records the outcome.</p>
+		<p>It does not accept client traffic, modify canonical CAD sources, or retain durable worker state between jobs. Index Jobs owns lifecycle state, 3dProjects storage owns source inputs and published indexes, and the worker owns only the active in-memory operation.</p>
+		<p>The diagram begins at <code>index_jobs</code>, the worker&rsquo;s direct trigger and durable boundary. Jobs live in the Postgres table, while its service-role claim function supplies queue semantics. Client and Edge Function interactions remain on the Backend System Design page because they do not call this worker directly.</p>
+	</article>
+	<h2>How it works</h2>
+	<ol>
+		<li>The worker claims the oldest queued job through the service-role-only <code>claim_next_index_job</code> database function.</li>
+		<li>For <code>build_index</code>, the Source Loader reads each CAD source at <code>&lt;project_id&gt;/parts/cad/&lt;part_id&gt;/model.py</code> and calculates a SHA-256 hash.</li>
+		<li>Static AST Extraction normalizes supported source structures without executing project code.</li>
+		<li>The Index Builder assembles deterministic semantic records into <code>semantic_index.json</code>.</li>
+		<li>The worker reads sources again and publishes only if their part IDs, names, and hashes are unchanged.</li>
+		<li>Job Status Update records a completed result, or an operational failure with diagnostics.</li>
+	</ol>
+	<p>A failed build does not replace the previous index. <code>test_getter</code> jobs read an existing index and return a completed result such as <code>missing_index</code>, <code>stale_index</code>, or <code>no_match</code> when applicable.</p>
+	<h2>Interfaces</h2>
+	<table><thead><tr><th>Interface</th><th>Direction</th><th>Contract</th></tr></thead><tbody>
+		<tr><td>Index Jobs claim</td><td>Inbound</td><td>One queued <code>build_index</code> or <code>test_getter</code> job claimed by the worker.</td></tr>
+		<tr><td>CAD source files</td><td>Inbound</td><td>Read-only <code>model.py</code> files from 3dProjects storage for CAD parts in the project.</td></tr>
+		<tr><td>Artifact publication</td><td>Outbound</td><td>Validated <code>semantic_index.json</code> written to <code>&lt;project_id&gt;/index/semantic_index.json</code>.</td></tr>
+		<tr><td>Job outcome</td><td>Outbound</td><td>Completed result or failed status with a truncated diagnostic message.</td></tr>
+	</tbody></table>
+	<h2>Data ownership</h2>
+	<p>The worker owns only in-memory build state for the active claim. It may stage a candidate artifact while processing, but that candidate is disposable and is not authoritative.</p>
+	<table><thead><tr><th>Data</th><th>Durable owner</th><th>Worker access</th></tr></thead><tbody>
+		<tr><td>Job status and results</td><td>Index Jobs</td><td>Claim one queued job and report its outcome.</td></tr>
+		<tr><td>Canonical project sources</td><td>3dProjects storage</td><td>Read CAD <code>model.py</code> files without modifying them.</td></tr>
+		<tr><td>Last valid semantic index</td><td>3dProjects storage</td><td>Write a validated replacement at the project index path.</td></tr>
+		<tr><td>Active extraction and build state</td><td>None</td><td>Ephemeral for one claim.</td></tr>
+	</tbody></table>
+	<h2>Important design decisions</h2>
+	<ul>
+		<li><strong>Publish after validation:</strong> source IDs, names, and SHA-256 hashes are rechecked before replacing the stored index.</li>
+		<li><strong>Stateless worker:</strong> the process keeps no durable build state; job state and index data live outside the worker.</li>
+		<li><strong>Static extraction:</strong> the worker analyzes source structure without executing CAD model code.</li>
+		<li><strong>Explicit failure reporting:</strong> a failed build updates lifecycle state while preserving the previous artifact.</li>
+	</ul>
+	<h2>Operations</h2>
+	<p>The worker polls every two seconds by default. CAD part creation automatically queues a project build; the exact runtime-only blank CAD marker is excluded until the CAD Editor validates and commits its first model. A blank-only project therefore publishes a valid empty index, while a mixed project indexes its established parts. Useful signals are queue age, build duration, source-file count, artifact size, completed and failed jobs, and stale-index results. Logs include the job ID and result or traceback, without source contents.</p>
+	<aside class="notice notice--caution"><span class="notice__mark" aria-hidden="true">!</span><div><h2>Failure behavior</h2><p>If loading, parsing, validation, source freshness checking, or storage publication raises an exception, the worker marks the job as <code>failed</code>. A changed source set fails the build before publication, preserving the previous index.</p></div></aside>
+	<h2>Source code</h2>
+	<p>The worker implementation is in <code>workers/indexer/</code>. <code>index_worker.py</code> polls and completes jobs, <code>indexer/service.py</code> coordinates build and Getter-test workflows, and <code>indexer/repository.py</code> isolates Supabase database and storage access.</p>
+</ArchitecturePage>

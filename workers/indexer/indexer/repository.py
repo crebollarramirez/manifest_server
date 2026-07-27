@@ -8,6 +8,7 @@ from .models import SourceFile
 
 BUCKET = "3dProjects"
 INDEX_FILENAME = "semantic_index.json"
+INITIAL_CAD_SOURCE = "from cadquery_runtime import cad_part, cq, dataclass\n"
 
 
 def index_storage_path(project_id: str) -> str:
@@ -16,6 +17,16 @@ def index_storage_path(project_id: str) -> str:
 
 def cad_source_storage_path(project_id: str, part_id: str) -> str:
     return f"{project_id}/parts/cad/{part_id}/model.py"
+
+
+def is_uninitialized_cad_source(content: str) -> bool:
+    """Return whether a source is the system-owned blank CAD-part marker.
+
+    Blank parts are intentionally not valid CadQuery programs yet. They become
+    indexable only after the CAD Editor validates and commits their first model.
+    """
+
+    return content == INITIAL_CAD_SOURCE
 
 
 class SupabaseProjectRepository:
@@ -53,6 +64,8 @@ class SupabaseProjectRepository:
                 content = raw_source.decode("utf-8")
             except UnicodeDecodeError as exc:
                 raise ValueError(f"{path} is not valid UTF-8.") from exc
+            if is_uninitialized_cad_source(content):
+                continue
             sources.append(
                 SourceFile.from_content(
                     part_id=part_id,
@@ -62,6 +75,34 @@ class SupabaseProjectRepository:
                 )
             )
         return sources
+
+    def cad_source(self, project_id: str, part_id: str) -> SourceFile:
+        response = (
+            self.supabase.table("parts")
+            .select("id, part_name")
+            .eq("project_id", project_id)
+            .eq("id", part_id)
+            .eq("part_type", "cad")
+            .limit(1)
+            .execute()
+        )
+        if not response.data:
+            raise ValueError(
+                f'CAD part "{part_id}" does not exist in project "{project_id}".'
+            )
+        part = response.data[0]
+        path = cad_source_storage_path(project_id, part_id)
+        raw_source = self.supabase.storage.from_(BUCKET).download(path)
+        try:
+            content = raw_source.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"{path} is not valid UTF-8.") from exc
+        return SourceFile.from_content(
+            part_id=part_id,
+            part_name=str(part["part_name"]),
+            storage_path=path,
+            content=content,
+        )
 
     def read_index(self, project_id: str) -> dict | None:
         directory = f"{project_id}/index"
@@ -95,3 +136,15 @@ class SupabaseProjectRepository:
             },
         )
         return path
+
+    def create_getter(self, project_id: str):
+        from .getter import IndexGetter
+
+        def load() -> tuple[dict, list[SourceFile]]:
+            index = self.read_index(project_id)
+            if index is None:
+                raise ValueError(f'Project "{project_id}" does not have an index.')
+            return index, self.list_cad_sources(project_id)
+
+        index, sources = load()
+        return IndexGetter(index, sources, loader=load)

@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from .extractor import extract_part_index
-from .models import IndexingError, SourceFile
+from .models import SourceFile
 
 
 def build_project_index(
@@ -14,11 +14,6 @@ def build_project_index(
     *,
     now: Callable[[], datetime] | None = None,
 ) -> dict:
-    if not sources:
-        raise IndexingError(
-            f'Project "{project_name}" does not contain any CAD source files.'
-        )
-
     ordered_sources = sorted(
         sources,
         key=lambda source: (source.part_name.casefold(), source.part_id),

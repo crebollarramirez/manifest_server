@@ -51,6 +51,8 @@ flowchart LR
     Index --> Storage[("3dProjects storage")]
     Storage --> Getter["IndexGetter"]
     Source --> Getter
+    Editor["Independent cad-editor"] --> Getter
+    Editor --> Jobs
     Getter --> Jobs
     Jobs --> Edge
     Edge --> CLI
@@ -62,6 +64,11 @@ job through a service-role-only database function.
 
 There is one worker process and one Docker Compose service. That worker handles
 both index creation and manual Getter tests.
+
+The independent CAD editor also consumes the Getter. It may queue a normal
+`build_index` job when an edit starts with a missing or stale index and after a
+candidate commit. The indexer remains read-only with respect to CAD source and
+contains no AI or edit orchestration logic.
 
 ## Job Types
 
@@ -217,14 +224,14 @@ to remain small enough for inspection now and future AI use later.
 | `indexer/models.py` | Define the source-file boundary and indexing error |
 | `indexer/extractor.py` | Parse and validate one CAD model with Python AST |
 | `indexer/index_builder.py` | Assemble the project index and build summary |
-| `indexer/getter.py` | Check freshness, rank matches, and retrieve context |
+| `indexer/getter.py` | Check freshness, rank matches, retrieve namespaced symbols/parameters, and reload repository state |
 
 The separation is intentional:
 
 - AST and search logic can be tested without Supabase.
 - Storage paths and API calls stay in one adapter.
 - The worker loop does not need to understand index structure.
-- Future AI integration can call the Getter without changing index creation.
+- The CAD editor calls the Getter without changing index creation.
 
 ## Important Guarantees
 
@@ -284,7 +291,9 @@ to 60 seconds and prints the ranked matches and focused context.
 
 The indexer currently assumes one `model.py` per database CAD part. It does not
 support recursive project files, mesh indexing, incremental updates,
-embeddings, vector search, source editing, automatic reindexing, or AI calls.
+embeddings, vector search, source editing, or AI calls. Automatic edit-workflow
+reindexing is initiated by the CAD editor as a regular `build_index` job; it is
+not hidden inside Getter retrieval.
 
 Those concerns are deliberately outside this module. Its responsibility is:
 

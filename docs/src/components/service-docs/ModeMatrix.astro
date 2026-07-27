@@ -1,0 +1,37 @@
+---
+interface Mode {
+	name: string;
+	source: string;
+	success: string;
+	downstream: string;
+}
+
+interface Props {
+	title?: string;
+	modes: Mode[];
+}
+
+const { title = 'Execution modes', modes } = Astro.props;
+const headingId = `mode-matrix-${title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+---
+
+<section class="service-section service-table" aria-labelledby={headingId}>
+	<h2 id={headingId}>{title}</h2>
+	<div class="service-table__scroll">
+		<table>
+			<thead>
+				<tr><th>Mode</th><th>Source</th><th>Successful completion</th><th>Downstream</th></tr>
+			</thead>
+			<tbody>
+				{modes.map((mode) => (
+					<tr>
+						<th scope="row">{mode.name}</th>
+						<td>{mode.source}</td>
+						<td>{mode.success}</td>
+						<td>{mode.downstream}</td>
+					</tr>
+				))}
+			</tbody>
+		</table>
+	</div>
+</section>

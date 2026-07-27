@@ -6,7 +6,10 @@ import traceback
 
 from supabase import create_client
 
-from validate_cad_job import validate_cad_job
+try:
+    from .validate_cad_job import validate_cad_job
+except ImportError:
+    from validate_cad_job import validate_cad_job
 
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
@@ -43,7 +46,31 @@ def complete_and_queue_export(job: dict, report: dict):
     ).execute()
 
 
+def complete_candidate(job: dict, report: dict):
+    return supabase.rpc(
+        "complete_candidate_cad_validation",
+        {
+            "p_validation_job_id": job["id"],
+            "p_source_sha256": job["source_sha256"],
+            "p_result": report,
+        },
+    ).execute()
+
+
 def print_report(job_id: str, report: dict) -> None:
+    for diagnostic in report.get("diagnostics", []):
+        location = ""
+        if diagnostic.get("line"):
+            location = (
+                f" line {diagnostic['line']}:{diagnostic.get('column', 0)}"
+            )
+        print(
+            f"validation[{job_id}] {diagnostic.get('stage', 'unknown')}"
+            f"{location}: {diagnostic.get('message')}",
+            file=sys.stderr,
+            flush=True,
+        )
+
     for name, check in report.get("checks", {}).items():
         for error in check.get("errors", []):
             location = ""
@@ -84,7 +111,10 @@ def process_job(job: dict) -> None:
     report = outcome["report"]
     print_report(job["id"], report)
     if outcome["status"] == "completed":
-        complete_and_queue_export(job, report)
+        if str(job.get("source_kind") or "accepted") == "candidate":
+            complete_candidate(job, report)
+        else:
+            complete_and_queue_export(job, report)
     else:
         update_job(
             job["id"],
@@ -96,7 +126,20 @@ def process_job(job: dict) -> None:
 
 def mark_unexpected_failure(job_id: str, error: str) -> None:
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "status": "failed",
+        "stage": "worker",
+        "repairable_hint": False,
+        "diagnostics": [
+            {
+                "error_code": "VALIDATION_WORKER_ERROR",
+                "message": "CAD validation worker failed unexpectedly.",
+                "stage": "worker",
+                "related_symbols": [],
+                "traceback_summary": error[-4000:],
+            }
+        ],
+        "build_artifacts": None,
         "valid": False,
         "checks": {},
         "runtime": {

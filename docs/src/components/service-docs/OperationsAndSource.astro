@@ -1,0 +1,41 @@
+---
+interface Fact {
+	label: string;
+	value: string;
+}
+
+interface Source {
+	path: string;
+	symbol?: string;
+	description: string;
+}
+
+interface Props {
+	facts: Fact[];
+	sources: Source[];
+}
+
+const { facts, sources } = Astro.props;
+---
+
+<section class="service-section" aria-labelledby="operations-and-source">
+	<h2 id="operations-and-source">Operations and source code</h2>
+	<div class="service-operations">
+		<dl>
+			{facts.map((fact) => (
+				<div>
+					<dt>{fact.label}</dt>
+					<dd>{fact.value}</dd>
+				</div>
+			))}
+		</dl>
+		<ul aria-label="Implementation sources">
+			{sources.map((source) => (
+				<li>
+					<code>{source.path}{source.symbol ? ` — ${source.symbol}` : ''}</code>
+					<span>{source.description}</span>
+				</li>
+			))}
+		</ul>
+	</div>
+</section>

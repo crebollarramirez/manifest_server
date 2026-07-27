@@ -1,0 +1,35 @@
+---
+interface Failure {
+	condition: string;
+	durableOutcome: string;
+	runtime: string;
+	downstream: string;
+}
+
+interface Props {
+	items: Failure[];
+}
+
+const { items } = Astro.props;
+---
+
+<section class="service-section service-table" aria-labelledby="failure-matrix">
+	<h2 id="failure-matrix">Failure behavior</h2>
+	<div class="service-table__scroll">
+		<table>
+			<thead>
+				<tr><th>Condition</th><th>Durable outcome</th><th>Runtime</th><th>Downstream effect</th></tr>
+			</thead>
+			<tbody>
+				{items.map((item) => (
+					<tr>
+						<th scope="row">{item.condition}</th>
+						<td>{item.durableOutcome}</td>
+						<td>{item.runtime}</td>
+						<td>{item.downstream}</td>
+					</tr>
+				))}
+			</tbody>
+		</table>
+	</div>
+</section>

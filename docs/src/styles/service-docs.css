@@ -1,0 +1,191 @@
+.service-glance,
+.service-section {
+	inline-size: 100%;
+	max-inline-size: 68rem;
+	min-inline-size: 0;
+}
+
+.service-glance {
+	margin-block: 0.25rem 2rem;
+}
+
+.service-glance h2,
+.service-section > h2 {
+	margin: 0 0 0.8rem;
+	color: var(--ink);
+	font-size: clamp(1.25rem, 2.2vw, 1.7rem);
+	letter-spacing: -0.025em;
+}
+
+.service-glance dl {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+	margin: 0;
+	border-block: 1px solid var(--line);
+}
+
+.service-glance dl > div {
+	padding: 0.8rem 0.9rem 0.85rem 0;
+}
+
+.service-glance dt,
+.service-operations dt {
+	color: var(--accent);
+	font-family: var(--__sl-font-mono);
+	font-size: 0.61rem;
+	font-weight: 700;
+	letter-spacing: 0.09em;
+	text-transform: uppercase;
+}
+
+.service-glance dd,
+.service-operations dd {
+	margin: 0.28rem 0 0;
+	color: var(--ink-muted);
+	font-size: 0.83rem;
+	line-height: 1.45;
+}
+
+.service-section {
+	margin-block: 2.5rem;
+}
+
+.service-boundary-matrix {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 0.75rem;
+}
+
+.service-boundary-matrix > section {
+	padding: 0.95rem;
+	border: 1px solid var(--line);
+	border-radius: 0.4rem;
+	background: color-mix(in srgb, var(--panel) 82%, transparent);
+}
+
+.service-boundary-matrix h3 {
+	margin: 0 0 0.6rem;
+	color: var(--ink);
+	font-family: var(--__sl-font-mono);
+	font-size: 0.67rem;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+}
+
+.service-boundary-matrix ul,
+.service-guarantees,
+.service-operations ul {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.service-boundary-matrix li {
+	color: var(--ink-muted);
+	font-size: 0.82rem;
+	line-height: 1.45;
+}
+
+.service-boundary-matrix li + li {
+	margin-block-start: 0.42rem;
+}
+
+.service-table__scroll {
+	max-inline-size: 100%;
+	min-inline-size: 0;
+	overflow-x: auto;
+}
+
+.service-table table {
+	inline-size: 100%;
+	border-collapse: collapse;
+	font-size: 0.8rem;
+}
+
+.service-table th,
+.service-table td {
+	padding: 0.72rem 0.65rem;
+	border-block-end: 1px solid var(--line);
+	color: var(--ink-muted);
+	line-height: 1.45;
+	text-align: start;
+	vertical-align: top;
+}
+
+.service-table thead th {
+	color: var(--ink);
+	font-family: var(--__sl-font-mono);
+	font-size: 0.61rem;
+	letter-spacing: 0.07em;
+	text-transform: uppercase;
+}
+
+.service-table tbody th {
+	min-inline-size: 8.5rem;
+	color: var(--ink);
+	font-weight: 650;
+}
+
+.service-guarantees {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+	gap: 0.65rem;
+}
+
+.service-guarantees li {
+	display: grid;
+	gap: 0.3rem;
+	padding: 0.85rem;
+	border-inline-start: 2px solid var(--accent);
+	background: color-mix(in srgb, var(--panel) 80%, transparent);
+}
+
+.service-guarantees strong {
+	color: var(--ink);
+	font-size: 0.86rem;
+}
+
+.service-guarantees span,
+.service-operations li span {
+	color: var(--ink-muted);
+	font-size: 0.78rem;
+	line-height: 1.45;
+}
+
+.service-guarantees code,
+.service-operations code {
+	color: color-mix(in srgb, var(--accent) 75%, var(--ink));
+	font-family: var(--__sl-font-mono);
+	font-size: 0.67rem;
+	overflow-wrap: anywhere;
+}
+
+.service-operations {
+	display: grid;
+	grid-template-columns: minmax(12rem, 0.7fr) minmax(18rem, 1.3fr);
+	gap: 1.5rem;
+}
+
+.service-operations dl {
+	display: grid;
+	gap: 0.75rem;
+	margin: 0;
+}
+
+.service-operations li {
+	display: grid;
+	gap: 0.28rem;
+	padding-block: 0.5rem;
+	border-block-end: 1px solid var(--line);
+}
+
+@media (max-width: 52rem) {
+	.service-boundary-matrix,
+	.service-operations {
+		grid-template-columns: 1fr;
+	}
+
+	.service-table table {
+		min-inline-size: 42rem;
+	}
+}

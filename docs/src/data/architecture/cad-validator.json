@@ -1,0 +1,528 @@
+{
+  "id": "cad-validator",
+  "title": "CAD Validator system design",
+  "summary": "An independent polling worker that proves hash-bound accepted or candidate CAD source before completing validation or scheduling accepted-source export.",
+  "scope": "service",
+  "direction": "RIGHT",
+  "nodes": [
+    {
+      "id": "validation-jobs",
+      "label": "Validation Jobs",
+      "description": "Postgres generation_jobs rows for validate_cad work and its durable validation result.",
+      "type": "database",
+      "icon": "database",
+      "foundation": true,
+      "position": { "column": 0, "row": 1 },
+      "mobileOrder": 1,
+      "details": {
+        "responsibility": "Own validate_cad lifecycle state, the source identity bound to each job, and the durable schema-v2 result.",
+        "ownedBy": "Postgres generation_jobs",
+        "inputs": [
+          { "name": "validate_cad row", "description": "Job type, source kind, source path, source SHA-256, project, part, and optional edit ownership." }
+        ],
+        "outputs": [
+          { "name": "claimed job", "description": "The oldest queued supported row after its status is changed to running." },
+          { "name": "validation result", "description": "Completed, failed, or cancelled status with result and concise error text." }
+        ],
+        "durableReads": ["Oldest queued validate_cad row selected with FOR UPDATE SKIP LOCKED."],
+        "durableWrites": ["running claim state", "schema-v2 result", "error_message when validation does not pass"],
+        "guarantees": ["Claim selection and the queued-to-running status update occur in one database function."],
+        "evidence": [
+          { "path": "supabase/migrations/20260716000000_add_mesh_export_jobs.sql", "symbol": "claim_next_supported_generation_job", "kind": "migration" },
+          { "path": "supabase/migrations/20260725000000_add_cad_edit_workflow.sql", "symbol": "complete_candidate_cad_validation", "kind": "migration" }
+        ]
+      }
+    },
+    {
+      "id": "claim",
+      "label": "1. Job Claim",
+      "description": "Polls for and atomically claims the next queued validate_cad generation job.",
+      "type": "function",
+      "variant": "operation",
+      "icon": "process",
+      "position": { "column": 1, "row": 1 },
+      "mobileOrder": 2,
+      "details": {
+        "responsibility": "Ask Postgres for one queued validate_cad job and hand a returned row to the validation pipeline.",
+        "ownedBy": "CAD Validator Worker",
+        "runsIn": "cad_validation_worker.py polling loop",
+        "trigger": ["The worker polls continuously; an empty poll sleeps for two seconds before trying again."],
+        "preconditions": ["SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are present when the worker starts."],
+        "inputs": [
+          { "name": "supported job types", "description": "The fixed list [\"validate_cad\"]." }
+        ],
+        "outputs": [
+          { "name": "claimed job", "description": "A generation_jobs row already marked running, or no row." }
+        ],
+        "steps": [
+          "Call claim_next_supported_generation_job with validate_cad as the only supported type.",
+          "Continue to Source Proof when a row is returned.",
+          "Sleep for two seconds when the RPC returns no row."
+        ],
+        "failureConditions": [
+          { "condition": "No queued supported row", "outcome": "No durable state changes; the loop sleeps and polls again.", "continuesTo": "Job Claim" },
+          { "condition": "Claim RPC raises", "outcome": "The exception is not caught inside the polling loop, so the process exits." }
+        ],
+        "operations": {
+          "concurrency": "One job is processed at a time by each worker process.",
+          "retry": "Only empty polls repeat. The worker does not catch and retry claim RPC exceptions.",
+          "observability": ["Validation reports and unexpected processing exceptions are written to stdout/stderr."],
+          "controls": ["POLL_INTERVAL_SECONDS = 2"]
+        },
+        "evidence": [
+          { "path": "workers/cad_validator/cad_validation_worker.py", "symbol": "claim_next_job", "kind": "source" },
+          { "path": "workers/cad_validator/cad_validation_worker.py", "symbol": "main", "kind": "source" },
+          { "path": "supabase/migrations/20260716000000_add_mesh_export_jobs.sql", "symbol": "claim_next_supported_generation_job", "kind": "migration" }
+        ]
+      }
+    },
+    {
+      "id": "source-proof",
+      "label": "2. Source Proof",
+      "description": "Restricts the source path, downloads source and parameters, and compares model.py with the job-bound SHA-256.",
+      "type": "function",
+      "variant": "gate",
+      "icon": "source-code",
+      "position": { "column": 2, "row": 1 },
+      "mobileOrder": 4,
+      "details": {
+        "responsibility": "Resolve the only permitted source object for the job and prove its bytes still match the queued source identity.",
+        "ownedBy": "CAD Validator Worker",
+        "runsIn": "validate_cad_job.py",
+        "trigger": ["A claimed validate_cad job enters the validator."],
+        "preconditions": ["The row contains project_id, part_id, and source_sha256."],
+        "inputs": [
+          { "name": "claimed job", "description": "Accepted or candidate source identity and ownership fields." },
+          { "name": "storage objects", "description": "model.py and the part params.json from 3dProjects." }
+        ],
+        "outputs": [
+          { "name": "hash-matched source", "description": "Decoded Python source, local model.py, params.json, and the actual SHA-256." }
+        ],
+        "durableReads": ["3dProjects accepted model.py or edit-scoped candidate model.py", "3dProjects part params.json"],
+        "steps": [
+          "Resolve accepted model.py or validate the candidate path prefix and model.py suffix.",
+          "Create a job-local /tmp/validation_jobs/<job-id> workspace.",
+          "Download model.py and params.json.",
+          "Hash the downloaded model.py bytes and compare with source_sha256."
+        ],
+        "shortCircuit": "A path violation raises before download. A hash mismatch returns cancelled with runtime skipped and no static validation.",
+        "successCondition": "The downloaded model.py SHA-256 equals the source_sha256 stored on the active job.",
+        "failureConditions": [
+          { "condition": "Candidate path is outside its edit-job prefix, traverses directories, or does not end in model.py", "outcome": "Processing raises and the worker records an unexpected failed result.", "continuesTo": "Completion Gate" },
+          { "condition": "Downloaded source hash differs", "outcome": "The job is cancelled as superseded; actual and expected hashes are retained and runtime is skipped.", "continuesTo": "Completion Gate" }
+        ],
+        "guarantees": ["Candidate validation cannot select a model.py object outside the owning edit-job candidate prefix."],
+        "evidence": [
+          { "path": "workers/cad_validator/validate_cad_job.py", "symbol": "validation_source_path", "kind": "source" },
+          { "path": "workers/cad_validator/validate_cad_job.py", "symbol": "validate_cad_job", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "static-validation",
+      "label": "3. Static Safety Gates",
+      "description": "Runs ordered syntax, contract, decorator, reference, and forbidden-call checks before execution.",
+      "type": "function",
+      "variant": "gate",
+      "icon": "ast",
+      "position": { "column": 3, "row": 1 },
+      "mobileOrder": 5,
+      "details": {
+        "responsibility": "Reject source that cannot satisfy the CAD module contract or that uses forbidden operations before project code executes.",
+        "ownedBy": "CAD Validator Worker",
+        "runsIn": "cad_ast_validator.py",
+        "trigger": ["Source Proof returns hash-matched Python source."],
+        "inputs": [
+          { "name": "model.py source", "description": "UTF-8 Python source with its storage path." }
+        ],
+        "outputs": [
+          { "name": "static report", "description": "Schema-v2 checks, normalized diagnostics, stage, and safe_to_execute." }
+        ],
+        "steps": [
+          "Parse Python syntax.",
+          "Validate ModelParams, build_model, and required CAD-part decorators.",
+          "Validate decorator fields and literal values.",
+          "Validate parameter references.",
+          "Reject forbidden imports and calls."
+        ],
+        "decisionPoints": ["Each stage decides whether the prerequisites for later checks still hold."],
+        "shortCircuit": "A failed stage marks dependent later checks skipped. Any static error keeps safe_to_execute false, so runtime execution does not occur.",
+        "successCondition": "Every ordered check passes and safe_to_execute is true.",
+        "failureConditions": [
+          { "condition": "Syntax, contract, decorator, reference, or security check fails", "outcome": "A failed schema-v2 report is returned and the isolated runtime is skipped.", "continuesTo": "Completion Gate" }
+        ],
+        "guarantees": ["Project source reaches the runtime only when safe_to_execute is true."],
+        "evidence": [
+          { "path": "workers/cad_validator/cad_ast_validator.py", "symbol": "validate_cad_source", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "isolated-runtime",
+      "label": "4. Isolated CadQuery Runtime",
+      "description": "Runs statically approved source with isolated Python, a sanitized environment, timeout, and bounded output.",
+      "type": "worker",
+      "variant": "sandbox",
+      "icon": "worker",
+      "position": { "column": 4, "row": 1 },
+      "mobileOrder": 6,
+      "details": {
+        "responsibility": "Execute the approved CAD module and prove that build_model returns non-empty CadQuery solids.",
+        "ownedBy": "CAD Validator Worker",
+        "runsIn": "A job-local python -I subprocess",
+        "trigger": ["Static Safety Gates sets safe_to_execute to true."],
+        "preconditions": ["model.py and params.json exist in the job-local source directory."],
+        "inputs": [
+          { "name": "model.py", "description": "Hash-matched and statically approved project source." },
+          { "name": "params.json", "description": "A JSON object used to construct the module's ModelParams." }
+        ],
+        "outputs": [
+          { "name": "runtime result", "description": "Passed geometry facts or structured import, runtime, return-type, or empty-solid diagnostics." }
+        ],
+        "steps": [
+          "Start the validation runner with the current Python executable and -I.",
+          "Remove known Supabase/OpenAI credentials and *_TOKEN or *_SECRET variables.",
+          "Use job-local HOME and TMPDIR and disable user site packages.",
+          "Load params.json, import model.py, construct ModelParams, and call build_model.",
+          "Require a CadQuery Workplane or Shape with at least one solid."
+        ],
+        "successCondition": "build_model returns a supported CadQuery value containing one or more solids.",
+        "failureConditions": [
+          { "condition": "The subprocess exceeds the configured timeout", "outcome": "Runtime fails with VALIDATION_TIMEOUT and captured output remains bounded.", "continuesTo": "Completion Gate" },
+          { "condition": "Import, execution, return-type, or geometry validation fails", "outcome": "The runner writes structured diagnostics and no downstream export is scheduled.", "continuesTo": "Completion Gate" }
+        ],
+        "guarantees": [
+          "Captured stdout and stderr are each limited to the last 16,000 characters.",
+          "The subprocess environment removes configured service credentials and token/secret-suffixed variables."
+        ],
+        "operations": {
+          "timeout": "60 seconds by default; CAD_VALIDATION_TIMEOUT_SECONDS must be a positive integer.",
+          "concurrency": "One runtime subprocess at a time per worker process.",
+          "retry": "The worker does not retry a failed runtime.",
+          "observability": ["Bounded stdout/stderr, exit code, timeout flag, stage diagnostics, result type, and solid count."],
+          "controls": ["CAD_VALIDATION_TIMEOUT_SECONDS"]
+        },
+        "evidence": [
+          { "path": "workers/cad_validator/validate_cad_job.py", "symbol": "run_model", "kind": "source" },
+          { "path": "workers/cad_validator/validate_cad_job.py", "symbol": "sanitized_validation_environment", "kind": "source" },
+          { "path": "workers/cad_validator/cad_validation_runner.py", "symbol": "execute", "kind": "source" },
+          { "path": "workers/cad_validator/cad_validation_runner.py", "symbol": "geometry_result", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "source-storage",
+      "label": "CAD Source Storage",
+      "description": "The 3dProjects objects read for accepted or edit-scoped candidate validation.",
+      "type": "storage",
+      "icon": "object-storage",
+      "contents": ["model.py", "candidate model.py", "params.json"],
+      "foundation": true,
+      "position": { "column": 2, "row": 0 },
+      "mobileOrder": 3,
+      "details": {
+        "responsibility": "Durably own accepted CAD source, edit-scoped candidate source, and part parameters.",
+        "ownedBy": "3dProjects object storage",
+        "durableReads": [
+          "<project>/parts/cad/<part>/model.py for accepted validation",
+          "<project>/candidates/cad/<part>/<edit-job>/.../model.py for candidate validation",
+          "<project>/parts/cad/<part>/params.json"
+        ],
+        "downstream": ["Source Proof is the reader in this service."],
+        "evidence": [
+          { "path": "workers/cad_validator/validate_cad_job.py", "symbol": "cad_part_storage_path", "kind": "source" },
+          { "path": "workers/cad_validator/validate_cad_job.py", "symbol": "validation_source_path", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "completion",
+      "label": "5. Completion Gate",
+      "description": "Persists the report and selects candidate completion, accepted completion plus export insertion, or failed/cancelled status.",
+      "type": "function",
+      "variant": "completion",
+      "icon": "process",
+      "position": { "column": 5, "row": 1 },
+      "mobileOrder": 7,
+      "details": {
+        "responsibility": "Translate the validation outcome and source mode into the correct durable generation_jobs transition.",
+        "ownedBy": "CAD Validator Worker",
+        "runsIn": "cad_validation_worker.py and database completion functions",
+        "trigger": ["validate_cad_job returns completed, failed, or cancelled, or processing raises unexpectedly."],
+        "inputs": [
+          { "name": "validation outcome", "description": "Status, schema-v2 report, and concise error_message." },
+          { "name": "source mode", "description": "candidate or accepted from the claimed job." }
+        ],
+        "outputs": [
+          { "name": "candidate completion", "description": "The running candidate validation row becomes completed with its report." },
+          { "name": "accepted completion", "description": "The running accepted validation row becomes completed and a queued export_cad row is inserted." },
+          { "name": "non-passing completion", "description": "The row becomes failed or cancelled with report and error text." }
+        ],
+        "durableWrites": ["generation_jobs status/result/error_message", "queued export_cad generation_jobs row for passed accepted source only"],
+        "steps": [
+          "Print normalized diagnostics and the complete report.",
+          "For a completed candidate, call complete_candidate_cad_validation.",
+          "For a completed accepted source, call complete_cad_validation_and_queue_export.",
+          "For failed or cancelled validation, update the validation row directly.",
+          "For an unexpected processing exception, persist a schema-v2 worker-error report."
+        ],
+        "decisionPoints": ["Validation status first; source_kind distinguishes the two successful completion functions."],
+        "successCondition": "The validation row records the report; accepted success also returns the inserted export job id.",
+        "failureConditions": [
+          { "condition": "Validation fails", "outcome": "Status failed, report, and concise error_message are persisted; no export row is inserted." },
+          { "condition": "Source hash is superseded", "outcome": "Status cancelled and the superseded report are persisted; no export row is inserted." },
+          { "condition": "Unexpected processing exception", "outcome": "A failed worker-error report and bounded traceback text are persisted." }
+        ],
+        "guarantees": [
+          "Candidate completion never inserts an export job.",
+          "Accepted validation completion and export insertion occur in one database function and transaction after type, source-kind, running-state, and source-hash checks."
+        ],
+        "evidence": [
+          { "path": "workers/cad_validator/cad_validation_worker.py", "symbol": "process_job", "kind": "source" },
+          { "path": "workers/cad_validator/cad_validation_worker.py", "symbol": "mark_unexpected_failure", "kind": "source" },
+          { "path": "supabase/migrations/20260725000000_add_cad_edit_workflow.sql", "symbol": "complete_candidate_cad_validation", "kind": "migration" },
+          { "path": "supabase/migrations/20260725000000_add_cad_edit_workflow.sql", "symbol": "complete_cad_validation_and_queue_export", "kind": "migration" }
+        ]
+      }
+    },
+    {
+      "id": "export-jobs",
+      "label": "Export Jobs",
+      "description": "Queued export_cad generation_jobs rows inserted only by successful accepted-source completion.",
+      "type": "database",
+      "icon": "database",
+      "foundation": true,
+      "position": { "column": 6, "row": 1 },
+      "mobileOrder": 8,
+      "details": {
+        "responsibility": "Durably schedule CAD export after accepted source has passed validation.",
+        "ownedBy": "Postgres generation_jobs",
+        "inputs": [
+          { "name": "export_cad row", "description": "Project, part, queued status, and the same source SHA-256 proven by validation." }
+        ],
+        "durableWrites": ["One queued export_cad row for successful accepted-source validation."],
+        "downstream": ["CAD Exporter claims the queued row independently."],
+        "guarantees": ["This candidate-validation completion path does not write an export row."],
+        "evidence": [
+          { "path": "supabase/migrations/20260725000000_add_cad_edit_workflow.sql", "symbol": "complete_cad_validation_and_queue_export", "kind": "migration" }
+        ]
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "job-claim",
+      "source": "claim",
+      "target": "validation-jobs",
+      "label": "claim next validate_cad job",
+      "protocol": "database",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": {
+        "label": "supported job types",
+        "type": "claim_next_supported_generation_job RPC",
+        "exampleBody": "{\"p_job_types\":[\"validate_cad\"]}"
+      },
+      "response": {
+        "label": "claimed validation job or no row",
+        "type": "generation_jobs row",
+        "exampleBody": "{\"id\":\"validation-job-123\",\"type\":\"validate_cad\",\"status\":\"running\",\"source_kind\":\"candidate\",\"source_sha256\":\"…\"}"
+      },
+      "details": {
+        "summary": "Job Claim asks Postgres to select the oldest queued validate_cad row with FOR UPDATE SKIP LOCKED and change it to running. The database returns that row or no row; it does not initiate work.",
+        "preconditions": ["The worker calls with validate_cad in p_job_types."],
+        "operation": "claim_next_supported_generation_job",
+        "payload": "A fixed supported-type list; there is no worker ID, lease, heartbeat, or reclaim field.",
+        "durability": "A successful RPC persists status=running before returning the claimed row.",
+        "failureBehavior": "No row causes a two-second sleep. An RPC exception escapes the polling loop.",
+        "evidence": [
+          { "path": "workers/cad_validator/cad_validation_worker.py", "symbol": "claim_next_job", "kind": "source" },
+          { "path": "supabase/migrations/20260716000000_add_mesh_export_jobs.sql", "symbol": "claim_next_supported_generation_job", "kind": "migration" }
+        ]
+      }
+    },
+    {
+      "id": "claim-source",
+      "source": "claim",
+      "target": "source-proof",
+      "label": "claimed job context",
+      "protocol": "internal",
+      "direction": "one-way",
+      "flow": "synchronous",
+      "details": {
+        "summary": "A returned validate_cad row enters Source Proof immediately in the same worker process.",
+        "preconditions": ["The claim RPC returned a row."],
+        "payload": "The claimed generation_jobs row.",
+        "durability": "Transient in-process handoff; the durable row already exists in Postgres.",
+        "failureBehavior": "No row means this handoff does not occur.",
+        "evidence": [
+          { "path": "workers/cad_validator/cad_validation_worker.py", "symbol": "main", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "storage-source",
+      "source": "source-proof",
+      "target": "source-storage",
+      "label": "read model.py and params.json",
+      "protocol": "storage",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": {
+        "label": "object download",
+        "type": "3dProjects storage download",
+        "exampleBody": "{\"objects\":[\"<resolved-source>/model.py\",\"<project>/parts/cad/<part>/params.json\"]}"
+      },
+      "response": {
+        "label": "source and parameter bytes",
+        "type": "object bytes",
+        "exampleBody": "{\"model.py\":\"<bytes>\",\"params.json\":\"<bytes>\"}"
+      },
+      "details": {
+        "summary": "Source Proof initiates both object reads after resolving an accepted path or proving that a candidate path belongs to the active edit job.",
+        "preconditions": ["The source path is accepted or passes candidate-prefix, suffix, and traversal checks."],
+        "operation": "storage.download",
+        "payload": "model.py and params.json bytes",
+        "durability": "Storage remains the durable owner; downloaded copies live only in the job-local temporary workspace.",
+        "failureBehavior": "A download exception reaches the worker's unexpected-failure handler.",
+        "evidence": [
+          { "path": "workers/cad_validator/validate_cad_job.py", "symbol": "download_file", "kind": "source" },
+          { "path": "workers/cad_validator/validate_cad_job.py", "symbol": "validation_source_path", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "source-static",
+      "source": "source-proof",
+      "target": "static-validation",
+      "label": "hash-matched source",
+      "protocol": "internal",
+      "direction": "one-way",
+      "flow": "synchronous",
+      "details": {
+        "summary": "Source Proof hands source to Static Safety Gates only after downloaded model.py matches the source hash bound to the active job.",
+        "preconditions": ["actual SHA-256 equals generation_jobs.source_sha256."],
+        "payload": "Decoded model.py source and its repository-independent storage path.",
+        "durability": "Transient in-process value.",
+        "failureBehavior": "A mismatch cancels the job as superseded and static validation does not run.",
+        "evidence": [
+          { "path": "workers/cad_validator/validate_cad_job.py", "symbol": "validate_cad_job", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "static-runtime",
+      "source": "static-validation",
+      "target": "isolated-runtime",
+      "label": "safe-to-execute source",
+      "protocol": "internal",
+      "direction": "one-way",
+      "flow": "synchronous",
+      "details": {
+        "summary": "Static Safety Gates starts isolated execution only when every required check permits it and safe_to_execute is true.",
+        "preconditions": ["Syntax, contract, decorator, reference, and forbidden-call checks produced no blocking error."],
+        "operation": "run_model",
+        "payload": "Job-local model.py and params.json paths.",
+        "durability": "Transient subprocess invocation.",
+        "failureBehavior": "A failed static stage skips runtime and returns a failed report to completion.",
+        "trustBoundary": "Project-authored source crosses into a sanitized python -I subprocess.",
+        "evidence": [
+          { "path": "workers/cad_validator/validate_cad_job.py", "symbol": "validate_cad_job", "kind": "source" },
+          { "path": "workers/cad_validator/cad_ast_validator.py", "symbol": "validate_cad_source", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "runtime-completion",
+      "source": "isolated-runtime",
+      "target": "completion",
+      "label": "runtime result and diagnostics",
+      "protocol": "internal",
+      "direction": "one-way",
+      "flow": "synchronous",
+      "details": {
+        "summary": "The runtime returns structured geometry facts or diagnostics to the worker, which folds them into the schema-v2 report before durable completion.",
+        "payload": "Pass/fail status, stage, diagnostics, build_artifacts, bounded stdout/stderr, exit code, and timeout flag.",
+        "durability": "Transient until Completion Gate persists the report.",
+        "failureBehavior": "Runtime failure becomes a failed validation outcome; no export job is inserted.",
+        "evidence": [
+          { "path": "workers/cad_validator/validate_cad_job.py", "symbol": "run_model", "kind": "source" },
+          { "path": "workers/cad_validator/cad_validation_runner.py", "symbol": "geometry_result", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "completion-validation-job",
+      "source": "completion",
+      "target": "validation-jobs",
+      "label": "persist validation outcome",
+      "protocol": "database",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": {
+        "label": "complete or update validation row",
+        "type": "completion RPC or generation_jobs update",
+        "exampleBody": "{\"p_validation_job_id\":\"validation-job-123\",\"p_source_sha256\":\"…\",\"p_result\":{\"schema_version\":2,\"status\":\"passed\"}}"
+      },
+      "response": {
+        "label": "database completion result",
+        "type": "void or export job id",
+        "exampleBody": "{\"status\":\"committed\"}"
+      },
+      "details": {
+        "summary": "Completion Gate initiates the database operation that persists the schema-v2 report and terminal job status. The specific function depends on status and source mode.",
+        "operation": "complete_candidate_cad_validation, complete_cad_validation_and_queue_export, or generation_jobs.update",
+        "payload": "Job id, proven source SHA-256 for successful completion, result report, and error text for non-passing outcomes.",
+        "durability": "The validation row retains its terminal status, report, and any concise error_message.",
+        "failureBehavior": "A database exception propagates from process_job and is followed by mark_unexpected_failure; if that update also fails, the process does not repair the row.",
+        "evidence": [
+          { "path": "workers/cad_validator/cad_validation_worker.py", "symbol": "process_job", "kind": "source" },
+          { "path": "supabase/migrations/20260725000000_add_cad_edit_workflow.sql", "symbol": "complete_candidate_cad_validation", "kind": "migration" },
+          { "path": "supabase/migrations/20260725000000_add_cad_edit_workflow.sql", "symbol": "complete_cad_validation_and_queue_export", "kind": "migration" }
+        ]
+      }
+    },
+    {
+      "id": "accepted-export",
+      "source": "completion",
+      "target": "export-jobs",
+      "label": "accepted source + passed",
+      "protocol": "database",
+      "direction": "one-way",
+      "flow": "synchronous",
+      "request": {
+        "label": "insert queued export_cad job",
+        "type": "complete_cad_validation_and_queue_export transaction",
+        "exampleBody": "{\"project_id\":\"project-123\",\"part_id\":\"part-123\",\"type\":\"export_cad\",\"status\":\"queued\",\"source_sha256\":\"…\"}"
+      },
+      "details": {
+        "summary": "Successful accepted-source completion inserts a queued export_cad row using the same source SHA-256 and records that export job id on the validation result.",
+        "preconditions": ["Validation status passed.", "source_kind is accepted.", "Validation row is running.", "Stored source_sha256 equals the proven request value."],
+        "operation": "complete_cad_validation_and_queue_export",
+        "payload": "A new export_cad generation_jobs row for the same project, part, and source SHA-256.",
+        "durability": "Export insertion and accepted validation completion occur in one Postgres function call and transaction.",
+        "failureBehavior": "A failed precondition raises and the transaction does not commit the export insertion.",
+        "evidence": [
+          { "path": "supabase/migrations/20260725000000_add_cad_edit_workflow.sql", "symbol": "complete_cad_validation_and_queue_export", "kind": "migration" }
+        ]
+      }
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "cad-validator-worker-boundary",
+      "label": "CAD Validator Worker",
+      "kind": "worker",
+      "description": "One polling Python process owns all five logical validation stages.",
+      "nodeIds": ["claim", "source-proof", "static-validation", "isolated-runtime", "completion"]
+    },
+    {
+      "id": "cadquery-runtime-boundary",
+      "label": "Sanitized python -I subprocess",
+      "kind": "runtime",
+      "description": "Project source executes only within this job-local subprocess boundary.",
+      "nodeIds": ["isolated-runtime"],
+      "parentId": "cad-validator-worker-boundary"
+    }
+  ]
+}

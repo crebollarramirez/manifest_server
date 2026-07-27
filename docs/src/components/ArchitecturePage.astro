@@ -1,0 +1,61 @@
+---
+import DocsLayout from '../layouts/DocsLayout.astro';
+import ArchitectureDiagram from './architecture/ArchitectureDiagram';
+
+interface Props {
+	title: string;
+	summary: string;
+	section: string;
+	active: string;
+	document: unknown;
+	fallback: string;
+	showExampleNotice?: boolean;
+	sidebarNote?: string;
+	diagramFirst?: boolean;
+}
+
+const {
+	title,
+	summary,
+	section,
+	active,
+	document,
+	fallback,
+	showExampleNotice = true,
+	sidebarNote,
+	diagramFirst = section === 'Service view',
+} = Astro.props;
+---
+
+<DocsLayout
+	title={title}
+	summary={summary}
+	section={section === 'Service view' ? 'Service architecture' : section}
+	active={active}
+	sidebarNote={sidebarNote}
+	wideHeader={diagramFirst}
+>
+	<div class:list={['doc-stack', { 'doc-stack--diagram-first': diagramFirst }]}>
+		{diagramFirst && <ArchitectureDiagram document={document} showHeader={false} client:load />}
+
+		<div class="doc-stack__content">
+			{showExampleNotice && (
+				<aside class="notice" aria-label="Example architecture notice">
+					<span class="notice__mark" aria-hidden="true">i</span>
+					<div>
+						<h2>Example architecture</h2>
+						<p>This is fictional example content for documenting system design. It does not describe a production Manifest system.</p>
+					</div>
+				</aside>
+			)}
+
+			<slot name="beforeDiagram" />
+
+			{!diagramFirst && <ArchitectureDiagram document={document} showHeader client:load />}
+
+			<article class="doc-prose">
+				<slot />
+			</article>
+		</div>
+	</div>
+</DocsLayout>

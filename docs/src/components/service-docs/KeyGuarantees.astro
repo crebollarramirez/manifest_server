@@ -1,0 +1,26 @@
+---
+interface Guarantee {
+	title: string;
+	description: string;
+	evidence?: string;
+}
+
+interface Props {
+	items: Guarantee[];
+}
+
+const { items } = Astro.props;
+---
+
+<section class="service-section" aria-labelledby="key-guarantees">
+	<h2 id="key-guarantees">Key guarantees</h2>
+	<ul class="service-guarantees">
+		{items.map((item) => (
+			<li>
+				<strong>{item.title}</strong>
+				<span>{item.description}</span>
+				{item.evidence ? <code>{item.evidence}</code> : null}
+			</li>
+		))}
+	</ul>
+</section>

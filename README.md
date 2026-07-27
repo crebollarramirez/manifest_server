@@ -82,6 +82,28 @@ Stop it:
 docker compose -f workers/indexer/docker-compose.yml down
 ```
 
+### CAD editor worker
+
+The editor runs exactly one orchestration worker. For a linked blank CAD part,
+it generates and validates the first complete model; for an established part,
+it resolves project-scoped targets and plans constrained edits. It validates
+isolated candidates, commits accepted source, reindexes the project, and
+queues export. The indexer, validator, and exporter remain independent workers. See the
+[CAD editor technical overview](workers/cad_editor/README.md).
+
+Set `SUPABASE_SERVICE_ROLE_KEY` and `OPENAI_API_KEY` in
+`workers/cad_editor/.env`, then start it:
+
+```bash
+docker compose --env-file workers/cad_editor/.env -f workers/cad_editor/docker-compose.yml up --build
+```
+
+Stop it:
+
+```bash
+docker compose -f workers/cad_editor/docker-compose.yml down
+```
+
 ### CLI
 
 The terminal client talks to the local `cad-agent` function and loads variables from a repo-root `.env` file. At minimum, set:
@@ -103,12 +125,14 @@ Start the CLI:
 python cad_agent_cli.py
 ```
 
-The CLI keeps track of a linked project and part. Once both are linked, plain text input is sent to the AI agent as chat.
+The CLI keeps track of a linked project and optional part. Plain-text CAD
+requests require only a linked project and search all of its CAD parts. Mesh
+requests continue to require a linked mesh part.
 
 Supported commands:
 
 - `/create -project <name>`: Create a project and link the CLI to it.
-- `/create -part -cad <name>`: Create a CAD part inside the linked project and link to it.
+- `/create -part -cad <name>`: Create a blank CAD part containing only the system runtime import and link to it. The first chat request for that linked part starts initial design.
 - `/create -part -mesh <name>`: Create a mesh part inside the linked project and link to it.
 - `/link -project <name>`: Link the CLI to an existing project.
 - `/link -part <name>`: Link the CLI to an existing part in the current project.
@@ -118,13 +142,16 @@ Supported commands:
 - `/validate <partId>`: Queue a manual validation job for a part by ID.
 - `/index <projectId>`: Queue an index build for every CAD part in a project.
 - `/index -test <request>`: Test retrieval against the linked project's current index and print ranked matches plus focused context.
+- `/edit-status <jobId>`: Print CAD edit state, attempts, targets, diagnostics, changed symbols, and child job IDs.
 - `/delete -project <name>`: Delete a project after confirmation.
 - `/delete -part <name>`: Delete a part in the current project after confirmation.
 - `exit` or `quit`: Close the CLI.
-- `<plain text>`: Send a normal chat message to the AI agent for the currently linked project and part.
+- `<plain text>`: Queue a project-scoped CAD edit, or update the linked mesh part when one is selected.
 
 The Getter test rejects missing or stale indexes. Run `/index <projectId>`
 again after adding, deleting, renaming, or changing a CAD part.
+CAD edit jobs automatically queue a full index build when needed and reindex
+again after commit. `/index -test` remains read-only and never auto-rebuilds.
 
 ### Optional: run validator tests without Docker
 

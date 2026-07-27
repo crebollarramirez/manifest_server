@@ -14,6 +14,12 @@ ROOT = Path(__file__).resolve().parents[1]
 EDGE_SOURCE = (
     ROOT / "supabase" / "functions" / "cad-agent" / "index.ts"
 ).read_text(encoding="utf-8")
+REQUESTED_PART_MIGRATION = (
+    ROOT
+    / "supabase"
+    / "migrations"
+    / "20260726010000_add_requested_cad_part.sql"
+).read_text(encoding="utf-8")
 
 
 def load_worker_module(module_name: str, path: Path, dependency_name: str):
@@ -72,6 +78,49 @@ class ManualJobEdgeContractTests(unittest.TestCase):
 
     def test_part_listing_exposes_ids_used_by_manual_commands(self):
         self.assertIn("id=${part.id}", EDGE_SOURCE)
+
+    def test_project_scoped_cad_chat_queues_an_edit_job_and_exposes_status(self):
+        self.assertIn('| "get_edit_job"', EDGE_SOURCE)
+        self.assertIn('.from("edit_jobs")\n    .insert({', EDGE_SOURCE)
+        self.assertIn("const partId = optionalUuid(body, \"part_id\")", EDGE_SOURCE)
+        self.assertIn("const job = await queueEditJob", EDGE_SOURCE)
+        self.assertIn("get_edit_job: () => handleGetEditJob", EDGE_SOURCE)
+        self.assertIn("validation_result", EDGE_SOURCE)
+        self.assertIn("changed_symbols", EDGE_SOURCE)
+
+    def test_new_cad_parts_are_blank_and_linked_blank_parts_queue_initial_design(self):
+        self.assertIn('const initialSource = partType === "cad"', EDGE_SOURCE)
+        self.assertIn('`${CAD_MODEL_RUNTIME_IMPORT}\\n`', EDGE_SOURCE)
+        self.assertIn(
+            'indexJob = await queueIndexJob(supabase, projectId, "build_index")',
+            EDGE_SOURCE,
+        )
+        self.assertIn("index_job_id: indexJob?.id ?? null", EDGE_SOURCE)
+        self.assertIn('index_status: indexJob?.status ?? "not_queued"', EDGE_SOURCE)
+        self.assertIn("Automatic indexing could not be queued", EDGE_SOURCE)
+        self.assertIn("function isBlankCadSource", EDGE_SOURCE)
+        self.assertIn("workflow_mode: workflowMode", EDGE_SOURCE)
+        self.assertIn("requested_part_id: requestedPart?.id ?? null", EDGE_SOURCE)
+        self.assertIn('job_type: "initial_cad_design"', EDGE_SOURCE)
+
+    def test_linked_cad_target_is_persisted_and_constrained_to_its_project(self):
+        self.assertIn("requested_part_id: requestedPart?.id ?? null", EDGE_SOURCE)
+        self.assertIn("add column requested_part_id uuid", REQUESTED_PART_MIGRATION)
+        self.assertIn(
+            "foreign key (project_id, requested_part_id)",
+            REQUESTED_PART_MIGRATION,
+        )
+        self.assertIn(
+            "references public.parts(project_id, id)",
+            REQUESTED_PART_MIGRATION,
+        )
+
+    def test_mesh_chat_retains_direct_generation_and_export(self):
+        chat_source = EDGE_SOURCE.split("async function handleChat(", 1)[1]
+        self.assertIn("openai.responses.create", chat_source)
+        self.assertIn("composeModelSource", chat_source)
+        self.assertIn("Updated mesh part", chat_source)
+        self.assertIn("queueGenerationJob", chat_source)
 
 
 class WorkerLoggingTests(unittest.TestCase):

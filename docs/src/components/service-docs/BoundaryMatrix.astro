@@ -1,0 +1,28 @@
+---
+interface Props {
+	owns: string[];
+	doesNotOwn: string[];
+	dependsOn: string[];
+}
+
+const { owns, doesNotOwn, dependsOn } = Astro.props;
+const columns = [
+	{ label: 'Owns', items: owns },
+	{ label: 'Does not own', items: doesNotOwn },
+	{ label: 'Depends on', items: dependsOn },
+];
+---
+
+<section class="service-section" aria-labelledby="service-boundaries">
+	<h2 id="service-boundaries">Ownership and boundaries</h2>
+	<div class="service-boundary-matrix">
+		{columns.map((column) => (
+			<section>
+				<h3>{column.label}</h3>
+				<ul>
+					{column.items.map((item) => <li>{item}</li>)}
+				</ul>
+			</section>
+		))}
+	</div>
+</section>

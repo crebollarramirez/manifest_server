@@ -1,0 +1,106 @@
+---
+import '../styles/docs-shell.css';
+
+interface Props {
+	title: string;
+	summary?: string;
+	section?: string;
+	active?: string;
+	sidebarNote?: string;
+	wideHeader?: boolean;
+}
+
+const { title, summary, section, active, sidebarNote, wideHeader = false } = Astro.props;
+
+const navigation = [
+	{
+		label: 'System architecture',
+		items: [{ label: 'Backend System Design', href: '/', id: 'home' }],
+	},
+	{
+		label: 'Microservices',
+		items: [
+			{ label: 'Indexer Worker', href: '/services/indexer-worker/', id: 'indexer-worker' },
+			{ label: 'CAD Editor', href: '/services/cad-editor/', id: 'cad-editor' },
+			{ label: 'CAD Validator', href: '/services/cad-validator/', id: 'cad-validator' },
+			{ label: 'CAD Exporter', href: '/services/cad-exporter/', id: 'cad-exporter' },
+		],
+	},
+];
+---
+
+<!doctype html>
+<html lang="en" data-theme="dark">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width" />
+		<meta name="description" content={summary ?? 'Manifest System Docs'} />
+		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+		<title>{title} · Manifest System Docs</title>
+		<script is:inline>
+			const savedTheme = localStorage.getItem('manifest-docs-theme');
+			document.documentElement.dataset.theme = savedTheme || 'dark';
+		</script>
+	</head>
+	<body>
+		<header class="docs-header">
+			<a class="docs-brand" href="/">Manifest System Docs</a>
+			<div class="docs-header__actions">
+				<span class="docs-header__status"><span aria-hidden="true">◌</span> Architecture reference</span>
+				<button class="theme-toggle" type="button" aria-label="Switch documentation color theme" data-theme-toggle>
+					<span aria-hidden="true">◐</span><span data-theme-label>Dark</span>
+				</button>
+				<button class="menu-toggle" type="button" aria-expanded="false" aria-controls="docs-sidebar" data-menu-toggle>
+					Menu
+				</button>
+			</div>
+		</header>
+
+		<div class="docs-frame">
+			<aside class="docs-sidebar" id="docs-sidebar" data-sidebar>
+				<nav aria-label="Architecture documentation">
+					{navigation.map((group) => (
+						<section class="docs-nav-group" aria-label={group.label}>
+							<h2>{group.label}</h2>
+							{group.items.map((item) => (
+								<a class:list={{ 'is-active': active === item.id }} href={item.href} aria-current={active === item.id ? 'page' : undefined}>
+									<span aria-hidden="true" />{item.label}
+								</a>
+							))}
+						</section>
+					))}
+				</nav>
+				<p class="docs-sidebar__note">{sidebarNote ?? 'Fictional architecture example. Use it as a documentation design reference, not production system evidence.'}</p>
+			</aside>
+
+			<main class:list={['docs-main', { 'docs-main--wide-header': wideHeader }]} id="content">
+				<header class="page-header">
+					<p class="page-header__eyebrow">{section ?? 'Architecture documentation'}</p>
+					<h1>{title}</h1>
+					{summary ? <p>{summary}</p> : null}
+				</header>
+				<slot />
+			</main>
+		</div>
+
+		<script is:inline>
+			const root = document.documentElement;
+			const toggle = document.querySelector('[data-theme-toggle]');
+			const label = document.querySelector('[data-theme-label]');
+			const setThemeLabel = () => { if (label) label.textContent = root.dataset.theme === 'light' ? 'Light' : 'Dark'; };
+			setThemeLabel();
+			toggle?.addEventListener('click', () => {
+				root.dataset.theme = root.dataset.theme === 'light' ? 'dark' : 'light';
+				localStorage.setItem('manifest-docs-theme', root.dataset.theme);
+				setThemeLabel();
+			});
+			const menu = document.querySelector('[data-menu-toggle]');
+			const sidebar = document.querySelector('[data-sidebar]');
+			menu?.addEventListener('click', () => {
+				const expanded = menu.getAttribute('aria-expanded') === 'true';
+				menu.setAttribute('aria-expanded', String(!expanded));
+				sidebar?.classList.toggle('is-open', !expanded);
+			});
+		</script>
+	</body>
+</html>

@@ -1,0 +1,158 @@
+---
+import ArchitecturePage from '../../components/ArchitecturePage.astro';
+import BoundaryMatrix from '../../components/service-docs/BoundaryMatrix.astro';
+import FailureMatrix from '../../components/service-docs/FailureMatrix.astro';
+import KeyGuarantees from '../../components/service-docs/KeyGuarantees.astro';
+import OperationsAndSource from '../../components/service-docs/OperationsAndSource.astro';
+import ServiceAtGlance from '../../components/service-docs/ServiceAtGlance.astro';
+import cadEditor from '../../data/architecture/cad-editor.json';
+import '../../styles/service-docs.css';
+
+const glance = [
+	{ label: 'Trigger', value: 'Queued or lease-expired edit_jobs workflow' },
+	{ label: 'Modes', value: 'Full initial design for a linked blank part; structured edit and extension for an established part' },
+	{ label: 'Target scope', value: 'Linked requested_part_id is authoritative; unlinked requests use project-wide resolution' },
+	{ label: 'Mutates with', value: 'System-owned initial composition or validated replace/add operations over AST-owned regions' },
+	{ label: 'Commits', value: 'Exact hash-bound candidate only after independent validation proof' },
+	{ label: 'Downstream', value: 'Mandatory reindex, then best-effort hash-bound export job' },
+];
+
+const guarantees = [
+	{
+		title: 'The model cannot write arbitrary source',
+		description: 'Established parts use strict replacement and additive operations over one resolved part. A linked blank part may generate only its first AI-owned model body; the system retains the runtime import and validates every candidate.',
+		evidence: 'workers/cad_editor/cad_editor/applier.py — validate_edit_plan / apply_edit_plan',
+	},
+	{
+		title: 'Canonical source is protected by two hashes',
+		description: 'The candidate must prove its base hash, and canonical model.py must still match the accepted hash before the validated candidate can replace it.',
+		evidence: 'workers/cad_editor/cad_editor/orchestrator.py — _prepare_accepted_source / _commit',
+	},
+	{
+		title: 'Validation proof is exact',
+		description: 'Commit requires a completed candidate validate_cad job owned by this edit with the current path and SHA-256, passed status, and valid=true.',
+		evidence: 'workers/cad_editor/cad_editor/orchestrator.py — _commit',
+	},
+	{
+		title: 'Child-job creation is restart-aware',
+		description: 'Validation, index, and export RPCs persist or reuse their child IDs with edit_jobs so reclaimed work can resume instead of blindly duplicating side effects.',
+		evidence: 'supabase/migrations/20260725000000_add_cad_edit_workflow.sql',
+	},
+	{
+		title: 'Failed reindexing uses guarded rollback',
+		description: 'The original is restored only when canonical source still equals this editor candidate; an independent change is never overwritten.',
+		evidence: 'workers/cad_editor/cad_editor/orchestrator.py — _rollback',
+	},
+];
+
+const failures = [
+	{
+		condition: 'No target, invalid selection, stale/source-raced context, or a changed blank initial source',
+		durableOutcome: 'edit_jobs is marked failed with a workflow error code and bounded message.',
+		runtime: 'Planning or candidate creation stops before canonical write.',
+		downstream: 'No validation, reindex, or export is queued after the failure point.',
+	},
+	{
+		condition: 'OpenAI refusal, invalid parsed output, or request failure',
+		durableOutcome: 'The workflow fails; internal exceptions retain a bounded traceback in result details.',
+		runtime: 'No editor-level retry is performed.',
+		downstream: 'Canonical source remains unchanged.',
+	},
+	{
+		condition: 'Candidate validation returns repairable diagnostics',
+		durableOutcome: 'The result and candidate event remain in edit_jobs history.',
+		runtime: 'The editor may plan against the latest failed candidate, up to three total attempts.',
+		downstream: 'Commit waits for a later exact passed proof.',
+	},
+	{
+		condition: 'Validation is non-repairable, times out, or reaches attempt three',
+		durableOutcome: 'edit_jobs is marked failed with diagnostics and attempt count.',
+		runtime: 'The repair loop stops.',
+		downstream: 'Canonical source remains unchanged and candidate cleanup is attempted.',
+	},
+	{
+		condition: 'Post-commit reindex fails or resolved targets are not fresh',
+		durableOutcome: 'The edit fails and records whether source restoration succeeded.',
+		runtime: 'Rollback verifies candidate and original hashes before restoring.',
+		downstream: 'Export is not queued; independent canonical changes are never overwritten.',
+	},
+	{
+		condition: 'Export job queuing fails',
+		durableOutcome: 'The edit still completes with a warning and no new export_job_id.',
+		runtime: 'Validated source and fresh index remain committed.',
+		downstream: 'Artifacts may remain stale until a manual export is requested.',
+	},
+	{
+		condition: 'Initial claim RPC fails',
+		durableOutcome: 'No per-job failure is written by that polling iteration.',
+		runtime: 'The exception escapes the worker loop and terminates the process.',
+		downstream: 'A process supervisor must restart the worker.',
+	},
+];
+---
+
+<ArchitecturePage
+	title="CAD Editor"
+	summary="A leased polling worker that resolves one CAD part, applies a bounded structured plan, validates hash-bound candidates, commits safely, and schedules reindex and export work."
+	section="Service view"
+	active="cad-editor"
+	document={cadEditor}
+	fallback="Loading the CAD Editor diagram…"
+	showExampleNotice={false}
+	sidebarNote="Production CAD edit orchestration: bounded OpenAI planning, deterministic source mutation, independent validation, guarded commit, reindex, and export handoff."
+>
+	<div slot="beforeDiagram">
+		<ServiceAtGlance items={glance} />
+
+		<article class="doc-prose">
+			<h2>Purpose and boundaries</h2>
+			<p>The CAD Editor owns two resumable workflows: an <code>initial_design</code> flow for a linked blank CAD part, and a structured edit/extension flow for established indexed parts. Both create hash-bound candidates, require proof-gated commit, then reindex and schedule export. It processes one job at a time per worker process.</p>
+			<p>A new CAD part starts with only <code>from cadquery_runtime import cad_part, cq, dataclass</code>, and part creation immediately queues a project index build. The Indexer deliberately excludes this exact blank marker, so the automatic build can produce a valid empty index or index the project&rsquo;s established parts. The initial workflow waits for that fresh index, then skips feature resolution for the blank part. OpenAI returns a complete AI-owned body containing <code>ModelParams</code>, decorated features, and <code>build_model</code>; validation must pass before that body becomes accepted source.</p>
+			<p>For later linked requests, <code>edit_jobs.requested_part_id</code> makes the linked part authoritative. The plan may modify its existing allowed targets or safely add a parameter, private helper, semantic CAD feature, and corresponding <code>build_model</code> orchestration. Unlinked requests retain project-wide semantic resolution. Neither path allows an established whole-file replacement, new import, or cross-part change.</p>
+			<p>It does not accept client traffic, call the validator, indexer, or exporter services directly, or execute CAD source. Those handoffs are durable Postgres jobs. <code>edit_jobs</code> owns workflow state, while 3dProjects storage owns accepted source, temporary candidates, and the original-source backup.</p>
+		</article>
+
+		<BoundaryMatrix
+			owns={[
+				'Edit-workflow orchestration, state transitions, heartbeats, dependency polling, and terminal result.',
+				'Bounded OpenAI contexts and strict initial-design, replacement, and additive edit contracts.',
+				'Linked-part enforcement, target resolution, initial-source composition, candidate mutation, commit checks, rollback, and candidate cleanup.',
+			]}
+			doesNotOwn={[
+				'Inbound API validation or edit-job creation.',
+				'Independent validation, index construction, or artifact export execution.',
+				'Durable source, candidates, indexes, artifacts, or lifecycle state outside their backing stores.',
+			]}
+			dependsOn={[
+				'Postgres edit_jobs, index_jobs, and generation_jobs RPC/table operations.',
+				'3dProjects accepted and candidate object storage plus the project Getter.',
+				'OpenAI Responses API structured outputs and independent indexer, validator, and exporter workers.',
+			]}
+		/>
+	</div>
+
+	<KeyGuarantees items={guarantees} />
+	<FailureMatrix items={failures} />
+	<OperationsAndSource
+		facts={[
+			{ label: 'Worker polling', value: 'CAD_EDITOR_JOB_POLL_INTERVAL_SECONDS defaults to 2 seconds; the deployment currently runs one editor service.' },
+			{ label: 'Lease', value: 'CAD_EDITOR_LEASE_SECONDS defaults to 300 seconds and is renewed during state changes and child-job polling.' },
+			{ label: 'Dependency polling', value: 'Polls every 0.5 seconds by default and fails after CAD_EDITOR_DEPENDENCY_TIMEOUT_SECONDS, default 300.' },
+			{ label: 'Repair limit', value: 'Three validation attempts maximum: one initial candidate and at most two repairs of the latest failed candidate.' },
+			{ label: 'Model', value: 'OPENAI_MODEL is configurable and defaults to gpt-5.4-mini.' },
+			{ label: 'Observe', value: 'Claim failure, lease loss, state duration, dependency timeout, attempt count, source races, rollback outcome, cleanup warnings, and export warnings.' },
+		]}
+		sources={[
+			{ path: 'workers/cad_editor/edit_worker.py', symbol: 'claim_next_job / main', description: 'Polling, lease claim, sequential dispatch, and per-job result logging.' },
+			{ path: 'workers/cad_editor/cad_editor/orchestrator.py', symbol: 'EditWorkflowOrchestrator', description: 'Initial-design and established-edit state machines, candidate validation, proof-gated commit, rollback, and export handoff.' },
+			{ path: 'workers/cad_editor/cad_editor/resolver.py', symbol: 'resolve_edit_target', description: 'Authoritative linked-part scope or bounded project Getter search and restricted selection.' },
+			{ path: 'workers/cad_editor/cad_editor/context_builder.py', symbol: 'build_edit_context / build_repair_context', description: 'Focused accepted-source and repair contexts.' },
+			{ path: 'workers/cad_editor/cad_editor/agent.py', symbol: 'CadEditAgent', description: 'Responses API structured query, target, initial-model, edit-plan, and repair calls.' },
+			{ path: 'workers/cad_editor/cad_editor/applier.py', symbol: 'validate_edit_plan / apply_edit_plan', description: 'AST-bounded replacements, validated additions, build-model orchestration changes, and final parse check.' },
+			{ path: 'workers/cad_editor/cad_editor/repository.py', symbol: 'SupabaseEditRepository', description: 'Database, RPC, storage, hash verification, and cleanup boundaries.' },
+			{ path: 'supabase/migrations/20260725000000_add_cad_edit_workflow.sql', symbol: 'edit_jobs / queue_edit_* RPCs', description: 'Durable workflow schema, claims, heartbeats, and atomic child-job handoffs.' },
+			{ path: 'supabase/migrations/20260726000000_add_initial_cad_design.sql', symbol: 'workflow_mode / initial-design states', description: 'Durably distinguishes a blank-part initial design from an established edit.' },
+			{ path: 'supabase/migrations/20260726010000_add_requested_cad_part.sql', symbol: 'requested_part_id', description: 'Constrains a linked edit target to a part in the same project.' },
+		]}
+	/>
+</ArchitecturePage>

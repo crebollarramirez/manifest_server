@@ -1,0 +1,23 @@
+name: manifest-cad-editor
+
+services:
+  cad-editor:
+    image: manifest-cad-editor:local
+    build:
+      context: ../..
+      dockerfile: workers/cad_editor/Dockerfile
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL_DOCKER:-http://host.docker.internal:54321}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?SUPABASE_SERVICE_ROLE_KEY is required}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY is required}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4-mini}
+      CAD_EDITOR_JOB_POLL_INTERVAL_SECONDS: ${CAD_EDITOR_JOB_POLL_INTERVAL_SECONDS:-2}
+      CAD_EDITOR_POLL_INTERVAL_SECONDS: ${CAD_EDITOR_POLL_INTERVAL_SECONDS:-0.5}
+      CAD_EDITOR_DEPENDENCY_TIMEOUT_SECONDS: ${CAD_EDITOR_DEPENDENCY_TIMEOUT_SECONDS:-300}
+      CAD_EDITOR_LEASE_SECONDS: ${CAD_EDITOR_LEASE_SECONDS:-300}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ../..:/app
+    init: true
+    restart: unless-stopped

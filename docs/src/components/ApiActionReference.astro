@@ -1,0 +1,157 @@
+---
+import CommandBlock from './CommandBlock.astro';
+import type { CadAgentAction } from '../data/cad-agent-actions';
+
+interface Props {
+	actions: CadAgentAction[];
+}
+
+const { actions } = Astro.props;
+const categories = [...new Set(actions.map((action) => action.category))];
+---
+
+<section class="api-reference" id="api-actions" aria-labelledby="api-actions-title">
+	<header class="api-reference__header">
+		<p class="section-eyebrow">HTTP contract</p>
+		<h2 id="api-actions-title">Accepted API actions</h2>
+		<p>Every request is a <code>POST</code> JSON object sent to <code>/functions/v1/cad-agent</code>. Examples use valid placeholder UUIDs and can be copied directly.</p>
+	</header>
+
+	<nav class="api-reference__index" aria-label="API action categories">
+		{categories.map((category) => <a href={`#api-${category.toLowerCase().replaceAll(' ', '-')}`}>{category}</a>)}
+	</nav>
+
+	{categories.map((category) => (
+		<section class="api-reference__category" id={`api-${category.toLowerCase().replaceAll(' ', '-')}`}>
+			<h3>{category}</h3>
+			<div class="api-reference__list">
+				{actions.filter((action) => action.category === category).map((action) => (
+					<article class="api-action" id={`api-action-${action.action.replaceAll('_', '-')}`}>
+						<header>
+							<code>{action.action}</code>
+							<p>{action.description}</p>
+							{action.notes && <p class="api-action__note">{action.notes}</p>}
+						</header>
+						<div class="api-action__examples">
+							<CommandBlock label="Request body" command={action.requestExample} />
+							<CommandBlock label="Response example" command={action.responseExample} />
+						</div>
+					</article>
+				))}
+			</div>
+		</section>
+	))}
+</section>
+
+<style>
+	.api-reference {
+		display: grid;
+		gap: 1.5rem;
+		max-inline-size: 68rem;
+		margin-block: 3rem;
+	}
+
+	.api-reference__header h2 {
+		margin: 0;
+		color: var(--ink);
+		font-size: clamp(1.5rem, 2.5vw, 2.15rem);
+		letter-spacing: -0.04em;
+	}
+
+	.api-reference__header > p:last-child {
+		max-inline-size: 52rem;
+		margin: 0.7rem 0 0;
+		color: var(--ink-muted);
+		line-height: 1.65;
+	}
+
+	.api-reference__header code,
+	.api-action > header code {
+		color: color-mix(in srgb, var(--accent) 78%, var(--ink));
+		font-family: var(--__sl-font-mono);
+	}
+
+	.api-reference__index {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.45rem;
+	}
+
+	.api-reference__index a {
+		padding: 0.38rem 0.58rem;
+		border: 1px solid var(--line);
+		border-radius: 0.3rem;
+		color: var(--ink-muted);
+		font-family: var(--__sl-font-mono);
+		font-size: 0.68rem;
+		text-decoration: none;
+	}
+
+	.api-reference__index a:hover,
+	.api-reference__index a:focus-visible {
+		border-color: var(--accent);
+		color: var(--accent);
+	}
+
+	.api-reference__category {
+		scroll-margin-top: 5rem;
+	}
+
+	.api-reference__category > h3 {
+		margin: 0 0 0.7rem;
+		color: var(--ink);
+		font-size: 1.15rem;
+	}
+
+	.api-reference__list {
+		display: grid;
+		gap: 0.9rem;
+	}
+
+	.api-action {
+		scroll-margin-top: 5rem;
+		padding: 1rem;
+		border: 1px solid var(--line);
+		border-radius: 0.45rem;
+		background: color-mix(in srgb, var(--panel) 75%, transparent);
+	}
+
+	.api-action > header > code {
+		font-size: 0.86rem;
+		font-weight: 700;
+	}
+
+	.api-action > header p {
+		margin: 0.45rem 0 0;
+		color: var(--ink-muted);
+		font-size: 0.83rem;
+		line-height: 1.55;
+	}
+
+	.api-action > header .api-action__note {
+		color: var(--ink-faint);
+		font-size: 0.75rem;
+	}
+
+	.api-action__examples {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 0.75rem;
+		margin-block-start: 0.8rem;
+	}
+
+	.api-action__examples :global(.command-block) {
+		min-inline-size: 0;
+		margin: 0;
+	}
+
+	.api-action__examples :global(pre) {
+		max-block-size: 24rem;
+	}
+
+	@media (max-width: 52rem) {
+		.api-action__examples {
+			grid-template-columns: 1fr;
+		}
+	}
+</style>

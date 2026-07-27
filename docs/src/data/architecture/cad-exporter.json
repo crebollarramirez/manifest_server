@@ -1,0 +1,660 @@
+{
+  "id": "cad-exporter",
+  "title": "CAD Exporter system design",
+  "summary": "A polling worker that claims CAD or mesh export jobs, executes the matching model path, upserts artifacts, and records a terminal generation-job status.",
+  "scope": "service",
+  "direction": "RIGHT",
+  "nodes": [
+    {
+      "id": "generation-jobs",
+      "label": "Generation Jobs",
+      "description": "Postgres generation_jobs rows for export_cad and export_mesh work and terminal status.",
+      "type": "database",
+      "icon": "database",
+      "foundation": true,
+      "position": { "column": 0, "row": 1 },
+      "mobileOrder": 1,
+      "details": {
+        "responsibility": "Own queued, running, completed, failed, and cancelled export-job lifecycle state.",
+        "ownedBy": "Postgres generation_jobs",
+        "inputs": [
+          { "name": "export job", "description": "A project, part, type, and optional source_sha256 for export_cad." }
+        ],
+        "outputs": [
+          { "name": "claimed row", "description": "The oldest queued supported row after it is changed to running." },
+          { "name": "terminal status", "description": "Completed, failed with bounded error_message, or cancelled with source_superseded result." }
+        ],
+        "durableReads": ["Oldest queued export_cad or export_mesh row selected with FOR UPDATE SKIP LOCKED."],
+        "durableWrites": ["running claim state", "completed status", "failed status and error_message", "cancelled status, error_message, and source_superseded result"],
+        "evidence": [
+          { "path": "supabase/migrations/20260716000000_add_mesh_export_jobs.sql", "symbol": "claim_next_supported_generation_job", "kind": "migration" },
+          { "path": "workers/cad_exporter/cad_worker.py", "symbol": "mark_completed / mark_failed / mark_cancelled", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "claim",
+      "label": "1. Job Claim",
+      "description": "Polls for and atomically claims the next queued export_cad or export_mesh row.",
+      "type": "function",
+      "variant": "operation",
+      "icon": "process",
+      "position": { "column": 1, "row": 1 },
+      "mobileOrder": 2,
+      "details": {
+        "responsibility": "Ask Postgres for one supported export job and dispatch a returned row to source staging.",
+        "ownedBy": "CAD Exporter Worker",
+        "runsIn": "cad_worker.py polling loop",
+        "trigger": ["The process polls continuously; an empty result sleeps for two seconds."],
+        "preconditions": ["SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are present when the process starts."],
+        "inputs": [
+          { "name": "supported types", "description": "The fixed list [\"export_cad\", \"export_mesh\"]." }
+        ],
+        "outputs": [
+          { "name": "claimed job", "description": "A generation_jobs row already marked running, or no row." }
+        ],
+        "steps": [
+          "Call claim_next_supported_generation_job for export_cad and export_mesh.",
+          "Continue to Source Staging when a row is returned.",
+          "Sleep for two seconds when no row is returned."
+        ],
+        "failureConditions": [
+          { "condition": "No supported queued row exists", "outcome": "No handoff occurs; the process sleeps and polls again.", "continuesTo": "Job Claim" },
+          { "condition": "The claim request raises", "outcome": "The exception is outside the per-job try block and terminates the process." }
+        ],
+        "operations": {
+          "concurrency": "One export job at a time per worker process.",
+          "retry": "Empty polls repeat. Claim exceptions are not caught by the worker loop.",
+          "observability": ["Per-job cancellation and failure tracebacks are written to stderr."],
+          "controls": ["The empty-poll delay is fixed at two seconds."]
+        },
+        "evidence": [
+          { "path": "workers/cad_exporter/cad_worker.py", "symbol": "claim_next_job / main", "kind": "source" },
+          { "path": "supabase/migrations/20260716000000_add_mesh_export_jobs.sql", "symbol": "claim_next_supported_generation_job", "kind": "migration" }
+        ]
+      }
+    },
+    {
+      "id": "source-stage",
+      "label": "2. Source Staging",
+      "description": "Downloads the matching part model.py and params.json into an ephemeral job-local workspace.",
+      "type": "function",
+      "variant": "operation",
+      "icon": "source-code",
+      "position": { "column": 2, "row": 1 },
+      "mobileOrder": 4,
+      "details": {
+        "responsibility": "Create the clean job workspace and stage source from the CAD or mesh namespace selected by job type.",
+        "ownedBy": "CAD Exporter Worker",
+        "runsIn": "run_export_job.py",
+        "trigger": ["A supported generation job has been claimed."],
+        "inputs": [
+          { "name": "claimed job", "description": "Job id, project_id, part_id, type, and optional source_sha256." }
+        ],
+        "outputs": [
+          { "name": "staged source", "description": "Local source/model.py and source/params.json paths." }
+        ],
+        "durableReads": ["3dProjects parts/cad/<part>/model.py and params.json", "3dProjects parts/mesh/<part>/model.py and params.json"],
+        "steps": [
+          "Remove any pre-existing /tmp/jobs/<job-id> directory.",
+          "Select the CAD or mesh source prefix from the job type.",
+          "Download model.py and params.json into the job-local source directory.",
+          "Remove the entire job-local workspace in a finally block."
+        ],
+        "guarantees": ["The job-local workspace is removed after successful, failed, or cancelled processing."],
+        "evidence": [
+          { "path": "workers/cad_exporter/run_export_job.py", "symbol": "run_export_job", "kind": "source" },
+          { "path": "workers/cad_exporter/run_export_job.py", "symbol": "run_cad_export_job / run_mesh_export_job", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "source-storage",
+      "label": "Part Source Storage",
+      "description": "Accepted CAD or mesh source objects in the private 3dProjects bucket.",
+      "type": "storage",
+      "icon": "object-storage",
+      "contents": ["model.py", "params.json"],
+      "foundation": true,
+      "position": { "column": 2, "row": 0 },
+      "mobileOrder": 3,
+      "details": {
+        "responsibility": "Durably own the current CAD and mesh model source and parameters read by the exporter.",
+        "ownedBy": "3dProjects object storage",
+        "durableReads": [
+          "<project>/parts/cad/<part>/model.py and params.json",
+          "<project>/parts/mesh/<part>/model.py and params.json"
+        ],
+        "downstream": ["Source Staging is the reader in this service."],
+        "evidence": [
+          { "path": "workers/cad_exporter/run_export_job.py", "symbol": "cad_part_storage_path / mesh_part_storage_path", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "revision-guard",
+      "label": "3A. CAD Revision Guard",
+      "description": "For export_cad only, compares model.py with source_sha256 when the job supplies one.",
+      "type": "function",
+      "variant": "gate",
+      "icon": "source-code",
+      "position": { "column": 3, "row": 0 },
+      "mobileOrder": 5,
+      "details": {
+        "responsibility": "Prevent a hash-bound CAD job from exporting model.py bytes that changed after the job was created.",
+        "ownedBy": "CAD Exporter Worker",
+        "runsIn": "run_export_job.py",
+        "trigger": ["Source Staging completes for an export_cad job."],
+        "preconditions": ["The guard enforces a comparison only when source_sha256 is not null."],
+        "inputs": [
+          { "name": "staged model.py", "description": "Downloaded CAD source bytes." },
+          { "name": "source_sha256", "description": "Optional expected hash from generation_jobs." }
+        ],
+        "outputs": [
+          { "name": "permitted CAD source", "description": "The staged files continue to CadQuery execution when no hash was supplied or the hash matches." }
+        ],
+        "decisionPoints": ["No expected hash skips the comparison; a supplied hash must match exactly."],
+        "shortCircuit": "A mismatch raises SupersededJob before model import, artifact generation, or upload.",
+        "successCondition": "source_sha256 is absent or equals the SHA-256 of staged model.py.",
+        "failureConditions": [
+          { "condition": "A supplied source_sha256 differs", "outcome": "The job is cancelled with reason source_superseded; existing stored exports are not deleted.", "continuesTo": "Job Completion" }
+        ],
+        "evidence": [
+          { "path": "workers/cad_exporter/run_export_job.py", "symbol": "verify_source_hash", "kind": "source" },
+          { "path": "workers/cad_exporter/run_export_job.py", "symbol": "run_cad_export_job", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "cad-export",
+      "label": "3B. CadQuery Export",
+      "description": "Executes accepted CAD source inside the worker process and exports STEP and STL locally.",
+      "type": "function",
+      "variant": "transform",
+      "icon": "process",
+      "position": { "column": 4, "row": 0 },
+      "mobileOrder": 6,
+      "details": {
+        "responsibility": "Import CAD model.py, construct ModelParams, call build_model, export STEP/STL, and upload both files.",
+        "ownedBy": "CAD Exporter Worker",
+        "runsIn": "The main worker Python process",
+        "trigger": ["An export_cad job passes or skips the optional CAD Revision Guard."],
+        "preconditions": ["params.json must decode to a JSON object."],
+        "inputs": [
+          { "name": "model.py", "description": "Current accepted CAD project code." },
+          { "name": "params.json", "description": "Arguments for ModelParams." }
+        ],
+        "outputs": [
+          { "name": "model.step", "description": "CadQuery STEP export." },
+          { "name": "model.stl", "description": "CadQuery STL export." }
+        ],
+        "durableWrites": ["exports/<part>/model.step", "exports/<part>/model.stl"],
+        "steps": [
+          "Import model.py in the worker process.",
+          "Decode params.json and construct ModelParams.",
+          "Call build_model(params).",
+          "Run CadQuery exporters for STEP and STL.",
+          "Upsert model.step, then upsert model.stl."
+        ],
+        "failureConditions": [
+          { "condition": "Import, parameter construction, build, export, or upload raises", "outcome": "The job is marked failed with the first 4,000 traceback characters. An earlier successful upload is not rolled back.", "continuesTo": "Job Completion" }
+        ],
+        "operations": {
+          "concurrency": "Runs inline; one job at a time per worker process.",
+          "retry": "No per-job retry is implemented.",
+          "observability": ["Failures log the full traceback to stderr and persist its first 4,000 characters."],
+          "controls": ["This path has no configured execution timeout."]
+        },
+        "evidence": [
+          { "path": "workers/cad_exporter/run_export_job.py", "symbol": "run_cad_export_job", "kind": "source" },
+          { "path": "workers/cad_exporter/run_export_job.py", "symbol": "upload_file", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "mesh-export",
+      "label": "3C. Blender Runtime",
+      "description": "Executes mesh source in a background Blender subprocess with a sanitized environment and timeout.",
+      "type": "worker",
+      "variant": "sandbox",
+      "icon": "worker",
+      "position": { "column": 3, "row": 2 },
+      "mobileOrder": 7,
+      "details": {
+        "responsibility": "Prepare a clean Blender scene, execute the mesh model contract, and export local STL and GLB files.",
+        "ownedBy": "CAD Exporter Worker",
+        "runsIn": "blender --background --factory-startup subprocess",
+        "trigger": ["Source Staging completes for an export_mesh job."],
+        "preconditions": ["The configured Blender executable is present."],
+        "inputs": [
+          { "name": "model.py", "description": "Current accepted mesh project code." },
+          { "name": "params.json", "description": "Arguments for the mesh ModelParams." }
+        ],
+        "outputs": [
+          { "name": "local STL and GLB", "description": "Artifacts from the selected returned Blender objects." }
+        ],
+        "steps": [
+          "Start Blender in background factory-startup mode.",
+          "Remove known credentials plus *_TOKEN and *_SECRET variables and set job-local HOME/TMPDIR.",
+          "Reset objects and collections and configure metric millimeter display.",
+          "Import model.py, construct ModelParams, and call build_model.",
+          "Require a non-empty list of registered exportable Blender objects, including traversed children.",
+          "Export selected objects to STL and GLB."
+        ],
+        "successCondition": "Blender exits zero after both exporter operations report FINISHED.",
+        "failureConditions": [
+          { "condition": "Blender is missing, times out, exits non-zero, or rejects the model contract", "outcome": "The job is marked failed and no mesh artifact upload is attempted.", "continuesTo": "Job Completion" }
+        ],
+        "operations": {
+          "timeout": "300 seconds by default; BLENDER_JOB_TIMEOUT_SECONDS must be a positive integer.",
+          "concurrency": "One Blender subprocess at a time per worker process.",
+          "retry": "No per-job retry is implemented.",
+          "observability": ["On timeout or non-zero exit, the raised error includes at most the last 8,000 characters of combined subprocess output."],
+          "controls": ["BLENDER_JOB_TIMEOUT_SECONDS", "BLENDER_BIN"]
+        },
+        "evidence": [
+          { "path": "workers/cad_exporter/run_export_job.py", "symbol": "blender_command / run_blender / sanitized_blender_environment", "kind": "source" },
+          { "path": "workers/cad_exporter/blender_export_runner.py", "symbol": "main / collect_export_objects", "kind": "source" },
+          { "path": "workers/cad_exporter/blender_runtime.py", "symbol": "prepare_scene", "kind": "source" },
+          { "path": "workers/cad_exporter/docker-compose.yml", "kind": "configuration" }
+        ]
+      }
+    },
+    {
+      "id": "mesh-check",
+      "label": "3D. Mesh Artifact Checks",
+      "description": "Validates local STL/GLB presence and STL geometry before sequential storage uploads.",
+      "type": "function",
+      "variant": "gate",
+      "icon": "process",
+      "position": { "column": 4, "row": 2 },
+      "mobileOrder": 8,
+      "details": {
+        "responsibility": "Reject empty or structurally invalid mesh output before either mesh artifact is published.",
+        "ownedBy": "CAD Exporter Worker",
+        "runsIn": "run_export_job.py",
+        "trigger": ["The Blender subprocess exits successfully."],
+        "inputs": [
+          { "name": "model.stl", "description": "Local STL output loaded with trimesh." },
+          { "name": "model.glb", "description": "Local GLB output checked for presence and non-zero size." }
+        ],
+        "outputs": [
+          { "name": "verified mesh artifacts", "description": "Local STL and GLB eligible for sequential upsert." }
+        ],
+        "durableWrites": ["exports/<part>/model.stl", "exports/<part>/model.glb"],
+        "steps": [
+          "Require non-empty STL and GLB files.",
+          "Require STL vertices and faces.",
+          "Require finite vertices and bounds.",
+          "Require meaningful extent in at least two dimensions.",
+          "Require at least one finite, non-degenerate face.",
+          "Upsert model.stl, then upsert model.glb."
+        ],
+        "shortCircuit": "Any validation failure prevents both upload calls.",
+        "failureConditions": [
+          { "condition": "A mesh check fails", "outcome": "The job is marked failed and neither generated mesh file is uploaded.", "continuesTo": "Job Completion" },
+          { "condition": "A storage upload fails", "outcome": "The job is marked failed; an earlier successful STL upsert is not rolled back.", "continuesTo": "Job Completion" }
+        ],
+        "evidence": [
+          { "path": "workers/cad_exporter/run_export_job.py", "symbol": "validate_mesh_artifacts / run_mesh_export_job", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "export-storage",
+      "label": "Export Storage",
+      "description": "Shared exports/<part_id> objects upserted sequentially by successful CAD or verified mesh paths.",
+      "type": "storage",
+      "icon": "object-storage",
+      "contents": ["model.step", "model.stl", "model.glb"],
+      "foundation": true,
+      "position": { "column": 5, "row": 1 },
+      "mobileOrder": 9,
+      "details": {
+        "responsibility": "Durably own the latest successfully upserted export objects for a project part.",
+        "ownedBy": "3dProjects object storage",
+        "inputs": [
+          { "name": "CAD artifacts", "description": "model.step followed by model.stl." },
+          { "name": "Mesh artifacts", "description": "Verified model.stl followed by model.glb." }
+        ],
+        "durableWrites": ["<project>/exports/<part>/model.step", "<project>/exports/<part>/model.stl", "<project>/exports/<part>/model.glb"],
+        "guarantees": ["Each upload uses upsert=true."],
+        "operations": {
+          "retry": "No upload retry or multi-file rollback is implemented.",
+          "observability": ["Storage exceptions fail the active generation job."]
+        },
+        "evidence": [
+          { "path": "workers/cad_exporter/run_export_job.py", "symbol": "part_export_storage_path / upload_file", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "completion",
+      "label": "4. Job Completion",
+      "description": "Writes completed, failed, or source-superseded cancellation state to generation_jobs.",
+      "type": "function",
+      "variant": "completion",
+      "icon": "process",
+      "position": { "column": 6, "row": 1 },
+      "mobileOrder": 10,
+      "details": {
+        "responsibility": "Translate the export routine outcome into the terminal generation_jobs update.",
+        "ownedBy": "CAD Exporter Worker",
+        "runsIn": "cad_worker.py",
+        "trigger": ["run_export_job returns, raises SupersededJob, or raises another exception."],
+        "inputs": [
+          { "name": "successful return", "description": "Both path-specific upload calls returned without raising." },
+          { "name": "SupersededJob", "description": "A supplied CAD source hash did not match." },
+          { "name": "other exception", "description": "A source, execution, validation, export, or storage operation failed." }
+        ],
+        "outputs": [
+          { "name": "completed", "description": "Only status is set to completed." },
+          { "name": "cancelled", "description": "Status, message, and schema-v1 source_superseded result are written." },
+          { "name": "failed", "description": "Status and the first 4,000 traceback characters are written." }
+        ],
+        "durableWrites": ["generation_jobs terminal status, plus cancellation result or failure error_message where applicable"],
+        "decisionPoints": ["SupersededJob is handled separately from all other exceptions."],
+        "successCondition": "The selected export routine and both sequential storage uploads return without raising.",
+        "failureConditions": [
+          { "condition": "CAD source is superseded", "outcome": "Status cancelled with reason source_superseded." },
+          { "condition": "Any other processing error", "outcome": "Status failed with bounded error_message." },
+          { "condition": "The terminal database update itself raises", "outcome": "The exception is not caught by another recovery layer." }
+        ],
+        "evidence": [
+          { "path": "workers/cad_exporter/cad_worker.py", "symbol": "main / mark_completed / mark_failed / mark_cancelled", "kind": "source" }
+        ]
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "jobs-claim",
+      "source": "claim",
+      "target": "generation-jobs",
+      "label": "claim supported export job",
+      "protocol": "database",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": {
+        "label": "supported export types",
+        "type": "claim_next_supported_generation_job RPC",
+        "exampleBody": "{\"p_job_types\":[\"export_cad\",\"export_mesh\"]}"
+      },
+      "response": {
+        "label": "claimed job or no row",
+        "type": "generation_jobs row",
+        "exampleBody": "{\"id\":\"export-job-123\",\"status\":\"running\",\"type\":\"export_cad\",\"source_sha256\":\"…\"}"
+      },
+      "details": {
+        "summary": "Job Claim initiates an atomic Postgres selection and queued-to-running update for the oldest supported row. There is no worker lease or database-initiated request.",
+        "operation": "claim_next_supported_generation_job",
+        "payload": "The fixed export_cad and export_mesh type list.",
+        "durability": "A returned row is already marked running.",
+        "failureBehavior": "No row causes a two-second sleep. A claim exception terminates the process.",
+        "evidence": [
+          { "path": "workers/cad_exporter/cad_worker.py", "symbol": "claim_next_job / main", "kind": "source" },
+          { "path": "supabase/migrations/20260716000000_add_mesh_export_jobs.sql", "symbol": "claim_next_supported_generation_job", "kind": "migration" }
+        ]
+      }
+    },
+    {
+      "id": "claim-stage",
+      "source": "claim",
+      "target": "source-stage",
+      "label": "claimed export job",
+      "protocol": "internal",
+      "direction": "one-way",
+      "flow": "synchronous",
+      "details": {
+        "summary": "A returned supported generation_jobs row is dispatched immediately in the same worker process.",
+        "preconditions": ["The claim RPC returned a row."],
+        "payload": "The complete claimed job dictionary.",
+        "durability": "Transient in-process handoff; the job row is durable in Postgres.",
+        "failureBehavior": "No row means the handoff does not occur.",
+        "evidence": [
+          { "path": "workers/cad_exporter/cad_worker.py", "symbol": "main", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "storage-stage",
+      "source": "source-stage",
+      "target": "source-storage",
+      "label": "read model.py and params.json",
+      "protocol": "storage",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": {
+        "label": "download part source",
+        "type": "3dProjects storage download",
+        "exampleBody": "{\"job_type\":\"export_cad\",\"objects\":[\"parts/cad/<part>/model.py\",\"parts/cad/<part>/params.json\"]}"
+      },
+      "response": {
+        "label": "source and parameter bytes",
+        "type": "object bytes",
+        "exampleBody": "{\"model.py\":\"<bytes>\",\"params.json\":\"<bytes>\"}"
+      },
+      "details": {
+        "summary": "Source Staging initiates reads from the CAD or mesh part prefix selected by the claimed job type.",
+        "preconditions": ["The job type is export_cad or export_mesh."],
+        "operation": "storage.download",
+        "payload": "model.py and params.json bytes.",
+        "durability": "Storage remains the durable owner; local copies are deleted with the job workspace.",
+        "failureBehavior": "A download failure marks the generation job failed.",
+        "evidence": [
+          { "path": "workers/cad_exporter/run_export_job.py", "symbol": "download_file / run_cad_export_job / run_mesh_export_job", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "stage-guard",
+      "source": "source-stage",
+      "target": "revision-guard",
+      "label": "export_cad source",
+      "protocol": "file",
+      "direction": "one-way",
+      "flow": "synchronous",
+      "details": {
+        "summary": "Only the CAD path applies the optional source revision comparison before project code executes.",
+        "preconditions": ["job.type is export_cad."],
+        "payload": "Staged CAD model.py and optional source_sha256.",
+        "durability": "Transient job-local files.",
+        "failureBehavior": "A supplied mismatching hash cancels the job and prevents CAD execution and upload.",
+        "evidence": [
+          { "path": "workers/cad_exporter/run_export_job.py", "symbol": "run_cad_export_job / verify_source_hash", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "guard-cad",
+      "source": "revision-guard",
+      "target": "cad-export",
+      "label": "permitted CAD source",
+      "protocol": "internal",
+      "direction": "one-way",
+      "flow": "synchronous",
+      "details": {
+        "summary": "CAD execution begins when no source hash was supplied or the downloaded model.py matches the supplied hash.",
+        "preconditions": ["source_sha256 is absent or matches model.py."],
+        "payload": "Job-local model.py and params.json paths.",
+        "durability": "Transient in-process handoff.",
+        "failureBehavior": "A mismatch prevents this handoff.",
+        "trustBoundary": "Project model.py executes in the main worker process, which was created with Supabase service-role configuration.",
+        "evidence": [
+          { "path": "workers/cad_exporter/run_export_job.py", "symbol": "verify_source_hash / run_cad_export_job", "kind": "source" },
+          { "path": "workers/cad_exporter/cad_worker.py", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "stage-mesh",
+      "source": "source-stage",
+      "target": "mesh-export",
+      "label": "export_mesh source",
+      "protocol": "file",
+      "direction": "one-way",
+      "flow": "synchronous",
+      "details": {
+        "summary": "Mesh source and parameters are passed to a sanitized Blender subprocess. This path does not call verify_source_hash.",
+        "preconditions": ["job.type is export_mesh."],
+        "payload": "Job-local model.py and params.json paths.",
+        "durability": "Transient subprocess inputs.",
+        "failureBehavior": "A missing executable, timeout, or non-zero exit marks the job failed.",
+        "trustBoundary": "Project code crosses into the Blender subprocess after known credentials and token/secret-suffixed variables are removed.",
+        "evidence": [
+          { "path": "workers/cad_exporter/run_export_job.py", "symbol": "run_mesh_export_job / run_blender", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "cad-artifacts",
+      "source": "cad-export",
+      "target": "export-storage",
+      "label": "upsert STEP then STL",
+      "protocol": "storage",
+      "direction": "one-way",
+      "flow": "synchronous",
+      "request": {
+        "label": "sequential CAD artifact upserts",
+        "type": "3dProjects storage upload",
+        "exampleBody": "{\"uploads\":[\"exports/<part>/model.step\",\"exports/<part>/model.stl\"],\"upsert\":true}"
+      },
+      "details": {
+        "summary": "CadQuery Export initiates two independent storage upserts after both local exports are produced.",
+        "preconditions": ["CadQuery import, model build, and both local exporter calls returned."],
+        "operation": "storage.upload",
+        "payload": "model.step followed by model.stl.",
+        "durability": "Each successful call replaces or creates its object immediately; the pair is not transactional.",
+        "failureBehavior": "If STEP succeeds and STL fails, STEP can remain updated while the job is marked failed.",
+        "evidence": [
+          { "path": "workers/cad_exporter/run_export_job.py", "symbol": "run_cad_export_job / upload_file", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "cad-completion",
+      "source": "cad-export",
+      "target": "completion",
+      "label": "CAD path returned",
+      "protocol": "internal",
+      "direction": "one-way",
+      "flow": "synchronous",
+      "details": {
+        "summary": "The CAD path reaches successful completion only after both storage upload calls return without raising.",
+        "preconditions": ["STEP and STL upserts both returned."],
+        "payload": "Successful function return; no artifact manifest is persisted on the job.",
+        "durability": "Transient control handoff before the terminal database update.",
+        "failureBehavior": "Any path exception is handled as failed, except SupersededJob which is cancelled.",
+        "evidence": [
+          { "path": "workers/cad_exporter/cad_worker.py", "symbol": "main", "kind": "source" },
+          { "path": "workers/cad_exporter/run_export_job.py", "symbol": "run_cad_export_job", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "mesh-check",
+      "source": "mesh-export",
+      "target": "mesh-check",
+      "label": "local STL and GLB",
+      "protocol": "file",
+      "direction": "one-way",
+      "flow": "synchronous",
+      "details": {
+        "summary": "A zero-exit Blender process hands its local files to mesh validation before any mesh upload.",
+        "preconditions": ["Blender returned exit code zero after both exporters reported FINISHED."],
+        "payload": "Job-local model.stl and model.glb paths.",
+        "durability": "Transient local files deleted with the job workspace.",
+        "failureBehavior": "A failed mesh check prevents both upload calls.",
+        "evidence": [
+          { "path": "workers/cad_exporter/run_export_job.py", "symbol": "run_mesh_export_job / validate_mesh_artifacts", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "check-artifacts",
+      "source": "mesh-check",
+      "target": "export-storage",
+      "label": "upsert verified STL then GLB",
+      "protocol": "storage",
+      "direction": "one-way",
+      "flow": "synchronous",
+      "request": {
+        "label": "sequential verified mesh upserts",
+        "type": "3dProjects storage upload",
+        "exampleBody": "{\"uploads\":[\"exports/<part>/model.stl\",\"exports/<part>/model.glb\"],\"upsert\":true}"
+      },
+      "details": {
+        "summary": "Mesh Artifact Checks initiates two independent upserts only after both files and STL geometry pass validation.",
+        "preconditions": ["Both files are non-empty and the STL passes structural, finite-geometry, extent, and face-area checks."],
+        "operation": "storage.upload",
+        "payload": "model.stl followed by model.glb.",
+        "durability": "Each successful call commits its object independently; the pair is not transactional.",
+        "failureBehavior": "If STL succeeds and GLB fails, STL can remain updated while the job is marked failed.",
+        "evidence": [
+          { "path": "workers/cad_exporter/run_export_job.py", "symbol": "validate_mesh_artifacts / run_mesh_export_job", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "mesh-completion",
+      "source": "mesh-check",
+      "target": "completion",
+      "label": "mesh path returned",
+      "protocol": "internal",
+      "direction": "one-way",
+      "flow": "synchronous",
+      "details": {
+        "summary": "The mesh path reaches successful completion only after validation and both storage upserts return.",
+        "preconditions": ["Mesh checks and both STL/GLB uploads returned."],
+        "payload": "Successful function return; no artifact manifest is persisted on the job.",
+        "durability": "Transient control handoff before the terminal database update.",
+        "failureBehavior": "Any validation or upload exception is handled as a failed job.",
+        "evidence": [
+          { "path": "workers/cad_exporter/cad_worker.py", "symbol": "main", "kind": "source" },
+          { "path": "workers/cad_exporter/run_export_job.py", "symbol": "run_mesh_export_job", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "completion-generation-job",
+      "source": "completion",
+      "target": "generation-jobs",
+      "label": "write terminal status",
+      "protocol": "database",
+      "direction": "one-way",
+      "flow": "synchronous",
+      "request": {
+        "label": "generation_jobs update",
+        "type": "PostgREST table update",
+        "exampleBody": "{\"status\":\"completed|failed|cancelled\",\"error_message\":\"<when applicable>\",\"result\":{\"reason\":\"source_superseded\"}}"
+      },
+      "details": {
+        "summary": "Job Completion initiates the terminal generation_jobs update after classifying the export outcome.",
+        "operation": "generation_jobs.update",
+        "payload": "Completed writes status only; failed adds bounded error_message; cancelled adds message and source_superseded result.",
+        "durability": "The update is the durable lifecycle outcome. It does not provide transactional coupling to prior object uploads.",
+        "failureBehavior": "A terminal update exception is not caught by a second recovery layer.",
+        "evidence": [
+          { "path": "workers/cad_exporter/cad_worker.py", "symbol": "mark_completed / mark_failed / mark_cancelled / main", "kind": "source" }
+        ]
+      }
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "cad-exporter-worker-boundary",
+      "label": "CAD Exporter Worker",
+      "kind": "worker",
+      "description": "One polling process owns claim, staging, both execution paths, artifact validation, publication, and terminal status.",
+      "nodeIds": ["claim", "source-stage", "revision-guard", "cad-export", "mesh-export", "mesh-check", "completion"]
+    },
+    {
+      "id": "blender-runtime-boundary",
+      "label": "Sanitized Blender subprocess",
+      "kind": "runtime",
+      "description": "Only the mesh path executes project code in this bounded subprocess.",
+      "nodeIds": ["mesh-export"],
+      "parentId": "cad-exporter-worker-boundary"
+    }
+  ]
+}

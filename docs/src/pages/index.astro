@@ -1,0 +1,370 @@
+---
+import ApiActionReference from '../components/ApiActionReference.astro';
+import ArchitecturePage from '../components/ArchitecturePage.astro';
+import BoundaryMatrix from '../components/service-docs/BoundaryMatrix.astro';
+import CommandBlock from '../components/CommandBlock.astro';
+import FailureMatrix from '../components/service-docs/FailureMatrix.astro';
+import KeyGuarantees from '../components/service-docs/KeyGuarantees.astro';
+import ModeMatrix from '../components/service-docs/ModeMatrix.astro';
+import ServiceAtGlance from '../components/service-docs/ServiceAtGlance.astro';
+import backendSystem from '../data/architecture/backend-system.json';
+import { cadAgentActions } from '../data/cad-agent-actions';
+import '../styles/service-docs.css';
+
+const glance = [
+	{ label: 'Top API layer', value: 'One Supabase Edge Function: cad-agent' },
+	{ label: 'Interface', value: 'POST JSON action router with 15 supported actions' },
+	{ label: 'Durable work', value: 'Postgres index_jobs, generation_jobs, and edit_jobs' },
+	{ label: 'Microservices', value: 'Indexer, CAD Validator, CAD Exporter, and CAD Editor workers' },
+	{ label: 'File owner', value: 'Private 3dProjects Supabase Storage bucket' },
+	{ label: 'AI paths', value: 'Linked blank CAD initial design, scoped CAD edits, and linked mesh generation' },
+];
+
+const modes = [
+	{
+		name: 'Catalog',
+		source: 'create, link, list, and delete project/part actions.',
+		success: 'Reads or changes projects/parts and initializes or removes matching storage prefixes.',
+		downstream: 'CAD creation also queues build_index asynchronously and returns its job metadata; mesh creation does not.',
+	},
+	{
+		name: 'Durable work',
+		source: 'index_project, test_index, validate_part, export_part, and CAD chat.',
+		success: 'Creates an index_jobs, generation_jobs, or edit_jobs row and returns its UUID.',
+		downstream: 'An independent worker later claims the database row.',
+	},
+	{
+		name: 'Status',
+		source: 'get_index_job and get_edit_job.',
+		success: 'Selects bounded job fields and returns current state or results.',
+		downstream: 'Read-only; it does not advance the workflow.',
+	},
+	{
+		name: 'Mesh chat',
+		source: 'chat with a linked mesh part.',
+		success: 'Calls OpenAI, replaces mesh model.py, then inserts an export_mesh job.',
+		downstream: 'The storage write and job insert are sequential, not transactional.',
+	},
+];
+
+const guarantees = [
+	{
+		title: 'Worker work is durable before response',
+		description: 'Indexing, Getter tests, validation, export, and CAD editing are represented by Postgres job rows before the HTTP response returns.',
+		evidence: 'supabase/functions/cad-agent/index.ts — queueGenerationJob / queueIndexJob / queueEditJob',
+	},
+	{
+		title: 'CAD and mesh chat use different paths',
+		description: 'A linked blank CAD part creates an initial_design workflow; established linked CAD requests stay bound to requested_part_id, while unlinked requests use project-wide resolution. Linked mesh chat calls OpenAI directly.',
+		evidence: 'supabase/functions/cad-agent/index.ts — handleChat',
+	},
+	{
+		title: 'Manual CAD work is source-bound',
+		description: 'Before inserting validate_cad or export_cad work, the function downloads canonical model.py and records its SHA-256.',
+		evidence: 'supabase/functions/cad-agent/index.ts — currentCadSourceSha256',
+	},
+	{
+		title: 'Deletion checks running work twice',
+		description: 'Queued work is cancelled only after an initial running-job check, followed by another check to catch work that started during preparation.',
+		evidence: 'supabase/functions/cad-agent/index.ts — prepareForDeletion',
+	},
+	{
+		title: 'Edit status limits history fields',
+		description: 'get_edit_job maps history events to an explicit allowlist rather than returning every stored property.',
+		evidence: 'supabase/functions/cad-agent/index.ts — handleGetEditJob',
+	},
+];
+
+const failures = [
+	{
+		condition: 'Method is not POST',
+		durableOutcome: 'No data is changed.',
+		runtime: 'The function returns HTTP 405.',
+		downstream: 'No action handler runs.',
+	},
+	{
+		condition: 'Invalid body, action, name, UUID, or operation',
+		durableOutcome: 'No later handler effect runs after validation fails.',
+		runtime: 'RequestError returns HTTP 400, 404, or 409.',
+		downstream: 'The caller receives a JSON error.',
+	},
+	{
+		condition: 'Part file initialization fails',
+		durableOutcome: 'The function attempts to remove the source prefix and delete the inserted part row.',
+		runtime: 'Compensating cleanup runs after the storage failure.',
+		downstream: 'The request fails instead of returning a created part.',
+	},
+	{
+		condition: 'CAD files are created but automatic indexing cannot be queued',
+		durableOutcome: 'The part row, blank model.py, and params.json remain.',
+		runtime: 'create_part still returns status created with index_status not_queued and a warning.',
+		downstream: 'The caller can queue index_project manually before initial design.',
+	},
+	{
+		condition: 'Deletion finds applicable running work',
+		durableOutcome: 'Project, part, and stored files remain.',
+		runtime: 'The function returns HTTP 409 before deletion.',
+		downstream: 'Retry after the work reaches a terminal state.',
+	},
+	{
+		condition: 'Mesh storage succeeds but export insertion fails',
+		durableOutcome: 'Replacement model.py remains without a new export job.',
+		runtime: 'No cross-resource rollback is implemented.',
+		downstream: 'The request returns HTTP 500 and export must be requested again.',
+	},
+	{
+		condition: 'Unexpected database, storage, or OpenAI error',
+		durableOutcome: 'Effects completed before the failure may remain.',
+		runtime: 'The catch-all returns HTTP 500.',
+		downstream: 'Inspect durable resources before retrying a mutation.',
+	},
+];
+---
+
+<ArchitecturePage
+	title="Backend System Design Overview"
+	summary="The backend entry point, accepted API contracts, durable worker handoffs, and the commands and environment needed to run the complete local system."
+	section="System architecture"
+	active="home"
+	document={backendSystem}
+	fallback="Loading the backend system design diagram…"
+	showExampleNotice={false}
+	sidebarNote="Backend overview: Edge Function contracts, immediate dependencies, durable jobs, local Supabase, and all worker services."
+	diagramFirst={true}
+>
+	<div slot="beforeDiagram" class="backend-overview">
+		<ServiceAtGlance items={glance} />
+
+		<article class="doc-prose">
+			<h2>Backend boundary</h2>
+			<p>The repository currently exposes one Supabase Edge Function, <code>cad-agent</code>. It handles project and part resources, creates durable worker jobs, serves job status, coordinates safe deletion, initializes blank CAD source, automatically queues indexing for new CAD parts, and owns the direct linked-mesh generation path.</p>
+			<p>Indexer, CAD Editor, CAD Validator, and CAD Exporter are not synchronous Edge Function callees. The API inserts Postgres work rows and returns their IDs; independent worker containers claim those rows later.</p>
+		</article>
+
+		<aside class="notice notice--caution">
+			<span class="notice__mark" aria-hidden="true">!</span>
+			<div>
+				<h2>Current access boundary</h2>
+				<p><code>supabase/config.toml</code> sets <code>verify_jwt = false</code> for <code>cad-agent</code>. The function creates a service-role Supabase client. Authentication hardening is an explicit production concern.</p>
+			</div>
+		</aside>
+
+		<BoundaryMatrix
+			owns={[
+				'HTTP method, JSON action, field, name, UUID, and part-type validation.',
+				'Request-scoped project/part operations, durable job creation, and bounded status responses.',
+				'Default part-file initialization, deletion orchestration, and direct linked-mesh generation.',
+			]}
+			doesNotOwn={[
+				'Background index, edit, validation, or export execution.',
+				'Worker job claiming, terminal transitions, artifact construction, or service-level retries.',
+				'Durable catalog, job, source, candidate, index, or export state outside Supabase stores.',
+			]}
+			dependsOn={[
+				'Postgres projects, parts, index_jobs, generation_jobs, and edit_jobs.',
+				'Private 3dProjects object storage.',
+				'OpenAI Responses API only for linked-mesh chat.',
+			]}
+		/>
+
+		<ModeMatrix title="Request paths" modes={modes} />
+		<KeyGuarantees items={guarantees} />
+		<FailureMatrix items={failures} />
+
+		<ApiActionReference actions={cadAgentActions} />
+
+		<section class="runbook" id="local-runbook" aria-labelledby="local-runbook-title">
+			<header class="runbook__header">
+				<p class="section-eyebrow">Local operations</p>
+				<h2 id="local-runbook-title">Run the complete backend</h2>
+				<p>Run every command from the repository root. Start Supabase before the Edge Function or worker containers.</p>
+			</header>
+
+			<section class="runbook__section">
+				<h3>1. Start and manage Supabase</h3>
+				<div class="runbook__commands">
+					<div>
+						<p>Start the local database, API, Storage, Studio, and supporting Supabase services.</p>
+						<CommandBlock label="Start Supabase" command="supabase start" />
+					</div>
+					<div>
+						<p>Print local URLs and keys. Use this output to populate worker and CLI environment files.</p>
+						<CommandBlock label="Show local status and keys" command="supabase status" />
+					</div>
+					<div>
+						<p>Stop the local stack while preserving its Docker volumes and local data.</p>
+						<CommandBlock label="Stop Supabase" command="supabase stop" />
+					</div>
+					<div>
+						<p>Recreate the local database and rerun migrations and seed data. This removes local database data.</p>
+						<CommandBlock label="Reset local database" command="supabase db reset" />
+					</div>
+				</div>
+			</section>
+
+			<section class="runbook__section">
+				<h3>2. Serve the Edge Function</h3>
+				<p>Leave this running in its own terminal. Local Supabase supplies its URL and service-role context; <code>supabase/functions/.env</code> supplies the OpenAI secret used by linked-mesh chat.</p>
+				<CommandBlock label="Serve cad-agent" command="supabase functions serve cad-agent --env-file supabase/functions/.env" />
+				<CommandBlock label="supabase/functions/.env" command={`OPENAI_API_KEY=replace-with-openai-key
+# Optional
+OPENAI_MODEL=gpt-5.4-mini`} />
+			</section>
+
+			<section class="runbook__section">
+				<h3>3. Configure worker environments</h3>
+				<p>Copy the service-role key printed by <code>supabase status</code> into each worker&rsquo;s own <code>.env</code>. The Docker URL and timing controls shown below are optional defaults.</p>
+				<div class="runbook__env-grid">
+					<div>
+						<h4>Indexer — <code>workers/indexer/.env</code></h4>
+						<CommandBlock label="Indexer environment" command={`SUPABASE_SERVICE_ROLE_KEY=replace-with-local-service-role-key
+# Optional
+SUPABASE_URL_DOCKER=http://host.docker.internal:54321
+INDEX_POLL_INTERVAL_SECONDS=2`} />
+					</div>
+					<div>
+						<h4>CAD Validator — <code>workers/cad_validator/.env</code></h4>
+						<CommandBlock label="Validator environment" command={`SUPABASE_SERVICE_ROLE_KEY=replace-with-local-service-role-key
+# Optional
+SUPABASE_URL_DOCKER=http://host.docker.internal:54321
+CAD_VALIDATION_TIMEOUT_SECONDS=60`} />
+					</div>
+					<div>
+						<h4>CAD Exporter — <code>workers/cad_exporter/.env</code></h4>
+						<CommandBlock label="Exporter environment" command={`SUPABASE_SERVICE_ROLE_KEY=replace-with-local-service-role-key
+# Optional
+SUPABASE_URL_DOCKER=http://host.docker.internal:54321
+BLENDER_JOB_TIMEOUT_SECONDS=300`} />
+					</div>
+					<div>
+						<h4>CAD Editor — <code>workers/cad_editor/.env</code></h4>
+						<CommandBlock label="Editor environment" command={`SUPABASE_SERVICE_ROLE_KEY=replace-with-local-service-role-key
+OPENAI_API_KEY=replace-with-openai-key
+# Optional
+SUPABASE_URL_DOCKER=http://host.docker.internal:54321
+OPENAI_MODEL=gpt-5.4-mini
+CAD_EDITOR_JOB_POLL_INTERVAL_SECONDS=2
+CAD_EDITOR_POLL_INTERVAL_SECONDS=0.5
+CAD_EDITOR_DEPENDENCY_TIMEOUT_SECONDS=300
+CAD_EDITOR_LEASE_SECONDS=300`} />
+					</div>
+				</div>
+			</section>
+
+			<section class="runbook__section">
+				<h3>4. Start all worker containers</h3>
+				<p>This detached sequence builds and starts all four microservices. Each Compose project remains independently restartable and inspectable.</p>
+				<CommandBlock label="Start every worker" command={`docker compose --env-file workers/indexer/.env -f workers/indexer/docker-compose.yml up --build -d &&
+docker compose --env-file workers/cad_validator/.env -f workers/cad_validator/docker-compose.yml up --build -d &&
+docker compose --env-file workers/cad_exporter/.env -f workers/cad_exporter/docker-compose.yml up --build -d &&
+docker compose --env-file workers/cad_editor/.env -f workers/cad_editor/docker-compose.yml up --build -d`} />
+
+				<div class="runbook__commands">
+					<div>
+						<h4>Indexer</h4>
+						<CommandBlock label="Start" command="docker compose --env-file workers/indexer/.env -f workers/indexer/docker-compose.yml up --build" />
+						<CommandBlock label="Stop" command="docker compose -f workers/indexer/docker-compose.yml down" />
+					</div>
+					<div>
+						<h4>CAD Validator</h4>
+						<CommandBlock label="Start" command="docker compose --env-file workers/cad_validator/.env -f workers/cad_validator/docker-compose.yml up --build" />
+						<CommandBlock label="Stop" command="docker compose -f workers/cad_validator/docker-compose.yml down" />
+					</div>
+					<div>
+						<h4>CAD Exporter</h4>
+						<CommandBlock label="Start" command="docker compose --env-file workers/cad_exporter/.env -f workers/cad_exporter/docker-compose.yml up --build" />
+						<CommandBlock label="Stop" command="docker compose -f workers/cad_exporter/docker-compose.yml down" />
+					</div>
+					<div>
+						<h4>CAD Editor</h4>
+						<CommandBlock label="Start" command="docker compose --env-file workers/cad_editor/.env -f workers/cad_editor/docker-compose.yml up --build" />
+						<CommandBlock label="Stop" command="docker compose -f workers/cad_editor/docker-compose.yml down" />
+					</div>
+				</div>
+
+				<CommandBlock label="Stop every worker" command={`docker compose -f workers/cad_editor/docker-compose.yml down &&
+docker compose -f workers/cad_exporter/docker-compose.yml down &&
+docker compose -f workers/cad_validator/docker-compose.yml down &&
+docker compose -f workers/indexer/docker-compose.yml down`} />
+			</section>
+
+			<section class="runbook__section">
+				<h3>5. Optional terminal client</h3>
+				<p>The CLI uses the local API URL and anon key printed by <code>supabase status</code>.</p>
+				<CommandBlock label="Repository .env" command={`SUPABASE_URL=http://127.0.0.1:54321
+SUPABASE_ANON_KEY=replace-with-local-anon-key`} />
+				<CommandBlock label="Install CLI dependencies" command="python -m pip install -r requirements.txt" />
+				<CommandBlock label="Start CLI" command="python cad_agent_cli.py" />
+			</section>
+		</section>
+	</div>
+</ArchitecturePage>
+
+<style>
+	.backend-overview {
+		display: grid;
+		gap: 2rem;
+	}
+
+	.runbook {
+		display: grid;
+		gap: 2.2rem;
+		max-inline-size: 68rem;
+		margin-block: 3rem;
+	}
+
+	.runbook__header h2 {
+		margin: 0;
+		color: var(--ink);
+		font-size: clamp(1.5rem, 2.5vw, 2.15rem);
+		letter-spacing: -0.04em;
+	}
+
+	.runbook__header > p:last-child,
+	.runbook__section > p,
+	.runbook__commands p {
+		margin: 0.65rem 0 0;
+		color: var(--ink-muted);
+		font-size: 0.86rem;
+		line-height: 1.6;
+	}
+
+	.runbook__section {
+		scroll-margin-top: 5rem;
+	}
+
+	.runbook__section h3 {
+		margin: 0 0 0.85rem;
+		color: var(--ink);
+		font-size: 1.2rem;
+	}
+
+	.runbook__section h4 {
+		margin: 0 0 0.55rem;
+		color: var(--ink);
+		font-size: 0.86rem;
+	}
+
+	.runbook__commands,
+	.runbook__env-grid {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 0.85rem;
+	}
+
+	.runbook__commands > div,
+	.runbook__env-grid > div {
+		min-inline-size: 0;
+	}
+
+	.runbook :global(.command-block) {
+		min-inline-size: 0;
+	}
+
+	@media (max-width: 52rem) {
+		.runbook__commands,
+		.runbook__env-grid {
+			grid-template-columns: 1fr;
+		}
+	}
+</style>

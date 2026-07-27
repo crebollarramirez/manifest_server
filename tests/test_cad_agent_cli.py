@@ -30,6 +30,7 @@ MESH_PART = {
     "part_name": "Dragon Body",
     "part_type": "mesh",
 }
+EDIT_JOB_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
 
 class FakeFunctions:
@@ -66,6 +67,7 @@ class CommandParsingTests(unittest.TestCase):
                 "test_index",
                 "make the mounting holes bigger",
             ),
+            f"/edit-status {EDIT_JOB_ID}": ("get_edit_job", EDIT_JOB_ID),
             "/delete -project Desk Mount": ("delete_project", "Desk Mount"),
             "/delete -part Left Bracket": ("delete_part", "Left Bracket"),
         }
@@ -88,6 +90,8 @@ class CommandParsingTests(unittest.TestCase):
             cad_agent_cli.parse_command(f"/validate {PART['id']} extra")
         with self.assertRaises(cad_agent_cli.CommandError):
             cad_agent_cli.parse_command("/index -test")
+        with self.assertRaises(cad_agent_cli.CommandError):
+            cad_agent_cli.parse_command("/edit-status")
 
 
 class LinkedStateTests(unittest.TestCase):
@@ -297,26 +301,65 @@ class LinkedStateTests(unittest.TestCase):
             "get_index_job",
         )
 
+    def test_edit_status_does_not_require_linked_state(self):
+        supabase = FakeSupabase([
+            {
+                "message": "running",
+                "job": {
+                    "id": EDIT_JOB_ID,
+                    "status": "running",
+                    "state": "validating_candidate",
+                    "attempt_count": 1,
+                    "resolved_targets": ["mount_holes"],
+                    "validation_job_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                },
+            },
+        ])
+
+        result = cad_agent_cli.handle_command(
+            supabase,
+            cad_agent_cli.CliState(),
+            cad_agent_cli.parse_command(f"/edit-status {EDIT_JOB_ID}"),
+        )
+
+        self.assertIn("validating_candidate", result)
+        self.assertIn('"attempt_count": 1', result)
+        self.assertEqual(
+            supabase.functions.calls[0][1]["body"],
+            {"action": "get_edit_job", "job_id": EDIT_JOB_ID},
+        )
+
 
 class ChatTests(unittest.TestCase):
-    def test_chat_requires_linked_part(self):
+    def test_chat_requires_linked_project(self):
         with self.assertRaisesRegex(cad_agent_cli.CommandError, "Link a project"):
             cad_agent_cli.send_chat(FakeSupabase([]), cad_agent_cli.CliState(), "add a hole")
 
-    def test_chat_is_scoped_to_project_and_part(self):
+    def test_cad_chat_requires_only_project(self):
         supabase = FakeSupabase([
-            {"message": "updated", "job_id": "33333333-3333-4333-8333-333333333333"},
+            {"message": "queued", "job_id": "33333333-3333-4333-8333-333333333333"},
         ])
-        state = cad_agent_cli.CliState(project=PROJECT.copy(), part=PART.copy())
+        state = cad_agent_cli.CliState(project=PROJECT.copy())
         message, job_id = cad_agent_cli.send_chat(supabase, state, "add a hole")
 
-        self.assertEqual(message, "updated")
+        self.assertEqual(message, "queued")
         self.assertTrue(job_id.startswith("33333333"))
         body = supabase.functions.calls[0][1]["body"]
         self.assertEqual(body["action"], "chat")
         self.assertEqual(body["project_id"], PROJECT["id"])
-        self.assertEqual(body["part_id"], PART["id"])
-        self.assertEqual(state.history[-1], {"role": "assistant", "content": "updated"})
+        self.assertNotIn("part_id", body)
+        self.assertEqual(state.history[-1], {"role": "assistant", "content": "queued"})
+
+    def test_linked_cad_part_does_not_constrain_project_scoped_edit(self):
+        supabase = FakeSupabase([
+            {"message": "queued", "job_id": "33333333-3333-4333-8333-333333333333"},
+        ])
+        state = cad_agent_cli.CliState(project=PROJECT.copy(), part=PART.copy())
+
+        cad_agent_cli.send_chat(supabase, state, "make the right bracket wider")
+
+        body = supabase.functions.calls[0][1]["body"]
+        self.assertNotIn("part_id", body)
 
     def test_mesh_chat_uses_the_same_part_scoped_action(self):
         supabase = FakeSupabase([

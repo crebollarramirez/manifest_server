@@ -1,0 +1,602 @@
+{
+  "id": "cad-editor",
+  "title": "CAD Editor system design",
+  "summary": "A leased polling worker that generates the first model for a linked blank part or safely edits an indexed part, then validates, commits, reindexes, and schedules export.",
+  "scope": "service",
+  "direction": "RIGHT",
+  "nodes": [
+    {
+      "id": "edit-jobs",
+      "label": "Edit Jobs",
+      "description": "Postgres edit_jobs rows owning workflow mode, explicit linked-part scope, hashes, child-job IDs, history, leases, and terminal results.",
+      "type": "database",
+      "icon": "database",
+      "foundation": true,
+      "position": { "column": 0, "row": 1 },
+      "mobileOrder": 1,
+      "details": {
+        "responsibility": "Durably own each resumable CAD edit workflow and its reclaimable worker lease.",
+        "ownedBy": "Postgres edit_jobs",
+        "inputs": [
+          { "name": "edit request", "description": "Project-scoped request_text and recent user/assistant messages." }
+        ],
+        "outputs": [
+          { "name": "claimed workflow", "description": "The oldest queued or lease-expired running row after ownership is assigned." },
+          { "name": "terminal result", "description": "Completed or failed result with targets, attempts, child IDs, warnings, and recovery outcome." }
+        ],
+        "durableWrites": [
+          "workflow_mode, requested_part_id, state, status, worker_id, heartbeat_at, and lease_expires_at",
+          "resolved target and accepted/candidate hashes",
+          "validation, index, and export child-job IDs",
+          "history, result, error_code, and bounded error_message"
+        ],
+        "evidence": [
+          { "path": "supabase/migrations/20260725000000_add_cad_edit_workflow.sql", "symbol": "edit_jobs / claim_next_edit_job / heartbeat_edit_job", "kind": "migration" },
+          { "path": "supabase/migrations/20260726000000_add_initial_cad_design.sql", "symbol": "workflow_mode", "kind": "migration" },
+          { "path": "supabase/migrations/20260726010000_add_requested_cad_part.sql", "symbol": "requested_part_id", "kind": "migration" },
+          { "path": "workers/cad_editor/cad_editor/repository.py", "symbol": "patch_edit_job / complete_edit_job / fail_edit_job", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "claim",
+      "label": "1. Lease Claim",
+      "description": "Claims one queued or expired edit job and maintains its lease while dependencies run.",
+      "type": "function",
+      "variant": "operation",
+      "icon": "process",
+      "position": { "column": 1, "row": 1 },
+      "mobileOrder": 2,
+      "details": {
+        "responsibility": "Acquire one workflow for this worker ID and hand it to the resumable orchestrator.",
+        "ownedBy": "CAD Editor Worker",
+        "runsIn": "edit_worker.py polling loop",
+        "trigger": ["The process polls continuously; an empty claim sleeps for CAD_EDITOR_JOB_POLL_INTERVAL_SECONDS."],
+        "outputs": [
+          { "name": "claimed edit job", "description": "A row already changed to running with a worker ID and lease expiry." }
+        ],
+        "failureConditions": [
+          { "condition": "No claimable row exists", "outcome": "The process sleeps and polls again.", "continuesTo": "Lease Claim" },
+          { "condition": "The claim RPC raises", "outcome": "The exception is outside the per-job try block and terminates the worker process." }
+        ],
+        "operations": {
+          "concurrency": "One job at a time per worker process; deployment configuration runs one editor replica.",
+          "retry": "Empty polls repeat. Claim exceptions are not caught by the polling loop.",
+          "controls": ["CAD_EDITOR_JOB_POLL_INTERVAL_SECONDS", "CAD_EDITOR_LEASE_SECONDS", "CAD_EDITOR_WORKER_ID"]
+        },
+        "evidence": [
+          { "path": "workers/cad_editor/edit_worker.py", "symbol": "claim_next_job / main", "kind": "source" },
+          { "path": "workers/cad_editor/docker-compose.yml", "kind": "configuration" }
+        ]
+      }
+    },
+    {
+      "id": "fresh-index",
+      "label": "2. Fresh Index Gate",
+      "description": "For every edit mode, requires a fresh project index before planning. The exact blank marker is excluded, so initial design can proceed with an empty or mixed-project index.",
+      "type": "function",
+      "variant": "gate",
+      "icon": "search",
+      "position": { "column": 2, "row": 1 },
+      "mobileOrder": 3,
+      "details": {
+        "responsibility": "Require a fresh project Getter before target resolution or initial-model generation.",
+        "ownedBy": "CAD Editor Worker",
+        "runsIn": "EditWorkflowOrchestrator._ensure_fresh_getter",
+        "steps": [
+          "Try to create a Getter for the project.",
+          "Return it immediately when freshness status is fresh.",
+          "Otherwise queue or reuse a build_index row and poll it to a terminal state.",
+          "Recreate the Getter and require fresh status after a completed build.",
+          "Treat the exact blank CAD marker as intentionally absent from source signatures."
+        ],
+        "shortCircuit": "A failed index job or a still-stale Getter raises INDEX_BUILD_FAILED or STALE_INDEX before planning.",
+        "operations": {
+          "timeout": "Child-job polling uses CAD_EDITOR_DEPENDENCY_TIMEOUT_SECONDS, 300 seconds by default.",
+          "retry": "The editor does not retry a failed child job; the queue RPC can reuse an active build.",
+          "controls": ["CAD_EDITOR_POLL_INTERVAL_SECONDS", "CAD_EDITOR_DEPENDENCY_TIMEOUT_SECONDS"]
+        },
+        "evidence": [
+          { "path": "workers/cad_editor/cad_editor/orchestrator.py", "symbol": "_ensure_fresh_getter / _wait_for_job", "kind": "source" },
+          { "path": "supabase/migrations/20260725000000_add_cad_edit_workflow.sql", "symbol": "queue_edit_index_build", "kind": "migration" }
+        ]
+      }
+    },
+    {
+      "id": "index-jobs",
+      "label": "Index Jobs",
+      "description": "Postgres index_jobs rows used for pre-edit freshness and mandatory post-commit reindexing.",
+      "type": "database",
+      "icon": "database",
+      "position": { "column": 2, "row": 0 },
+      "mobileOrder": 4,
+      "details": {
+        "responsibility": "Durably hand build_index work to the independent Indexer Worker and expose terminal status.",
+        "ownedBy": "Postgres index_jobs",
+        "durableWrites": ["queued build_index row", "queued/running/completed/failed lifecycle"],
+        "downstream": ["The independent Indexer Worker claims these rows; the CAD Editor only queues and polls them."],
+        "evidence": [
+          { "path": "supabase/migrations/20260725000000_add_cad_edit_workflow.sql", "symbol": "queue_edit_index_build", "kind": "migration" }
+        ]
+      }
+    },
+    {
+      "id": "resolve-context",
+      "label": "3. Resolve + Context",
+      "description": "Uses a linked requested_part_id as the authoritative established-part target, or resolves one part project-wide when no part is linked.",
+      "type": "function",
+      "variant": "operation",
+      "icon": "search",
+      "position": { "column": 3, "row": 1 },
+      "mobileOrder": 5,
+      "details": {
+        "responsibility": "Enforce one part, snapshot accepted source, and expose its server-owned replacement and extension targets.",
+        "ownedBy": "CAD Editor Worker",
+        "runsIn": "resolver.py, context_builder.py, and orchestrator.py",
+        "preconditions": ["The project Getter must remain fresh."],
+        "inputs": [
+          { "name": "request and messages", "description": "The edit request, optional requested_part_id, and at most eight normalized recent messages." },
+          { "name": "Getter metadata", "description": "Ranked features, source chunks, parameters, dependencies, and content hashes." }
+        ],
+        "outputs": [
+          { "name": "resolved target", "description": "The linked part with all existing features, or one project-resolved part with selected semantic IDs." },
+          { "name": "allowed targets", "description": "AST-derived parameter, decorator, feature-body, and build_model-body regions." }
+        ],
+        "decisionPoints": [
+          "A requested_part_id always wins and cannot be redirected to a different part.",
+          "For unlinked requests, a high-confidence match at least 0.80 and 0.10 above the runner-up resolves automatically.",
+          "No matches may use one structured search-query expansion.",
+          "Ambiguous ranked matches use structured target selection restricted to candidate IDs."
+        ],
+        "shortCircuit": "A missing requested part, invented IDs, cross-part selection, stale Getter data, or a source-hash race fails the workflow.",
+        "evidence": [
+          { "path": "workers/cad_editor/cad_editor/resolver.py", "symbol": "resolve_edit_target", "kind": "source" },
+          { "path": "workers/cad_editor/cad_editor/context_builder.py", "symbol": "build_edit_context / build_repair_context", "kind": "source" },
+          { "path": "workers/cad_editor/cad_editor/orchestrator.py", "symbol": "_prepare_accepted_source", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "planning",
+      "label": "4. Structured Planning",
+      "description": "Requests a strict EditPlan for an established part or a complete initial AI-owned model body for a linked blank part.",
+      "type": "function",
+      "variant": "operation",
+      "icon": "editor",
+      "position": { "column": 4, "row": 1 },
+      "mobileOrder": 6,
+      "details": {
+        "responsibility": "Turn bounded edit context into Pydantic operations, or a blank-part request into a complete Pydantic-validated initial model body.",
+        "ownedBy": "CAD Editor Worker",
+        "runsIn": "CadEditAgent using the OpenAI Responses API",
+        "inputs": [
+          { "name": "InitialCadDesignContext", "description": "Request, bounded conversation, and the linked blank part identity; no Getter data exists yet." },
+          { "name": "EditContext or RepairContext", "description": "Focused established-source metadata, targets, latest candidate chunks, and diagnostics." }
+        ],
+        "outputs": [
+          { "name": "InitialCadModel or EditPlan", "description": "A complete initial model body, or one to twelve scoped replacement/addition operations for an established part." }
+        ],
+        "guarantees": ["Strict Pydantic models reject extra fields and unsupported operation shapes."],
+        "operations": {
+          "retry": "OpenAI calls have no editor-level retry. Persisted candidates and plans prevent regeneration after later side effects.",
+          "controls": ["OPENAI_MODEL; defaults to gpt-5.4-mini."]
+        },
+        "evidence": [
+          { "path": "workers/cad_editor/cad_editor/agent.py", "symbol": "CadEditAgent / _parse", "kind": "source" },
+          { "path": "workers/cad_editor/cad_editor/contracts.py", "symbol": "InitialCadModel / EditPlan / EditOperation", "kind": "schema" }
+        ]
+      }
+    },
+    {
+      "id": "openai",
+      "label": "OpenAI Responses API",
+      "description": "External structured-output dependency used for query extraction, ambiguous target selection, initial planning, and repair planning.",
+      "type": "external",
+      "icon": "external",
+      "foundation": true,
+      "position": { "column": 4, "row": 0 },
+      "mobileOrder": 7,
+      "details": {
+        "responsibility": "Return parsed strict models for bounded decisions; it does not receive storage or database credentials.",
+        "ownedBy": "OpenAI",
+        "inputs": [
+          { "name": "structured request payload", "description": "A JSON payload selected for the specific query, selection, plan, or repair operation." }
+        ],
+        "outputs": [
+          { "name": "parsed Pydantic value", "description": "SearchQueryPlan, TargetSelection, InitialCadModel, or EditPlan." }
+        ],
+        "failureConditions": [
+          { "condition": "Refusal or missing parsed output", "outcome": "AI_REFUSAL or AI_RESPONSE_INVALID fails the edit workflow." }
+        ],
+        "evidence": [
+          { "path": "workers/cad_editor/cad_editor/agent.py", "symbol": "_parse", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "apply-candidate",
+      "label": "5. Deterministic Apply",
+      "description": "Composes an initial model behind the system-owned import, or applies validated replacements and safe additions within one established part.",
+      "type": "function",
+      "variant": "transform",
+      "icon": "ast",
+      "position": { "column": 5, "row": 1 },
+      "mobileOrder": 8,
+      "details": {
+        "responsibility": "Produce candidate model.py bytes through system-owned initial composition or a deterministic established-part EditPlan.",
+        "ownedBy": "CAD Editor Worker",
+        "runsIn": "applier.py",
+        "preconditions": ["The base source SHA-256 must equal the plan context hash."],
+        "steps": [
+          "For initial design, preserve the system-owned runtime import and write the complete AI-owned body as a candidate.",
+          "For established edits, resolve allowed AST-derived spans and reject unknown, duplicate, overlapping, cross-part, or incompatible targets.",
+          "Validate additive ModelParams fields, private helpers, server-decorated CAD features, and build_model-body changes.",
+          "Reject model-supplied imports/decorators, duplicate names or semantic IDs, and unknown feature parameters/dependencies.",
+          "Apply established replacements and insertions from the end of the file toward the start, then parse the complete candidate."
+        ],
+        "successCondition": "The candidate records its base hash, content hash, changed symbols, and persisted initial model or scoped operations; independent validation decides acceptance.",
+        "evidence": [
+          { "path": "workers/cad_editor/cad_editor/applier.py", "symbol": "validate_edit_plan / apply_edit_plan", "kind": "source" },
+          { "path": "workers/cad_editor/cad_editor/targets.py", "symbol": "collect_target_spans", "kind": "source" },
+          { "path": "tests/test_cad_editor_core.py", "symbol": "DeterministicEditTests", "kind": "test" }
+        ]
+      }
+    },
+    {
+      "id": "candidate-storage",
+      "label": "Edit Candidate Storage",
+      "description": "Job-scoped object-storage prefix holding the original accepted backup and each hash-verified candidate attempt.",
+      "type": "storage",
+      "icon": "object-storage",
+      "contents": ["original/model.py", "attempt-n/model.py"],
+      "foundation": true,
+      "position": { "column": 5, "row": 2 },
+      "mobileOrder": 9,
+      "details": {
+        "responsibility": "Durably separate unaccepted candidate source and rollback material from canonical source.",
+        "ownedBy": "3dProjects object storage",
+        "durableWrites": [
+          "<project>/candidates/cad/<part>/<edit-job>/original/model.py",
+          "<project>/candidates/cad/<part>/<edit-job>/attempt-<n>/model.py"
+        ],
+        "guarantees": ["Every write is downloaded and SHA-256 verified before the workflow advances."],
+        "failureConditions": [
+          { "condition": "Terminal cleanup fails", "outcome": "The workflow result keeps a warning; the terminal status is not hidden." }
+        ],
+        "evidence": [
+          { "path": "workers/cad_editor/cad_editor/repository.py", "symbol": "candidate_path / original_path / cleanup_candidates", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "validation-jobs",
+      "label": "Validation Jobs",
+      "description": "Postgres generation_jobs rows binding validate_cad work to an exact candidate path, hash, attempt, and edit job.",
+      "type": "database",
+      "icon": "database",
+      "foundation": true,
+      "position": { "column": 4, "row": 2 },
+      "mobileOrder": 10,
+      "details": {
+        "responsibility": "Durably hand candidate validation to the independent CAD Validator and expose its structured result.",
+        "ownedBy": "Postgres generation_jobs",
+        "durableWrites": ["validate_cad row with source_kind=candidate, source_storage_path, source_sha256, edit_job_id, and status"],
+        "downstream": ["The independent CAD Validator claims the row. The CAD Editor polls it and never calls the validator service directly."],
+        "evidence": [
+          { "path": "supabase/migrations/20260725000000_add_cad_edit_workflow.sql", "symbol": "queue_edit_candidate_validation", "kind": "migration" }
+        ]
+      }
+    },
+    {
+      "id": "proof-commit",
+      "label": "6. Proof + Commit",
+      "description": "Classifies validation results, plans bounded repairs when allowed, or commits only an exact passed proof.",
+      "type": "function",
+      "variant": "gate",
+      "icon": "process",
+      "position": { "column": 3, "row": 2 },
+      "mobileOrder": 11,
+      "details": {
+        "responsibility": "Control the repair loop and make canonical replacement conditional on exact validation and source proofs.",
+        "ownedBy": "CAD Editor Worker",
+        "runsIn": "EditWorkflowOrchestrator._validation_result / _commit",
+        "preconditions": [
+          "Validation job is completed validate_cad candidate work owned by this edit.",
+          "Candidate path and SHA-256 match the persisted current candidate.",
+          "Result status is passed and valid is true."
+        ],
+        "decisionPoints": [
+          "Repairable, candidate-scoped diagnostics may create the next attempt.",
+          "Non-repairable results, dependency failures, source races, and attempt three stop.",
+          "Canonical source must still equal the accepted hash or already equal this candidate hash."
+        ],
+        "shortCircuit": "A failed proof cannot write canonical source. A failed post-commit reindex triggers guarded rollback.",
+        "successCondition": "Candidate source is written and hash-verified, then a completed reindex produces a fresh Getter. Established edits must also contain every resolved semantic target; initial design has no pre-existing targets.",
+        "operations": {
+          "concurrency": "A database constraint prevents two active resolved edits from owning the same project part.",
+          "retry": "At most three validation attempts: one initial candidate and up to two repair candidates.",
+          "observability": ["Terminal result records the state, attempt count, targets, recovery result, details, and warnings."]
+        },
+        "evidence": [
+          { "path": "workers/cad_editor/cad_editor/orchestrator.py", "symbol": "_validation_result / _commit / _rollback / _handle_failure", "kind": "source" },
+          { "path": "workers/cad_editor/cad_editor/error_classifier.py", "symbol": "classify_validation_error", "kind": "source" },
+          { "path": "tests/test_cad_editor_orchestration.py", "symbol": "EditOrchestrationTests", "kind": "test" }
+        ]
+      }
+    },
+    {
+      "id": "canonical-storage",
+      "label": "Canonical CAD Source",
+      "description": "Accepted project CAD source that is replaced only after exact candidate validation and unchanged-source checks.",
+      "type": "storage",
+      "icon": "object-storage",
+      "contents": ["model.py", "params.json"],
+      "foundation": true,
+      "position": { "column": 2, "row": 2 },
+      "mobileOrder": 12,
+      "details": {
+        "responsibility": "Durably own accepted CAD model source and parameters.",
+        "ownedBy": "3dProjects object storage",
+        "durableReads": ["Accepted model.py used for source and race hashes."],
+        "durableWrites": ["Validated candidate model.py; original model.py during guarded rollback."],
+        "evidence": [
+          { "path": "workers/cad_editor/cad_editor/repository.py", "symbol": "canonical_source_path / write_text / verify_text_hash", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "export-jobs",
+      "label": "Export Jobs",
+      "description": "Postgres generation_jobs rows for best-effort hash-bound export_cad handoff after successful reindexing.",
+      "type": "database",
+      "icon": "database",
+      "href": "/services/cad-exporter/",
+      "position": { "column": 1, "row": 2 },
+      "mobileOrder": 13,
+      "details": {
+        "responsibility": "Durably hand artifact generation to the independent CAD Exporter.",
+        "ownedBy": "Postgres generation_jobs",
+        "durableWrites": ["queued export_cad row with the committed candidate hash and edit_job_id"],
+        "downstream": ["The CAD Exporter independently claims this row; the CAD Editor does not call the exporter directly."],
+        "failureConditions": [
+          { "condition": "Export queuing raises", "outcome": "The valid indexed edit still completes with a warning and no export_job_id." }
+        ],
+        "evidence": [
+          { "path": "supabase/migrations/20260725000000_add_cad_edit_workflow.sql", "symbol": "queue_edit_export", "kind": "migration" },
+          { "path": "workers/cad_editor/cad_editor/orchestrator.py", "symbol": "_commit", "kind": "source" }
+        ]
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "claim-edit-job",
+      "source": "claim",
+      "target": "edit-jobs",
+      "label": "claim and maintain edit lease",
+      "protocol": "database",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": { "label": "claim or heartbeat", "type": "claim_next_edit_job / heartbeat_edit_job RPC", "exampleBody": "{\"p_worker_id\":\"cad-editor-1\",\"p_lease_seconds\":300}" },
+      "response": { "label": "owned workflow or lease acknowledgement", "type": "edit_jobs row or boolean", "exampleBody": "{\"id\":\"edit-job-123\",\"status\":\"running\",\"worker_id\":\"cad-editor-1\"}" },
+      "details": {
+        "summary": "The worker initiates every lease operation; edit_jobs never calls the worker.",
+        "durability": "The claim atomically records running status, worker ownership, heartbeat, and lease expiry.",
+        "failureBehavior": "Losing a heartbeat raises EDIT_LEASE_LOST. An initial claim exception terminates the polling process.",
+        "evidence": [
+          { "path": "workers/cad_editor/edit_worker.py", "symbol": "claim_next_job", "kind": "source" },
+          { "path": "workers/cad_editor/cad_editor/repository.py", "symbol": "heartbeat", "kind": "source" }
+        ]
+      }
+    },
+    { "id": "claim-to-index", "source": "claim", "target": "fresh-index", "label": "fresh-index barrier for every workflow", "protocol": "internal", "direction": "one-way", "flow": "synchronous", "importance": "important" },
+    {
+      "id": "index-request",
+      "source": "fresh-index",
+      "target": "index-jobs",
+      "label": "ensure fresh project index",
+      "protocol": "database",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": { "label": "queue/reuse build and poll status", "type": "queue_edit_index_build RPC + index_jobs select", "exampleBody": "{\"p_edit_job_id\":\"edit-job-123\",\"p_state\":\"ensuring_index\"}" },
+      "response": { "label": "child ID and terminal index row", "type": "UUID + index_jobs row", "exampleBody": "{\"id\":\"index-job-456\",\"status\":\"completed\"}" },
+      "details": {
+        "summary": "The editor requests durable work and polls its row before both initial design and established editing; it does not call the Indexer Worker.",
+        "durability": "The RPC creates or reuses an active build and saves index_job_id on edit_jobs in the same transaction.",
+        "failureBehavior": "Failure, timeout, or a still-stale Getter stops pre-edit planning.",
+        "evidence": [
+          { "path": "supabase/migrations/20260725000000_add_cad_edit_workflow.sql", "symbol": "queue_edit_index_build", "kind": "migration" }
+        ]
+      }
+    },
+    { "id": "index-to-resolve", "source": "fresh-index", "target": "resolve-context", "label": "fresh Getter", "protocol": "internal", "direction": "one-way", "flow": "synchronous" },
+    { "id": "index-to-initial-plan", "source": "fresh-index", "target": "planning", "label": "linked blank part after fresh-index barrier", "protocol": "internal", "direction": "one-way", "flow": "synchronous", "importance": "important" },
+    {
+      "id": "resolution-ai",
+      "source": "resolve-context",
+      "target": "openai",
+      "label": "bounded resolution exchange",
+      "protocol": "http",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": { "label": "search request or ranked candidates", "type": "Responses API structured-output request", "exampleBody": "{\"request\":\"make mounting holes deeper\",\"candidates\":[{\"part_id\":\"part-42\",\"semantic_id\":\"mount_holes\"}]}" },
+      "response": { "label": "search phrases or selected target IDs", "type": "SearchQueryPlan or TargetSelection", "exampleBody": "{\"part_id\":\"part-42\",\"semantic_ids\":[\"mount_holes\"],\"reason\":\"best ranked match\"}" },
+      "details": {
+        "summary": "This call occurs only for missing direct matches or ambiguous ranked matches; high-confidence resolution skips it.",
+        "trustBoundary": "Only the request and bounded candidate metadata cross to the external API.",
+        "evidence": [
+          { "path": "workers/cad_editor/cad_editor/resolver.py", "symbol": "resolve_edit_target", "kind": "source" }
+        ]
+      }
+    },
+    { "id": "context-to-plan", "source": "resolve-context", "target": "planning", "label": "bounded edit or repair context", "protocol": "internal", "direction": "one-way", "flow": "synchronous" },
+    {
+      "id": "planning-ai",
+      "source": "planning",
+      "target": "openai",
+      "label": "initial-model or structured-plan exchange",
+      "protocol": "http",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": { "label": "blank-part request or focused edit context", "type": "Responses API structured-output request", "exampleBody": "{\"request\":\"Create a draining soap holder\",\"part_name\":\"Soap Holder\"}" },
+      "response": { "label": "validated InitialCadModel or EditPlan", "type": "Pydantic structured output", "exampleBody": "{\"summary\":\"Add drainage\",\"target_semantic_ids\":[\"tray\"],\"operations\":[{\"operation\":\"add_model_parameter\",\"name\":\"slot_width_mm\",\"field_source\":\"slot_width_mm: float = 3.0\"},{\"operation\":\"add_cad_feature\",\"semantic_id\":\"drain_slots\",\"function_name\":\"cut_drain_slots\",\"role\":\"drainage\",\"parameters\":[\"slot_width_mm\"],\"depends_on\":[\"tray\"],\"search_keys\":[\"drain slots\"],\"function_source\":\"def cut_drain_slots(params: ModelParams, base):\\n    ...\"},{\"operation\":\"replace_build_model_body\",\"target_id\":\"part-42:build_model_body:build_model\",\"replacement_source\":\"base = build_tray(params)\\nreturn cut_drain_slots(params, base)\"}]}" },
+      "details": {
+        "summary": "For an established part the model returns bounded replacement or additive operations only. For a linked blank part it returns the complete AI-owned body; the server retains the runtime import and all storage writes.",
+        "trustBoundary": "Focused source chunks and diagnostics cross to the external API; Supabase credentials and write authority do not.",
+        "failureBehavior": "Refusal, missing parsed output, or request failure stops the workflow.",
+        "evidence": [
+          { "path": "workers/cad_editor/cad_editor/agent.py", "symbol": "create_edit_plan / create_repair_plan", "kind": "source" }
+        ]
+      }
+    },
+    { "id": "plan-to-apply", "source": "planning", "target": "apply-candidate", "label": "InitialCadModel or strict EditPlan", "protocol": "internal", "direction": "one-way", "flow": "synchronous" },
+    {
+      "id": "write-candidate",
+      "source": "apply-candidate",
+      "target": "candidate-storage",
+      "label": "write and verify candidate model.py",
+      "protocol": "storage",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": { "label": "upsert candidate source", "type": "3dProjects storage upload", "exampleBody": "{\"path\":\"project/candidates/cad/part/edit/attempt-1/model.py\",\"sha256\":\"…\"}" },
+      "response": { "label": "downloaded verification bytes", "type": "3dProjects storage download", "exampleBody": "{\"sha256_matches\":true}" },
+      "details": {
+        "summary": "The orchestrator initiates both upload and verification download for initial-design and established-edit candidates.",
+        "durability": "Candidate source is separate from canonical source and its event is persisted before validation is queued.",
+        "failureBehavior": "A storage or hash-verification failure prevents validation handoff.",
+        "evidence": [
+          { "path": "workers/cad_editor/cad_editor/orchestrator.py", "symbol": "_create_or_resume_candidate", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "queue-validation",
+      "source": "apply-candidate",
+      "target": "validation-jobs",
+      "label": "queue hash-bound candidate validation",
+      "protocol": "database",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": { "label": "candidate path, hash, and attempt", "type": "queue_edit_candidate_validation RPC", "exampleBody": "{\"p_edit_job_id\":\"edit-job-123\",\"p_candidate_path\":\"project/candidates/cad/part/edit/attempt-1/model.py\",\"p_attempt_count\":1}" },
+      "response": { "label": "persisted validation child ID", "type": "generation_jobs UUID", "exampleBody": "\"validation-job-789\"" },
+      "details": {
+        "summary": "The RPC atomically creates or reuses validate_cad work and records the current candidate and validation_job_id on edit_jobs.",
+        "durability": "A generation_jobs row binds the exact candidate path, hash, attempt, and owning edit.",
+        "evidence": [
+          { "path": "supabase/migrations/20260725000000_add_cad_edit_workflow.sql", "symbol": "queue_edit_candidate_validation", "kind": "migration" }
+        ]
+      }
+    },
+    {
+      "id": "read-validation",
+      "source": "proof-commit",
+      "target": "validation-jobs",
+      "label": "poll validation proof",
+      "protocol": "database",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": { "label": "select validation status and result", "type": "generation_jobs select", "exampleBody": "{\"id\":\"validation-job-789\"}" },
+      "response": { "label": "passed proof or structured diagnostics", "type": "generation_jobs row with schema-v2 result", "exampleBody": "{\"status\":\"completed\",\"result\":{\"status\":\"passed\",\"valid\":true,\"diagnostics\":[]}}" },
+      "details": {
+        "summary": "The editor polls the database row and heartbeats its edit lease while waiting.",
+        "failureBehavior": "Timeout, failed infrastructure work, invalid proof, non-repairable diagnostics, or attempt exhaustion fails the edit.",
+        "evidence": [
+          { "path": "workers/cad_editor/cad_editor/orchestrator.py", "symbol": "_wait_for_job / _validation_result / _commit", "kind": "source" }
+        ]
+      }
+    },
+    { "id": "repair-loop", "source": "proof-commit", "target": "planning", "label": "repairable diagnostics and latest candidate", "protocol": "internal", "direction": "one-way", "flow": "synchronous" },
+    {
+      "id": "commit-source",
+      "source": "proof-commit",
+      "target": "canonical-storage",
+      "label": "replace and verify canonical model.py",
+      "protocol": "storage",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "importance": "important",
+      "request": { "label": "upsert validated candidate or guarded rollback", "type": "3dProjects storage upload", "exampleBody": "{\"path\":\"project/parts/cad/part/model.py\",\"sha256\":\"validated-candidate-hash\"}" },
+      "response": { "label": "downloaded canonical verification bytes", "type": "3dProjects storage download", "exampleBody": "{\"sha256_matches\":true}" },
+      "details": {
+        "summary": "Proof + Commit initiates every canonical read and write; storage never initiates work.",
+        "preconditions": ["Exact validation proof matches this edit, candidate path, and candidate hash.", "Canonical hash still matches accepted source or already equals this candidate."],
+        "durability": "Canonical model.py changes before mandatory post-commit reindexing.",
+        "failureBehavior": "Reindex failure restores the original only when canonical still equals the candidate; independent changes cause a recovery conflict instead of overwrite.",
+        "evidence": [
+          { "path": "workers/cad_editor/cad_editor/orchestrator.py", "symbol": "_commit / _rollback", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "post-commit-index",
+      "source": "proof-commit",
+      "target": "index-jobs",
+      "label": "queue and verify post-commit reindex",
+      "protocol": "database",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": { "label": "queue/reuse reindex and poll", "type": "queue_edit_index_build RPC + index_jobs select", "exampleBody": "{\"p_edit_job_id\":\"edit-job-123\",\"p_state\":\"reindexing\"}" },
+      "response": { "label": "terminal index row", "type": "index_jobs row", "exampleBody": "{\"id\":\"index-job-999\",\"status\":\"completed\"}" },
+      "details": {
+        "summary": "Completion requires both a completed child job and a fresh Getter. Established edits must retain their resolved semantic targets; initial design has none before its first index.",
+        "failureBehavior": "Failure or stale/missing target retrieval triggers guarded canonical rollback and fails the edit.",
+        "evidence": [
+          { "path": "workers/cad_editor/cad_editor/orchestrator.py", "symbol": "_commit", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "queue-export",
+      "source": "proof-commit",
+      "target": "export-jobs",
+      "label": "queue hash-bound CAD export",
+      "protocol": "database",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": { "label": "committed candidate hash", "type": "queue_edit_export RPC", "exampleBody": "{\"p_edit_job_id\":\"edit-job-123\",\"p_source_sha256\":\"validated-candidate-hash\"}" },
+      "response": { "label": "persisted export child ID", "type": "generation_jobs UUID", "exampleBody": "\"export-job-321\"" },
+      "details": {
+        "summary": "The editor queues durable work; it does not invoke the CAD Exporter service.",
+        "durability": "The RPC saves export_job_id on edit_jobs with the new generation_jobs row.",
+        "failureBehavior": "Queuing failure becomes a warning; the valid reindexed edit still completes.",
+        "evidence": [
+          { "path": "supabase/migrations/20260725000000_add_cad_edit_workflow.sql", "symbol": "queue_edit_export", "kind": "migration" },
+          { "path": "workers/cad_editor/cad_editor/orchestrator.py", "symbol": "_commit", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "finish-edit-job",
+      "source": "proof-commit",
+      "target": "edit-jobs",
+      "label": "write terminal workflow result",
+      "protocol": "database",
+      "direction": "one-way",
+      "flow": "synchronous",
+      "details": {
+        "summary": "The orchestrator writes completed or failed state after its success or recovery path resolves.",
+        "durability": "Completion clears lease expiry and records result; failure records code, bounded message, details, and recovery outcome.",
+        "evidence": [
+          { "path": "workers/cad_editor/cad_editor/repository.py", "symbol": "complete_edit_job / fail_edit_job", "kind": "source" }
+        ]
+      }
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "editor-worker",
+      "label": "CAD Editor Worker",
+      "kind": "worker",
+      "description": "One leased polling process owns initial source composition, established deterministic mutation, dependency polling, commit, rollback, and cleanup.",
+      "nodeIds": ["claim", "fresh-index", "resolve-context", "planning", "apply-candidate", "proof-commit"]
+    },
+    {
+      "id": "deterministic-mutation",
+      "label": "Server-owned mutation boundary",
+      "kind": "trust",
+      "description": "For established parts the external model selects strict operations. For blank parts it returns an AI-owned body; only server code owns the runtime import, candidate bytes, validation handoff, and canonical writes.",
+      "nodeIds": ["planning", "apply-candidate"],
+      "parentId": "editor-worker"
+    }
+  ]
+}

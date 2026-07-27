@@ -1,0 +1,157 @@
+{
+  "id": "indexer-worker",
+  "title": "Indexer Worker system design",
+  "summary": "How a durable index job triggers static source analysis, publishes a semantic index, and makes it available to Getter.",
+  "scope": "service",
+  "direction": "RIGHT",
+  "nodes": [
+    {
+      "id": "index-jobs",
+      "label": "Index Jobs",
+      "description": "Postgres index_jobs table and claim RPC that own queued, claimed, completed, and failed lifecycle state.",
+      "type": "database",
+      "icon": "database",
+      "position": { "column": 0, "row": 0 },
+      "mobileOrder": 1
+    },
+    {
+      "id": "indexer-worker",
+      "label": "Single Indexer Worker",
+      "description": "Stateless polling process that claims one job and runs the build_index or test_getter workflow.",
+      "type": "worker",
+      "icon": "worker",
+      "position": { "column": 1, "row": 0 },
+      "mobileOrder": 2
+    },
+    {
+      "id": "project-source-storage",
+      "label": "3dProjects model.py",
+      "description": "Canonical object-storage source files read and hashed twice to prevent stale publication.",
+      "type": "storage",
+      "icon": "source-code",
+      "contents": ["model.py"],
+      "foundation": true,
+      "position": { "column": 2, "row": 0 },
+      "mobileOrder": 4
+    },
+    {
+      "id": "static-ast-extraction",
+      "label": "Static Python AST",
+      "description": "Parses supported Python source structures into normalized facts without executing project code.",
+      "type": "function",
+      "icon": "ast",
+      "position": { "column": 3, "row": 0 },
+      "mobileOrder": 5
+    },
+    {
+      "id": "project-catalog",
+      "label": "Projects + CAD Parts",
+      "description": "Postgres projects and parts rows used to resolve project identity and enumerate CAD sources.",
+      "type": "database",
+      "icon": "database",
+      "foundation": true,
+      "position": { "column": 1, "row": 1 },
+      "mobileOrder": 3
+    },
+    {
+      "id": "index-storage",
+      "label": "3dProjects Index Storage",
+      "description": "Object-storage path retaining the last valid semantic_index.json until a replacement succeeds.",
+      "type": "storage",
+      "icon": "object-storage",
+      "contents": ["semantic_index.json"],
+      "foundation": true,
+      "position": { "column": 4, "row": 1 },
+      "mobileOrder": 6
+    },
+    {
+      "id": "index-getter",
+      "label": "Index Getter",
+      "description": "Loads the current semantic index and CAD sources to search and return precise source context.",
+      "type": "service",
+      "icon": "search",
+      "position": { "column": 5, "row": 1 },
+      "mobileOrder": 7
+    }
+  ],
+  "edges": [
+    {
+      "id": "jobs-worker",
+      "source": "indexer-worker",
+      "target": "index-jobs",
+      "label": "index-job lease claim",
+      "protocol": "database",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": { "label": "claim next index job", "type": "claim_next_index_job RPC", "exampleBody": "{\"worker_id\":\"indexer-1\",\"lease_seconds\":300}" },
+      "response": { "label": "leased index job", "type": "index_jobs row", "exampleBody": "{\"id\":\"index-job-123\",\"type\":\"build_index\",\"status\":\"running\"}" }
+    },
+    {
+      "id": "worker-job-outcome",
+      "source": "indexer-worker",
+      "target": "index-jobs",
+      "label": "completed / failed outcome",
+      "protocol": "database",
+      "direction": "one-way",
+      "flow": "synchronous"
+    },
+    {
+      "id": "worker-catalog",
+      "source": "indexer-worker",
+      "target": "project-catalog",
+      "label": "project + CAD part metadata",
+      "protocol": "database",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": { "label": "read project and CAD parts", "type": "PostgREST select", "exampleBody": "{\"project_id\":\"project-123\"}" },
+      "response": { "label": "project and part metadata", "type": "Postgres rows", "exampleBody": "{\"project_id\":\"project-123\",\"parts\":[{\"id\":\"part-42\"}]}" }
+    },
+    {
+      "id": "worker-source-storage",
+      "source": "indexer-worker",
+      "target": "project-source-storage",
+      "label": "read model.py + freshness recheck",
+      "protocol": "storage",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": { "label": "read source and recheck freshness", "type": "Storage download", "exampleBody": "{\"path\":\"project-123/parts/cad/part-42/model.py\"}" },
+      "response": { "label": "source bytes and SHA-256", "type": "model.py object", "exampleBody": "{\"sha256\":\"abc123\",\"encoding\":\"utf-8\"}" }
+    },
+    {
+      "id": "source-ast",
+      "source": "indexer-worker",
+      "target": "static-ast-extraction",
+      "label": "hash-matched source bytes",
+      "protocol": "internal",
+      "direction": "one-way",
+      "flow": "synchronous"
+    },
+    {
+      "id": "ast-index-storage",
+      "source": "static-ast-extraction",
+      "target": "index-storage",
+      "label": "upsert semantic_index.json",
+      "protocol": "storage",
+      "direction": "one-way",
+      "flow": "synchronous"
+    },
+    {
+      "id": "storage-getter",
+      "source": "index-getter",
+      "target": "index-storage",
+      "label": "read semantic index",
+      "protocol": "storage",
+      "direction": "one-way",
+      "flow": "synchronous"
+    },
+    {
+      "id": "source-getter",
+      "source": "index-getter",
+      "target": "project-source-storage",
+      "label": "read current source context",
+      "protocol": "storage",
+      "direction": "one-way",
+      "flow": "synchronous"
+    }
+  ]
+}

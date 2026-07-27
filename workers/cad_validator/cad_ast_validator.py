@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import ast
+import re
 from typing import Any
 
 
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
 REQUIRED_DECORATOR_FIELDS = (
     "semantic_id",
     "role",
@@ -58,6 +59,36 @@ FORBIDDEN_METHOD_NAMES = {
     "rename",
     "replace",
     "touch",
+}
+REFERENCE_ERROR_CODES = {
+    "duplicate_semantic_id",
+    "self_dependency",
+    "unknown_dependencies",
+    "unknown_parameters",
+}
+ERROR_CODE_MAP = {
+    "syntax_error": "PYTHON_SYNTAX_ERROR",
+    "model_params_count": "MISSING_MODEL_PARAMS",
+    "model_params_dataclass": "INVALID_MODEL_PARAMS",
+    "model_params_fields": "INVALID_MODEL_PARAMS",
+    "build_model_count": "MISSING_BUILD_MODEL",
+    "build_model_signature": "INVALID_BUILD_MODEL",
+    "cad_feature_missing": "MISSING_CAD_PART",
+    "cad_part_decorator_count": "MISSING_CAD_PART",
+    "decorator_fields": "INVALID_CAD_PART_FIELD",
+    "decorator_string_field": "INVALID_CAD_PART_FIELD",
+    "decorator_tuple_field": "INVALID_CAD_PART_FIELD",
+    "decorator_library": "INVALID_CAD_PART_FIELD",
+    "search_keys_empty": "INVALID_CAD_PART_FIELD",
+    "decorator_positional_argument": "NONLITERAL_DECORATOR_ARGUMENT",
+    "decorator_unpacking": "NONLITERAL_DECORATOR_ARGUMENT",
+    "decorator_nonliteral": "NONLITERAL_DECORATOR_ARGUMENT",
+    "unknown_parameters": "UNKNOWN_MODEL_PARAMETER",
+    "unknown_dependencies": "UNKNOWN_DEPENDENCY",
+    "duplicate_semantic_id": "DUPLICATE_SEMANTIC_ID",
+    "self_dependency": "INVALID_DEPENDENCY",
+    "forbidden_import": "IMPORT_ERROR",
+    "forbidden_call": "FORBIDDEN_CALL",
 }
 
 
@@ -484,10 +515,131 @@ def forbidden_calls_check(tree: ast.Module) -> dict:
     return check_result(errors)
 
 
-def validate_cad_source(source: str) -> dict:
+def parameter_references_check(
+    tree: ast.Module,
+    model_fields: set[str],
+) -> dict:
+    errors: list[dict] = []
+    seen: set[tuple[str, int, int]] = set()
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "params"
+            and node.attr not in model_fields
+        ):
+            continue
+        key = (node.attr, node.lineno, node.col_offset)
+        if key in seen:
+            continue
+        seen.add(key)
+        errors.append(
+            validation_error(
+                "unknown_parameters",
+                f'ModelParams has no field named "{node.attr}".',
+                node,
+            )
+        )
+    return check_result(errors)
+
+
+def semantic_id_for_function(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> str | None:
+    for decorator in cad_part_decorators(function):
+        for keyword in decorator.keywords:
+            if (
+                keyword.arg == "semantic_id"
+                and isinstance(keyword.value, ast.Constant)
+                and type(keyword.value.value) is str
+            ):
+                return keyword.value.value
+    return None
+
+
+def symbol_at_line(tree: ast.Module, line: int) -> tuple[str | None, str | None]:
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        start = min(
+            [node.lineno, *(decorator.lineno for decorator in node.decorator_list)]
+        )
+        end = node.end_lineno or node.lineno
+        if start <= line <= end:
+            return node.name, semantic_id_for_function(node)
+    return None, None
+
+
+def related_symbols(error: dict) -> list[str]:
+    message = str(error.get("message", ""))
+    quoted = re.findall(r'["\']([^"\']+)["\']', message)
+    symbols: list[str] = []
+    for value in quoted:
+        if value not in symbols:
+            symbols.append(value)
+    return symbols[:8]
+
+
+def normalized_diagnostics(
+    errors: list[dict],
+    *,
+    stage: str,
+    file_path: str,
+    tree: ast.Module | None,
+) -> list[dict]:
+    diagnostics: list[dict] = []
+    for error in errors:
+        line = error.get("line")
+        function_name = None
+        semantic_id = None
+        if tree is not None and isinstance(line, int) and line > 0:
+            function_name, semantic_id = symbol_at_line(tree, line)
+        diagnostic = {
+            "error_code": ERROR_CODE_MAP.get(
+                str(error.get("code")),
+                str(error.get("code", "VALIDATION_ERROR")).upper(),
+            ),
+            "message": str(error.get("message", "CAD validation failed.")),
+            "stage": stage,
+            "file_path": file_path,
+            "related_symbols": related_symbols(error),
+        }
+        if isinstance(line, int):
+            diagnostic["line"] = line
+        column = error.get("column")
+        if isinstance(column, int):
+            diagnostic["column"] = column
+        if function_name is not None:
+            diagnostic["function_name"] = function_name
+        if semantic_id is not None:
+            diagnostic["semantic_id"] = semantic_id
+        diagnostics.append(diagnostic)
+    return diagnostics
+
+
+def failed_report(
+    *,
+    stage: str,
+    checks: dict[str, dict],
+    diagnostics: list[dict],
+) -> dict:
+    return {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "status": "failed",
+        "stage": stage,
+        "repairable_hint": True,
+        "diagnostics": diagnostics,
+        "build_artifacts": None,
+        "valid": False,
+        "safe_to_execute": False,
+        "checks": checks,
+    }
+
+
+def validate_cad_source(source: str, file_path: str = "model.py") -> dict:
     checks: dict[str, dict] = {}
     try:
-        tree = ast.parse(source, filename="model.py")
+        tree = ast.parse(source, filename=file_path)
     except SyntaxError as exc:
         syntax_error = {
             "code": "syntax_error",
@@ -502,28 +654,123 @@ def validate_cad_source(source: str) -> dict:
             "cad_part_decorators",
             "decorator_fields",
             "decorator_literals",
+            "parameter_references",
             "forbidden_calls",
         ):
             checks[name] = skipped_check("Python source could not be parsed.")
-        return {
-            "schema_version": REPORT_SCHEMA_VERSION,
-            "valid": False,
-            "safe_to_execute": False,
-            "checks": checks,
-        }
+        return failed_report(
+            stage="syntax",
+            checks=checks,
+            diagnostics=normalized_diagnostics(
+                [syntax_error],
+                stage="syntax",
+                file_path=file_path,
+                tree=None,
+            ),
+        )
 
     checks["syntax"] = check_result([])
     checks["model_params"], model_fields = model_params_check(tree)
     checks["build_model"] = build_model_check(tree)
     checks["cad_part_decorators"], decorators = decorator_presence_check(tree)
+    contract_errors = [
+        *checks["model_params"]["errors"],
+        *checks["build_model"]["errors"],
+        *checks["cad_part_decorators"]["errors"],
+    ]
+    if contract_errors:
+        for name in (
+            "decorator_fields",
+            "decorator_literals",
+            "parameter_references",
+            "forbidden_calls",
+        ):
+            checks[name] = skipped_check(
+                "Runtime contract validation did not pass."
+            )
+        return failed_report(
+            stage="runtime_contract",
+            checks=checks,
+            diagnostics=normalized_diagnostics(
+                contract_errors,
+                stage="runtime_contract",
+                file_path=file_path,
+                tree=tree,
+            ),
+        )
+
     checks["decorator_fields"] = decorator_fields_check(decorators, model_fields)
     checks["decorator_literals"] = decorator_literal_check(decorators)
+    decorator_errors = [
+        error
+        for error in checks["decorator_fields"]["errors"]
+        if error.get("code") not in REFERENCE_ERROR_CODES
+    ]
+    decorator_errors.extend(checks["decorator_literals"]["errors"])
+    if decorator_errors:
+        checks["parameter_references"] = skipped_check(
+            "Decorator validation did not pass."
+        )
+        checks["forbidden_calls"] = skipped_check(
+            "Decorator validation did not pass."
+        )
+        return failed_report(
+            stage="decorator_validation",
+            checks=checks,
+            diagnostics=normalized_diagnostics(
+                decorator_errors,
+                stage="decorator_validation",
+                file_path=file_path,
+                tree=tree,
+            ),
+        )
+
+    checks["parameter_references"] = parameter_references_check(
+        tree,
+        model_fields,
+    )
+    reference_errors = [
+        error
+        for error in checks["decorator_fields"]["errors"]
+        if error.get("code") in REFERENCE_ERROR_CODES
+    ]
+    reference_errors.extend(checks["parameter_references"]["errors"])
+    if reference_errors:
+        checks["forbidden_calls"] = skipped_check(
+            "Reference validation did not pass."
+        )
+        return failed_report(
+            stage="reference_validation",
+            checks=checks,
+            diagnostics=normalized_diagnostics(
+                reference_errors,
+                stage="reference_validation",
+                file_path=file_path,
+                tree=tree,
+            ),
+        )
+
     checks["forbidden_calls"] = forbidden_calls_check(tree)
+    if checks["forbidden_calls"]["errors"]:
+        return failed_report(
+            stage="security",
+            checks=checks,
+            diagnostics=normalized_diagnostics(
+                checks["forbidden_calls"]["errors"],
+                stage="security",
+                file_path=file_path,
+                tree=tree,
+            ),
+        )
 
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
-        "valid": all(check["passed"] for check in checks.values()),
-        "safe_to_execute": checks["syntax"]["passed"]
-        and checks["forbidden_calls"]["passed"],
+        "status": "passed",
+        "stage": "static",
+        "repairable_hint": False,
+        "diagnostics": [],
+        "build_artifacts": None,
+        "valid": True,
+        "safe_to_execute": True,
         "checks": checks,
     }
