@@ -67,6 +67,30 @@ An established-part edit moves through these logical phases:
 9. **Reindex and export**: Reindex the project, verify target retrieval, then
    queue a hash-bound CAD export.
 
+## Request Lifecycle At A Glance
+
+The public request and the worker execution are intentionally separate:
+
+1. `cad-agent` validates the request and inserts one `edit_jobs` row. It does
+   not call OpenAI, edit source, or wait for the worker.
+2. `edit_worker.py` claims the row with `claim_next_edit_job`, renews the lease,
+   and dispatches by `workflow_mode`.
+3. `initial_design` waits for a fresh index, skips semantic target lookup for
+   the blank part, generates the complete AI-owned body, and enters the shared
+   candidate/validation/commit path.
+4. Established edits wait for a fresh index, resolve the linked or project-wide
+   target, build focused context, and apply a bounded `EditPlan`.
+5. Every candidate is persisted before validation is queued. A passed proof is
+   required before commit; repairable failures can produce at most two further
+   attempts.
+6. A successful commit must pass a post-commit reindex before export is queued.
+
+The API currently returns the durable job ID immediately. Clients use
+`get_edit_job` or `/edit-status <job_id>` to read state, attempts, diagnostics,
+changed symbols, and child job IDs. A WebSocket or Supabase Realtime progress
+channel is not currently implemented; adding one would be a delivery layer on
+top of `edit_jobs`, not a replacement for the persisted workflow.
+
 ## Initial CAD Design
 
 New CAD parts start with only the system-owned runtime import:

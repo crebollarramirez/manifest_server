@@ -110,6 +110,18 @@ const failures = [
 			<p>A new CAD part starts with only <code>from cadquery_runtime import cad_part, cq, dataclass</code>, and part creation immediately queues a project index build. The Indexer deliberately excludes this exact blank marker, so the automatic build can produce a valid empty index or index the project&rsquo;s established parts. The initial workflow waits for that fresh index, then skips feature resolution for the blank part. OpenAI returns a complete AI-owned body containing <code>ModelParams</code>, decorated features, and <code>build_model</code>; validation must pass before that body becomes accepted source.</p>
 			<p>For later linked requests, <code>edit_jobs.requested_part_id</code> makes the linked part authoritative. The plan may modify its existing allowed targets or safely add a parameter, private helper, semantic CAD feature, and corresponding <code>build_model</code> orchestration. Unlinked requests retain project-wide semantic resolution. Neither path allows an established whole-file replacement, new import, or cross-part change.</p>
 			<p>It does not accept client traffic, call the validator, indexer, or exporter services directly, or execute CAD source. Those handoffs are durable Postgres jobs. <code>edit_jobs</code> owns workflow state, while 3dProjects storage owns accepted source, temporary candidates, and the original-source backup.</p>
+
+			<h2>Request lifecycle</h2>
+			<ol>
+				<li><strong>Accept:</strong> <code>cad-agent</code> validates the project, optional linked part, and message history, then inserts one <code>edit_jobs</code> row. A blank linked CAD part is marked <code>initial_design</code>; all other CAD requests use the established-edit mode.</li>
+				<li><strong>Claim:</strong> the editor polling process claims one queued or lease-expired row through <code>claim_next_edit_job</code> and renews its lease while the workflow runs.</li>
+				<li><strong>Prepare:</strong> the editor waits for a fresh project index. Linked established requests stay bound to <code>requested_part_id</code>; unlinked requests resolve a part from Getter metadata.</li>
+				<li><strong>Plan and generate:</strong> the agent returns either a complete initial model body or a strict established-part <code>EditPlan</code>. The server applies only validated, AST-derived changes.</li>
+				<li><strong>Prove:</strong> the candidate is stored separately and handed to CAD Validator through a hash-bound generation job. Repairable failures can produce another candidate, up to three attempts total.</li>
+				<li><strong>Commit:</strong> only a matching passed proof and unchanged accepted-source hash permit canonical <code>model.py</code> replacement.</li>
+				<li><strong>Publish:</strong> the editor reindexes the project, verifies freshness, and queues hash-bound export. The API exposes the durable job through <code>get_edit_job</code> or the CLI&rsquo;s <code>/edit-status</code>.</li>
+			</ol>
+			<p><strong>Current client update model:</strong> CAD chat returns a job ID immediately. Clients currently poll job status; a WebSocket or Supabase Realtime progress stream is not part of the implemented CAD Editor contract yet.</p>
 		</article>
 
 		<BoundaryMatrix
