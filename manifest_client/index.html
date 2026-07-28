@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Trust boundary (CONTRACT.md, security concerns):
+      - script-src: no inline/eval; 'nonce-manifest-dev' covers Vite's injected
+        dev scripts only (see vite.config.ts html.cspNonce).
+      - connect-src: self (fixtures), local Supabase (API + signed storage
+        URLs, port 54321), hosted Supabase, and ws for dev HMR.
+      - style-src 'unsafe-inline': required for React style attributes; no
+        stylesheet injection surface beyond that.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'nonce-manifest-dev'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; worker-src 'self' blob:; connect-src 'self' ws://localhost:* ws://127.0.0.1:* http://localhost:54321 http://127.0.0.1:54321 https://*.supabase.co; object-src 'none'; base-uri 'self'; form-action 'self'"
+    />
+    <title>Manifest</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
