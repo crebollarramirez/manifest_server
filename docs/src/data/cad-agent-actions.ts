@@ -10,6 +10,7 @@ export interface CadAgentAction {
 const projectId = "11111111-1111-4111-8111-111111111111";
 const partId = "22222222-2222-4222-8222-222222222222";
 const jobId = "33333333-3333-4333-8333-333333333333";
+const clientRequestId = "55555555-5555-4555-8555-555555555555";
 
 export const cadAgentActions: CadAgentAction[] = [
   {
@@ -249,16 +250,18 @@ export const cadAgentActions: CadAgentAction[] = [
   {
     action: "get_edit_job",
     category: "Jobs and status",
-    description: "Reads bounded edit state, attempts, targets, child IDs, safe history fields, result, and errors.",
+    description: "Reads durable edit state and ordered public progress after an optional acknowledged sequence.",
     requestExample: JSON.stringify({
       action: "get_edit_job",
       job_id: jobId,
+      after_sequence: 3,
     }, null, 2),
     responseExample: JSON.stringify({
       message: `CAD edit job ${jobId} is running (validating_candidate).`,
       status: "running",
       job: {
         id: jobId,
+        client_request_id: clientRequestId,
         project_id: projectId,
         requested_part_id: partId,
         workflow_mode: "edit",
@@ -275,16 +278,27 @@ export const cadAgentActions: CadAgentAction[] = [
         result: null,
         error_code: null,
         error_message: null,
+        last_event_sequence: 4,
       },
+      events: [{
+        sequence: 4,
+        event_type: "validating",
+        state: "validating_candidate",
+        message: "Validating candidate attempt 1.",
+        metadata: { attempt: 1 },
+      }],
     }, null, 2),
+    notes: "The Nest GET endpoint exposes the same durable status/replay pattern at /v1/cad-edits/:jobId?after_sequence=3. WebSocket subscriptions use the last acknowledged sequence to recover missed events.",
   },
   {
     action: "chat",
     category: "Chat",
-    description: "Queues initial_design when the linked CAD part is blank. An established linked CAD request remains bound to that part; an unlinked CAD request uses project-wide resolution. Linked mesh chat synchronously generates replacement source and queues export_mesh.",
+    description: "Submits CAD work through the idempotent durable edit-job contract. A linked blank part uses initial_design; established linked work remains bound to that part; unlinked work requires an unambiguous project-wide target.",
     requestExample: JSON.stringify({
       action: "chat",
+      client_request_id: clientRequestId,
       project_id: projectId,
+      part_id: partId,
       messages: [
         { role: "user", content: "Make the mounting holes deeper" },
       ],
@@ -294,9 +308,10 @@ export const cadAgentActions: CadAgentAction[] = [
       status: "queued",
       job_type: "edit_cad",
       project_id: projectId,
-      part_id: null,
+      part_id: partId,
       job_id: jobId,
+      client_request_id: clientRequestId,
     }, null, 2),
-    notes: "For a linked blank CAD part, include part_id; the response uses job_type initial_cad_design. Established linked requests persist requested_part_id and cannot modify a different part. Mesh chat returns job_type export_mesh.",
+    notes: "Repeating the same client_request_id and request returns the existing job; reusing it for different content returns 409. The Nest API also accepts direct POST /v1/cad-edits and WebSocket submit messages. Linked mesh chat keeps its existing synchronous generation/export path.",
   },
 ];

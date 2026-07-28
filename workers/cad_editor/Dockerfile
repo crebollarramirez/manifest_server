@@ -11,6 +11,6 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY workers/indexer/indexer /app/workers/indexer/indexer
 COPY workers/cad_editor/cad_editor /app/workers/cad_editor/cad_editor
-COPY workers/cad_editor/edit_worker.py /app/workers/cad_editor/edit_worker.py
+COPY workers/cad_editor/tool_worker.py /app/workers/cad_editor/tool_worker.py
 
-CMD ["python", "workers/cad_editor/edit_worker.py"]
+CMD ["python", "workers/cad_editor/tool_worker.py"]

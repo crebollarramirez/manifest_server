@@ -55,10 +55,13 @@ each command does and how to check asynchronous job status.
 
 The backend implementation is organized as:
 
-- `supabase/functions/cad-agent/` — request validation, catalog operations,
-  durable job creation, status reads, and linked mesh generation.
-- `workers/cad_editor/` — linked CAD initial design and structured source
-  editing orchestration.
+- `supabase/functions/cad-agent/` — action-based request validation, catalog
+  operations, compatible durable submissions, status reads, and linked mesh
+  generation.
+- `services/cad_agent/` — NestJS CAD edit submission, OpenAI tool planning,
+  durable orchestration, WebSocket progress replay, and guarded commit.
+- `workers/cad_editor/` — bounded Python CAD context and transactional
+  AST/source tool execution against isolated candidates.
 - `workers/indexer/` — static CAD source indexing and Getter retrieval.
 - `workers/cad_validator/` — candidate source and geometry validation.
 - `workers/cad_exporter/` — hash-bound CAD and mesh artifact export.

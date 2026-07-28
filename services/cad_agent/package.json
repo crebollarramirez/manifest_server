@@ -1,0 +1,31 @@
+{
+  "name": "manifest-cad-agent",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node --env-file=.env dist/main.js",
+    "start:dev": "node --env-file=.env node_modules/tsx/dist/cli.mjs watch src/main.ts",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/platform-express": "^11.0.0",
+    "@nestjs/platform-ws": "^11.0.0",
+    "@nestjs/websockets": "^11.0.0",
+    "@supabase/supabase-js": "^2.0.0",
+    "openai": "^6.0.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.0",
+    "ws": "^8.18.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.8.0"
+  }
+}

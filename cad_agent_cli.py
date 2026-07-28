@@ -8,6 +8,7 @@ import os
 import shlex
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -21,6 +22,7 @@ SUPABASE_FUNCTION_NAME = "cad-agent"
 MAX_HISTORY_MESSAGES = 8
 INDEX_TEST_TIMEOUT_SECONDS = 60.0
 INDEX_TEST_POLL_INTERVAL_SECONDS = 0.5
+DEFAULT_CAD_AGENT_WS_URL = "ws://localhost:3010/v1/cad-edits/ws"
 
 
 class CommandError(ValueError):
@@ -447,8 +449,9 @@ def send_chat(supabase: Any, state: CliState, user_message: str) -> tuple[str, s
         "action": "chat",
         "project_id": state.project["id"],
         "messages": request_messages,
+        "client_request_id": str(uuid.uuid4()),
     }
-    if state.part and state.part.get("part_type") == "mesh":
+    if state.part:
         body["part_id"] = state.part["id"]
     payload = invoke_action(
         supabase,
@@ -462,6 +465,118 @@ def send_chat(supabase: Any, state: CliState, user_message: str) -> tuple[str, s
         {"role": "assistant", "content": message},
     ]
     return message, job_id
+
+
+def follow_edit_job(
+    job_id: str,
+    *,
+    websocket_url: str | None = None,
+) -> None:
+    """Follow durable CAD progress; disconnecting never cancels the edit job."""
+
+    try:
+        import websocket
+    except ImportError:
+        print(
+            "progress> websocket-client is not installed; use "
+            f"/edit-status {job_id} instead.",
+            file=sys.stderr,
+        )
+        return
+
+    resolved_websocket_url = websocket_url or os.environ.get(
+        "CAD_AGENT_WS_URL",
+        DEFAULT_CAD_AGENT_WS_URL,
+    )
+    connection = None
+    last_sequence = 0
+    try:
+        connection = websocket.create_connection(resolved_websocket_url, timeout=10)
+        connection.send(
+            json.dumps(
+                {
+                    "event": "cad.edit.subscribe",
+                    "data": {
+                        "job_id": job_id,
+                        "after_sequence": last_sequence,
+                    },
+                }
+            )
+        )
+        while True:
+            raw = connection.recv()
+            if not isinstance(raw, str):
+                continue
+            message = json.loads(raw)
+            event_name = message.get("event")
+            data = message.get("data")
+            if event_name == "cad.edit.error":
+                detail = data if isinstance(data, dict) else {}
+                print(
+                    f"progress error> {detail.get('code', 'ERROR')}: "
+                    f"{detail.get('message', 'Unknown WebSocket error')}",
+                    file=sys.stderr,
+                )
+                return
+            if event_name == "cad.edit.snapshot" and isinstance(data, dict):
+                events = data.get("events")
+                if isinstance(events, list):
+                    for progress in events:
+                        if not isinstance(progress, dict):
+                            continue
+                        sequence = progress.get("sequence")
+                        if isinstance(sequence, int):
+                            last_sequence = max(last_sequence, sequence)
+                        print(
+                            f"progress[{sequence}]> "
+                            f"{progress.get('message', progress.get('event_type'))}"
+                        )
+                job = data.get("job")
+                if isinstance(job, dict) and job.get("status") in {
+                    "completed",
+                    "failed",
+                    "cancelled",
+                }:
+                    return
+            elif event_name == "cad.edit.progress" and isinstance(data, dict):
+                sequence = data.get("sequence")
+                if isinstance(sequence, int):
+                    last_sequence = max(last_sequence, sequence)
+                print(
+                    f"progress[{sequence}]> "
+                    f"{data.get('message', data.get('event_type'))}"
+                )
+                connection.send(
+                    json.dumps(
+                        {
+                            "event": "cad.edit.ack",
+                            "data": {
+                                "job_id": job_id,
+                                "sequence": last_sequence,
+                            },
+                        }
+                    )
+                )
+                if data.get("event_type") in {
+                    "job.completed",
+                    "job.failed",
+                }:
+                    return
+    except KeyboardInterrupt:
+        print(
+            f"\nprogress> disconnected; job {job_id} continues. "
+            f"Use /edit-status {job_id}.",
+            file=sys.stderr,
+        )
+    except Exception as exc:
+        print(
+            f"progress> live updates unavailable ({exc}); "
+            f"use /edit-status {job_id}.",
+            file=sys.stderr,
+        )
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def main() -> int:
@@ -503,7 +618,10 @@ def main() -> int:
             else:
                 message, job_id = send_chat(supabase, state, value)
                 print(f"agent> {message}")
-                print(f"job> {job_id}\n")
+                print(f"job> {job_id}")
+                if not state.part or state.part.get("part_type") == "cad":
+                    follow_edit_job(job_id)
+                print()
         except Exception as exc:
             print(f"error: {exc}", file=sys.stderr)
 

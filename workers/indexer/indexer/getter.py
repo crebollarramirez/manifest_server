@@ -5,6 +5,7 @@ from difflib import SequenceMatcher
 from typing import Any, Callable
 
 from .models import SourceFile
+from .semantic_graph import graph_context
 
 
 MIN_SEARCH_SCORE = 0.45
@@ -336,6 +337,82 @@ class IndexGetter:
                     }
                 )
         return dependencies
+
+    def dependency_graph(self, part_id: str) -> dict[str, Any]:
+        part = self.parts.get(part_id)
+        if part is None:
+            raise KeyError(f"Unknown indexed CAD part {part_id}.")
+        return graph_context(list(part.get("cad_parts", [])))
+
+    def get_direct_dependents(self, part_id: str, semantic_id: str) -> list[dict]:
+        graph = self.dependency_graph(part_id)
+        nodes = {
+            str(node["semantic_id"]): node
+            for node in graph["nodes"]
+        }
+        node = nodes.get(semantic_id)
+        if node is None:
+            return []
+        return [
+            nodes[dependent]
+            for dependent in node["direct_dependents"]
+        ]
+
+    def get_transitive_dependents(
+        self,
+        part_id: str,
+        semantic_id: str,
+    ) -> list[dict]:
+        graph = self.dependency_graph(part_id)
+        nodes = {
+            str(node["semantic_id"]): node
+            for node in graph["nodes"]
+        }
+        node = nodes.get(semantic_id)
+        if node is None:
+            return []
+        return [
+            {
+                **nodes[dependent],
+                "path": node["dependent_paths"][dependent],
+            }
+            for dependent in node["transitive_dependents"]
+        ]
+
+    def get_parameter_consumers(
+        self,
+        part_id: str,
+        parameter_name: str,
+    ) -> list[dict]:
+        graph = self.dependency_graph(part_id)
+        nodes = {
+            str(node["semantic_id"]): node
+            for node in graph["nodes"]
+        }
+        return [
+            nodes[semantic_id]
+            for semantic_id in graph["parameter_consumers"].get(parameter_name, [])
+        ]
+
+    def get_dependency_path(
+        self,
+        part_id: str,
+        source_semantic_id: str,
+        dependent_semantic_id: str,
+    ) -> list[str] | None:
+        graph = self.dependency_graph(part_id)
+        node = next(
+            (
+                item
+                for item in graph["nodes"]
+                if item["semantic_id"] == source_semantic_id
+            ),
+            None,
+        )
+        if node is None:
+            return None
+        path = node["dependent_paths"].get(dependent_semantic_id)
+        return list(path) if path else None
 
     def search_parameters(
         self,

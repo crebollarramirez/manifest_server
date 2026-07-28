@@ -172,12 +172,8 @@ def collect_target_spans(
         )
 
     spans: dict[str, TargetSpan] = {}
-    parameter_names: set[str] = set()
     for semantic_id in sorted(requested_ids):
         function, decorator, values = feature_functions[semantic_id]
-        feature_parameters = values.get("parameters", [])
-        if isinstance(feature_parameters, list):
-            parameter_names.update(feature_parameters)
 
         metadata_id = f"{part_id}:cad_part_metadata:{semantic_id}"
         metadata_start = _line_start(offsets, decorator.lineno)
@@ -316,7 +312,7 @@ def collect_target_spans(
         for node in model_params.body
         if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
     }
-    for parameter_name in sorted(parameter_names):
+    for parameter_name in sorted(parameter_nodes):
         parameter_node = parameter_nodes.get(parameter_name)
         if parameter_node is None:
             raise WorkflowFailure(
@@ -345,3 +341,24 @@ def collect_target_spans(
             indent=parameter_node.col_offset,
         )
     return spans
+
+
+def resolve_feature_body_span(spans: dict[str, object], semantic_id: str) -> object:
+    """Resolve a public feature semantic ID to its current function body."""
+    matches = [
+        span
+        for span in spans.values()
+        if getattr(getattr(span, "target", span), "kind", None) == "function_body"
+        and getattr(getattr(span, "target", span), "semantic_id", None) == semantic_id
+    ]
+    if not matches:
+        raise WorkflowFailure(
+            "TARGET_NOT_FOUND",
+            f'CAD feature semantic ID "{semantic_id}" has no editable function body.',
+        )
+    if len(matches) != 1:
+        raise WorkflowFailure(
+            "INVALID_EDIT_PLAN",
+            f'CAD feature semantic ID "{semantic_id}" is ambiguous.',
+        )
+    return matches[0]

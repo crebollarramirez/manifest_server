@@ -4,6 +4,12 @@ import ast
 from typing import Any, NoReturn
 
 from .models import IndexingError, SourceFile
+from .semantic_graph import (
+    SemanticGraphError,
+    build_model_dependencies,
+    effective_parameter_references,
+    validate_dependency_graph,
+)
 
 
 REQUIRED_DECORATOR_FIELDS = (
@@ -242,6 +248,55 @@ def extract_part_index(source: SourceFile) -> dict[str, Any]:
         ],
         {parameter["name"] for parameter in parameters},
     )
+    parameter_references = effective_parameter_references(functions)
+    metadata_warnings: list[dict[str, Any]] = []
+    for feature in features:
+        function_name = str(feature["function_name"])
+        inferred = parameter_references.get(function_name, [])
+        declared = list(feature.get("parameters", []))
+        feature["parameter_references"] = inferred
+        missing = sorted(set(inferred) - set(declared))
+        stale = sorted(set(declared) - set(inferred))
+        if missing or stale:
+            metadata_warnings.append(
+                {
+                    "code": "parameter_metadata_mismatch",
+                    "semantic_id": feature["semantic_id"],
+                    "function_name": function_name,
+                    "missing_parameters": missing,
+                    "stale_parameters": stale,
+                    "message": (
+                        f"{function_name}.parameters does not match effective "
+                        "ModelParams usage."
+                    ),
+                }
+            )
+    try:
+        validate_dependency_graph(features)
+    except SemanticGraphError as exc:
+        _error(source, exc.message)
+    observed_dependencies, invoked = build_model_dependencies(build_models[0], features)
+    missing_invocations = sorted(
+        {str(feature["semantic_id"]) for feature in features} - set(invoked)
+    )
+    if missing_invocations:
+        _error(
+            source,
+            "build_model must invoke every cad_part feature: "
+            + ", ".join(missing_invocations),
+            build_models[0],
+        )
+    for feature in features:
+        semantic_id = str(feature["semantic_id"])
+        declared = set(feature.get("depends_on", []))
+        observed = set(observed_dependencies.get(semantic_id, []))
+        if declared != observed:
+            _error(
+                source,
+                f"{semantic_id}.depends_on must match direct build_model dataflow; "
+                f"declared={sorted(declared)}, observed={sorted(observed)}.",
+                build_models[0],
+            )
     return {
         "part_id": source.part_id,
         "part_name": source.part_name,
@@ -251,4 +306,5 @@ def extract_part_index(source: SourceFile) -> dict[str, Any]:
         "functions": [_function_record(function) for function in functions],
         "cad_parts": features,
         "build_model": _function_record(build_models[0]),
+        "metadata_warnings": metadata_warnings,
     }

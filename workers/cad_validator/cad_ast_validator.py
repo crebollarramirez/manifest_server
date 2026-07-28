@@ -61,7 +61,12 @@ FORBIDDEN_METHOD_NAMES = {
     "touch",
 }
 REFERENCE_ERROR_CODES = {
+    "build_model_dependency_mismatch",
+    "build_model_feature_missing",
+    "cyclic_dependency",
+    "duplicate_dependency",
     "duplicate_semantic_id",
+    "parameter_metadata_mismatch",
     "self_dependency",
     "unknown_dependencies",
     "unknown_parameters",
@@ -85,6 +90,11 @@ ERROR_CODE_MAP = {
     "decorator_nonliteral": "NONLITERAL_DECORATOR_ARGUMENT",
     "unknown_parameters": "UNKNOWN_MODEL_PARAMETER",
     "unknown_dependencies": "UNKNOWN_DEPENDENCY",
+    "duplicate_dependency": "INVALID_DEPENDENCY",
+    "cyclic_dependency": "INVALID_DEPENDENCY",
+    "build_model_dependency_mismatch": "INVALID_DEPENDENCY",
+    "build_model_feature_missing": "INVALID_DEPENDENCY",
+    "parameter_metadata_mismatch": "PARAMETER_METADATA_MISMATCH",
     "duplicate_semantic_id": "DUPLICATE_SEMANTIC_ID",
     "self_dependency": "INVALID_DEPENDENCY",
     "forbidden_import": "IMPORT_ERROR",
@@ -321,7 +331,114 @@ def decorator_literal_check(decorators: list[tuple[ast.AST, ast.Call]]) -> dict:
     return check_result(errors)
 
 
+def effective_parameter_references(
+    tree: ast.Module,
+) -> dict[str, set[str]]:
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    direct = {
+        name: {
+            node.attr
+            for node in ast.walk(function)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "params"
+        }
+        for name, function in functions.items()
+    }
+    calls = {
+        name: {
+            node.func.id
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in functions
+            and node.func.id.startswith("_")
+        }
+        for name, function in functions.items()
+    }
+    memo: dict[str, set[str]] = {}
+
+    def resolve(name: str, visiting: set[str]) -> set[str]:
+        if name in memo:
+            return memo[name]
+        if name in visiting:
+            return set(direct.get(name, set()))
+        values = set(direct.get(name, set()))
+        for helper in calls.get(name, set()):
+            values.update(resolve(helper, visiting | {name}))
+        memo[name] = values
+        return values
+
+    return {name: resolve(name, set()) for name in functions}
+
+
+def build_model_dependency_data(
+    tree: ast.Module,
+    parsed: list[tuple[ast.AST, dict[str, Any]]],
+) -> tuple[dict[str, set[str]], set[str]]:
+    build_model = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "build_model"
+        ),
+        None,
+    )
+    function_to_semantic = {
+        function.name: str(values["semantic_id"])
+        for function, values in parsed
+        if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    observed = {
+        semantic_id: set()
+        for semantic_id in function_to_semantic.values()
+    }
+    invoked: set[str] = set()
+    produced_by: dict[str, str] = {}
+    if build_model is None:
+        return observed, invoked
+
+    def process(call: ast.Call, assignment: str | None) -> None:
+        if not isinstance(call.func, ast.Name):
+            return
+        semantic_id = function_to_semantic.get(call.func.id)
+        if semantic_id is None:
+            return
+        invoked.add(semantic_id)
+        for argument in [*call.args, *(keyword.value for keyword in call.keywords)]:
+            if isinstance(argument, ast.Name) and argument.id in produced_by:
+                observed[semantic_id].add(produced_by[argument.id])
+        if assignment:
+            produced_by[assignment] = semantic_id
+
+    for statement in build_model.body:
+        if (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and isinstance(statement.value, ast.Call)
+        ):
+            process(statement.value, statement.targets[0].id)
+        elif (
+            isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and isinstance(statement.value, ast.Call)
+        ):
+            process(statement.value, statement.target.id)
+        elif isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+            process(statement.value, None)
+        elif isinstance(statement, ast.Return) and isinstance(statement.value, ast.Call):
+            process(statement.value, None)
+    return observed, invoked
+
+
 def decorator_fields_check(
+    tree: ast.Module,
     decorators: list[tuple[ast.AST, ast.Call]],
     model_fields: set[str],
 ) -> dict:
@@ -416,6 +533,14 @@ def decorator_fields_check(
 
         dependencies = values["depends_on"]
         if type(dependencies) is tuple:
+            if len(dependencies) != len(set(dependencies)):
+                errors.append(
+                    validation_error(
+                        "duplicate_dependency",
+                        f"{function.name}.depends_on must not contain duplicates.",
+                        function,
+                    )
+                )
             unknown_dependencies = sorted(set(dependencies) - feature_ids)
             if unknown_dependencies:
                 errors.append(
@@ -440,6 +565,80 @@ def decorator_fields_check(
                 validation_error(
                     "search_keys_empty",
                     f"{function.name}.search_keys must contain at least one string.",
+                    function,
+                )
+            )
+
+    dependency_graph = {
+        str(values["semantic_id"]): list(values["depends_on"])
+        for _function, values in parsed
+        if isinstance(values.get("semantic_id"), str)
+        and isinstance(values.get("depends_on"), tuple)
+    }
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(semantic_id: str, path: list[str]) -> None:
+        if semantic_id in visiting:
+            cycle_start = path.index(semantic_id)
+            cycle = path[cycle_start:] + [semantic_id]
+            errors.append(
+                validation_error(
+                    "cyclic_dependency",
+                    "CAD feature dependencies must be acyclic: "
+                    + " → ".join(cycle),
+                )
+            )
+            return
+        if semantic_id in visited:
+            return
+        visiting.add(semantic_id)
+        for dependency in dependency_graph.get(semantic_id, []):
+            if dependency in dependency_graph:
+                visit(dependency, [*path, semantic_id])
+        visiting.remove(semantic_id)
+        visited.add(semantic_id)
+
+    for semantic_id in dependency_graph:
+        visit(semantic_id, [])
+
+    references = effective_parameter_references(tree)
+    for function, values in parsed:
+        declared = set(values.get("parameters", ()))
+        inferred = references.get(function.name, set())
+        missing = sorted(inferred - declared)
+        stale = sorted(declared - inferred)
+        if missing or stale:
+            errors.append(
+                validation_error(
+                    "parameter_metadata_mismatch",
+                    f"{function.name}.parameters must match effective ModelParams usage; "
+                    f"missing={missing}, stale={stale}.",
+                    function,
+                )
+            )
+
+    observed_dependencies, invoked = build_model_dependency_data(tree, parsed)
+    all_feature_ids = set(dependency_graph)
+    missing_invocations = sorted(all_feature_ids - invoked)
+    if missing_invocations:
+        errors.append(
+            validation_error(
+                "build_model_feature_missing",
+                "build_model must invoke every cad_part feature: "
+                + ", ".join(missing_invocations),
+            )
+        )
+    for function, values in parsed:
+        semantic_id = str(values.get("semantic_id"))
+        declared = set(values.get("depends_on", ()))
+        observed = observed_dependencies.get(semantic_id, set())
+        if declared != observed:
+            errors.append(
+                validation_error(
+                    "build_model_dependency_mismatch",
+                    f"{semantic_id}.depends_on must match direct build_model dataflow; "
+                    f"declared={sorted(declared)}, observed={sorted(observed)}.",
                     function,
                 )
             )
@@ -699,7 +898,11 @@ def validate_cad_source(source: str, file_path: str = "model.py") -> dict:
             ),
         )
 
-    checks["decorator_fields"] = decorator_fields_check(decorators, model_fields)
+    checks["decorator_fields"] = decorator_fields_check(
+        tree,
+        decorators,
+        model_fields,
+    )
     checks["decorator_literals"] = decorator_literal_check(decorators)
     decorator_errors = [
         error
@@ -725,39 +928,41 @@ def validate_cad_source(source: str, file_path: str = "model.py") -> dict:
             ),
         )
 
-    checks["parameter_references"] = parameter_references_check(
-        tree,
-        model_fields,
-    )
-    reference_errors = [
-        error
-        for error in checks["decorator_fields"]["errors"]
-        if error.get("code") in REFERENCE_ERROR_CODES
-    ]
-    reference_errors.extend(checks["parameter_references"]["errors"])
-    if reference_errors:
-        checks["forbidden_calls"] = skipped_check(
-            "Reference validation did not pass."
-        )
-        return failed_report(
-            stage="reference_validation",
-            checks=checks,
-            diagnostics=normalized_diagnostics(
-                reference_errors,
-                stage="reference_validation",
-                file_path=file_path,
-                tree=tree,
-            ),
-        )
-
     checks["forbidden_calls"] = forbidden_calls_check(tree)
     if checks["forbidden_calls"]["errors"]:
+        checks["parameter_references"] = skipped_check(
+            "Security validation did not pass."
+        )
         return failed_report(
             stage="security",
             checks=checks,
             diagnostics=normalized_diagnostics(
                 checks["forbidden_calls"]["errors"],
                 stage="security",
+                file_path=file_path,
+                tree=tree,
+            ),
+        )
+
+    checks["parameter_references"] = parameter_references_check(
+        tree,
+        model_fields,
+    )
+    reference_errors = list(checks["parameter_references"]["errors"])
+    reference_errors.extend(
+        [
+        error
+        for error in checks["decorator_fields"]["errors"]
+        if error.get("code") in REFERENCE_ERROR_CODES
+        ]
+    )
+    if reference_errors:
+        return failed_report(
+            stage="reference_validation",
+            checks=checks,
+            diagnostics=normalized_diagnostics(
+                reference_errors,
+                stage="reference_validation",
                 file_path=file_path,
                 tree=tree,
             ),

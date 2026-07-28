@@ -170,6 +170,18 @@ source code. Do not copy raw request bodies onto a service overview.
 
 When documenting CAD Editor behavior, preserve these workflow distinctions:
 
+- Name the control plane `NestJS CAD Agent` and the mutation boundary `Python
+  CAD Tool Worker`. Nest owns HTTP/WebSocket submission, idempotency, OpenAI
+  reasoning, durable orchestration, proof verification, commit, and progress
+  replay. Python owns bounded context preparation and transactional
+  AST/source-tool execution only. Never collapse them into one worker box.
+- `edit_jobs` is the workflow source of truth, `edit_job_events` is the ordered
+  public replay log, and `cad_tool_jobs` is the durable Nest-to-Python handoff.
+  A WebSocket is only a delivery channel and must never be drawn or described
+  as the work queue.
+- OpenAI returns a strict versioned plan of registered tool operations. It does
+  not write source, execute Python or CadQuery, create validation proof, commit
+  canonical source, or complete the edit job.
 - CAD `create_part` writes the exact runtime-only blank marker and attempts to
   queue `build_index`; an index-queue failure does not delete the new part.
 - The Indexer excludes that exact blank marker, so a fresh index may validly
@@ -178,10 +190,28 @@ When documenting CAD Editor behavior, preserve these workflow distinctions:
   the request to a better-ranked feature in another part. Only unlinked requests
   use project-wide semantic resolution.
 - Initial design may replace the complete AI-owned body behind the system-owned
-  runtime import. Established parts never use whole-file replacement.
-- Established-part extension is represented as validated operations that add a
-  ModelParams field, private helper, server-decorated CAD feature, or replace
-  only the `build_model` body. Never describe this as unrestricted code writing.
+  runtime import. It uses the dedicated initialization prompt and exactly one
+  `write_initial_model` operation on every generation or repair attempt.
+  Established parts never receive the initialization prompt or whole-file
+  replacement.
+- Established-part editing is represented as a versioned tool plan. It may
+  combine validated add, modify, and eligible delete operations for
+  ModelParams fields, private helpers, server-decorated CAD features,
+  `build_model`, and existing PART regions. Never describe this as unrestricted
+  code writing.
+- Deletion requires an existing semantic PART region or an explicit CAD-AGENT
+  provenance marker. Required runtime imports, `ModelParams`, `build_model`,
+  unrelated human-owned source, and out-of-scope parts remain protected.
+- One tool plan is applied fully in memory and uploads one candidate only after
+  every operation and the final source contract pass. Never depict an
+  intermediate operation as a durable partial candidate.
+- Live-progress labels describe public milestones such as planning, tool
+  execution, validation, repair, commit, reindex, completion, and failure.
+  Never expose prompts, source bodies, secrets, or private model reasoning.
+- Validation repair uses the latest isolated candidate, its exact previous
+  ToolPlan, and structured diagnostics. These temporary repair inputs never
+  enter the accepted semantic index; only a validated committed model is
+  reindexed.
 
 The architecture diagram is the primary content on every `Service view` page.
 `ArchitecturePage` renders it immediately below the service header and lets it

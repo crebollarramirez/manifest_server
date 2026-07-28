@@ -14,7 +14,7 @@ const glance = [
 	{ label: 'Reads', value: 'model.py and params.json from 3dProjects storage' },
 	{ label: 'Produces', value: 'Schema-v2 validation report and durable job outcome' },
 	{ label: 'Executes source', value: 'Only after path, SHA-256, and static safety proof' },
-	{ label: 'Downstream', value: 'CAD Editor for candidate proof; CAD Exporter after accepted proof' },
+	{ label: 'Downstream', value: 'CAD Agent for candidate proof; CAD Exporter after accepted proof' },
 	{ label: 'Durable state', value: 'generation_jobs status, result, error text, and accepted export job' },
 ];
 
@@ -23,7 +23,7 @@ const modes = [
 		name: 'Candidate source',
 		source: 'Edit-scoped candidate model.py plus canonical part params.json.',
 		success: 'Completes the running candidate validation row with its schema-v2 report.',
-		downstream: 'CAD Editor can verify and consume the proof. No export row is inserted by this path.',
+		downstream: 'CAD Agent can verify and consume the proof. No export row is inserted by this path.',
 	},
 	{
 		name: 'Accepted source',
@@ -117,7 +117,8 @@ const failures = [
 		<article class="doc-prose">
 			<h2>Purpose and boundaries</h2>
 			<p>The CAD Validator consumes <code>validate_cad</code> jobs and returns a schema-v2 proof for accepted or edit-scoped candidate source. It owns the active execution and its temporary workspace, but it does not commit candidate source, plan repairs, promote canonical source, or generate final export files.</p>
-			<p>Postgres owns job lifecycle state, 3dProjects storage owns source objects and parameters, and the CAD Editor or CAD Exporter consumes the appropriate successful outcome.</p>
+			<p>Postgres owns job lifecycle state, 3dProjects storage owns source objects and parameters, and the CAD Agent or CAD Exporter consumes the appropriate successful outcome.</p>
+			<p>Static validation also proves semantic dependency integrity before execution: direct <code>depends_on</code> edges must be unique, acyclic, and consistent with <code>build_model</code> dataflow, while decorator <code>parameters</code> must match effective <code>params.*</code> usage through reachable private helpers. Metadata drift returns repairable diagnostics and never reaches canonical commit.</p>
 		</article>
 
 		<BoundaryMatrix

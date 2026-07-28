@@ -35,13 +35,15 @@ class WorkerComposeContractTests(unittest.TestCase):
         editor = (
             ROOT / "workers" / "cad_editor" / "docker-compose.yml"
         ).read_text(encoding="utf-8")
-        self.assertIn("name: manifest-cad-editor", editor)
-        self.assertEqual(editor.count("\n  cad-editor:\n"), 1)
+        self.assertIn("name: manifest-cad-agent", editor)
+        self.assertEqual(editor.count("\n  cad-agent:\n"), 1)
+        self.assertEqual(editor.count("\n  cad-tool-worker:\n"), 1)
+        self.assertIn("services/cad_agent/Dockerfile", editor)
         self.assertNotIn("cad-editor-repair:", editor)
         editor_dockerfile = (
             ROOT / "workers" / "cad_editor" / "Dockerfile"
         ).read_text(encoding="utf-8")
-        self.assertIn('CMD ["python", "workers/cad_editor/edit_worker.py"]', editor_dockerfile)
+        self.assertIn('CMD ["python", "workers/cad_editor/tool_worker.py"]', editor_dockerfile)
 
 
 if __name__ == "__main__":

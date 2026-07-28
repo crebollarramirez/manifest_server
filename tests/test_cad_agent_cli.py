@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import sys
 import types
 import unittest
@@ -350,7 +353,7 @@ class ChatTests(unittest.TestCase):
         self.assertNotIn("part_id", body)
         self.assertEqual(state.history[-1], {"role": "assistant", "content": "queued"})
 
-    def test_linked_cad_part_does_not_constrain_project_scoped_edit(self):
+    def test_linked_cad_part_is_sent_as_the_authoritative_edit_target(self):
         supabase = FakeSupabase([
             {"message": "queued", "job_id": "33333333-3333-4333-8333-333333333333"},
         ])
@@ -359,7 +362,8 @@ class ChatTests(unittest.TestCase):
         cad_agent_cli.send_chat(supabase, state, "make the right bracket wider")
 
         body = supabase.functions.calls[0][1]["body"]
-        self.assertNotIn("part_id", body)
+        self.assertEqual(body["part_id"], PART["id"])
+        self.assertIn("client_request_id", body)
 
     def test_mesh_chat_uses_the_same_part_scoped_action(self):
         supabase = FakeSupabase([
@@ -377,6 +381,75 @@ class ChatTests(unittest.TestCase):
         body = supabase.functions.calls[0][1]["body"]
         self.assertEqual(body["part_id"], MESH_PART["id"])
         self.assertEqual(state.history[-1]["role"], "assistant")
+
+
+class LiveProgressTests(unittest.TestCase):
+    def test_websocket_subscription_replays_and_acknowledges_ordered_progress(self):
+        class FakeConnection:
+            def __init__(self):
+                self.sent: list[dict] = []
+                self.closed = False
+                self.messages = [
+                    {
+                        "event": "cad.edit.snapshot",
+                        "data": {
+                            "job": {"status": "running"},
+                            "events": [
+                                {
+                                    "sequence": 1,
+                                    "event_type": "job.queued",
+                                    "message": "CAD edit request queued.",
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "event": "cad.edit.progress",
+                        "data": {
+                            "sequence": 2,
+                            "event_type": "job.completed",
+                            "message": "CAD edit completed.",
+                        },
+                    },
+                ]
+
+            def send(self, value: str) -> None:
+                self.sent.append(json.loads(value))
+
+            def recv(self) -> str:
+                return json.dumps(self.messages.pop(0))
+
+            def close(self) -> None:
+                self.closed = True
+
+        connection = FakeConnection()
+        websocket = types.ModuleType("websocket")
+        websocket.create_connection = lambda *_args, **_kwargs: connection
+        previous = sys.modules.get("websocket")
+        sys.modules["websocket"] = websocket
+        output = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(output):
+                cad_agent_cli.follow_edit_job(
+                    EDIT_JOB_ID,
+                    websocket_url="ws://cad-agent.test/v1/cad-edits/ws",
+                )
+        finally:
+            if previous is None:
+                sys.modules.pop("websocket", None)
+            else:
+                sys.modules["websocket"] = previous
+
+        self.assertEqual(connection.sent[0]["event"], "cad.edit.subscribe")
+        self.assertEqual(
+            connection.sent[0]["data"],
+            {"job_id": EDIT_JOB_ID, "after_sequence": 0},
+        )
+        self.assertEqual(connection.sent[1]["event"], "cad.edit.ack")
+        self.assertEqual(connection.sent[1]["data"]["sequence"], 2)
+        self.assertTrue(connection.closed)
+        self.assertIn("CAD edit request queued.", output.getvalue())
+        self.assertIn("CAD edit completed.", output.getvalue())
 
 
 if __name__ == "__main__":

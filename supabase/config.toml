@@ -6,6 +6,7 @@ project_id = "manifest_server"
 
 [functions.cad-agent]
 verify_jwt = false
+static_files = ["./functions/cad-agent/*.md"]
 
 [api]
 enabled = true

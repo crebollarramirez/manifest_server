@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Any
 
 from .contracts import (
-    CandidateSource,
     EditContext,
-    EditPlan,
-    RepairContext,
     ResolvedEditTarget,
     WorkflowFailure,
 )
-from .targets import collect_target_spans
+from .targets import collect_target_spans, resolve_feature_body_span, source_hash
 
 
 def _conversation(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -72,6 +69,11 @@ def build_edit_context(
                 "function_name": feature["function_name"],
             }
         )
+        body_span = resolve_feature_body_span(spans, semantic_id)
+        target_parts[-1]["function_body_target_id"] = body_span.target.target_id
+        target_parts[-1]["function_body_fingerprint"] = source_hash(
+            source.content[body_span.start : body_span.end]
+        )
         source_chunks.append(
             {
                 "semantic_id": semantic_id,
@@ -96,70 +98,6 @@ def build_edit_context(
         source_chunks=source_chunks,
         parameters=list(parameters.values()),
         dependencies=list(dependencies.values()),
-        allowed_targets=[
-            span.target for span in sorted(spans.values(), key=lambda item: item.start)
-        ],
-    )
-
-
-def build_repair_context(
-    getter,
-    *,
-    request: str,
-    messages: list[dict[str, Any]],
-    target: ResolvedEditTarget,
-    candidate: CandidateSource,
-    previous_plan: EditPlan,
-    validation_result: dict[str, Any],
-    related_function_names: Iterable[str],
-    related_parameter_queries: Iterable[str],
-) -> RepairContext:
-    extra_functions = list(dict.fromkeys(related_function_names))
-    spans = collect_target_spans(
-        candidate.content,
-        part_id=target.part_id,
-        semantic_ids=target.semantic_ids,
-        extra_function_names=extra_functions,
-    )
-    failed_chunks = [
-        {
-            "target_id": span.target.target_id,
-            "kind": span.target.kind,
-            "name": span.target.name,
-            "source": span.target.source,
-        }
-        for span in sorted(spans.values(), key=lambda item: item.start)
-        if span.target.kind == "function_body"
-    ]
-
-    accepted_contexts = [
-        getter.get_context(target.part_id, semantic_id)
-        for semantic_id in target.semantic_ids
-        if getter.get_part(target.part_id, semantic_id) is not None
-    ]
-    related_results: list[dict[str, Any]] = []
-    for function_name in extra_functions:
-        function = getter.get_function(target.part_id, function_name)
-        if function is not None:
-            related_results.append({"kind": "function", **function})
-    for query in dict.fromkeys(related_parameter_queries):
-        related_results.extend(
-            {"kind": "parameter", **result}
-            for result in getter.search_parameters(
-                query,
-                part_id=target.part_id,
-            )
-        )
-
-    return RepairContext(
-        original_request=request,
-        conversation=_conversation(messages),
-        previous_plan=previous_plan.model_dump(mode="json"),
-        failed_candidate_hash=candidate.content_hash,
-        failed_candidate_chunks=failed_chunks,
-        validation_result=validation_result,
-        accepted_source_context={"targets": accepted_contexts},
-        related_index_results=related_results,
         allowed_targets=[
             span.target for span in sorted(spans.values(), key=lambda item: item.start)
         ],

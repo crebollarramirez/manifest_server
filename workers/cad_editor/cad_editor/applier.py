@@ -30,6 +30,14 @@ def _tuple_source(values: list[str]) -> str:
 
 def _parameter_replacement(operation: ReplaceParameterField, span: TargetSpan) -> str:
     replacement = textwrap.dedent(operation.replacement_source).strip()
+    if any(
+        marker in replacement
+        for marker in ("CAD-AGENT-START", "CAD-AGENT-END", "PART-START", "PART-END")
+    ):
+        raise WorkflowFailure(
+            "INVALID_EDIT_PLAN",
+            "replace_parameter_field cannot supply server-owned provenance markers.",
+        )
     try:
         tree = ast.parse(replacement)
     except SyntaxError as exc:
@@ -54,41 +62,77 @@ def _parameter_replacement(operation: ReplaceParameterField, span: TargetSpan) -
     return textwrap.indent(replacement, " " * span.indent) + "\n"
 
 
-def _body_replacement(operation: ReplaceFunctionBody, span: TargetSpan) -> str:
-    replacement = textwrap.dedent(operation.replacement_source).strip("\n")
+def _normalize_body_source(source: str, *, label: str) -> tuple[str, bool]:
+    """Normalize only unambiguous one-level indentation mistakes."""
+    normalized = source.replace("\r\n", "\n").replace("\r", "\n").expandtabs(4)
+    normalized = textwrap.dedent(normalized).strip("\n")
+    if not normalized.strip():
+        raise WorkflowFailure(
+            "INVALID_EDIT_PLAN",
+            f"{label} cannot use an empty body.",
+        )
+
+    def parses(body: str) -> bool:
+        try:
+            ast.parse(f"def _candidate():\n{textwrap.indent(body, '    ')}\n")
+            return True
+        except SyntaxError:
+            return False
+
+    if parses(normalized):
+        return normalized, normalized != source.strip("\n")
+
+    lines = normalized.split("\n")
+    nonempty = [line for line in lines if line.strip()]
+    if nonempty and not nonempty[0].startswith((" ", "\t")):
+        later_indents = [len(line) - len(line.lstrip(" ")) for line in nonempty[1:]]
+        positive = [indent for indent in later_indents if indent > 0]
+        if positive and min(positive) == 4:
+            repaired = [lines[0]]
+            repaired.extend(
+                line[4:] if line.strip() and line.startswith("    ") else line
+                for line in lines[1:]
+            )
+            repaired_source = "\n".join(repaired)
+            if parses(repaired_source):
+                return repaired_source, True
+
+    raise WorkflowFailure(
+        "INVALID_EDIT_PLAN",
+        f"{label} is invalid Python or has ambiguous indentation.",
+    )
+
+
+def _body_replacement(
+    operation: ReplaceFunctionBody,
+    span: TargetSpan,
+    normalization_notes: list[str] | None = None,
+) -> str:
+    replacement, normalized = _normalize_body_source(
+        operation.replacement_source,
+        label="replace_function_body",
+    )
     if not replacement.strip():
         raise WorkflowFailure(
             "INVALID_EDIT_PLAN",
             "replace_function_body cannot use an empty body.",
         )
-    indented = textwrap.indent(replacement, "    ")
-    try:
-        ast.parse(f"def _candidate():\n{indented}\n")
-    except SyntaxError as exc:
-        raise WorkflowFailure(
-            "INVALID_EDIT_PLAN",
-            f"Function body replacement is invalid Python: {exc.msg}",
-        ) from exc
+    if normalized and normalization_notes is not None:
+        normalization_notes.append("replace_function_body indentation normalized")
     return textwrap.indent(replacement, " " * span.indent) + "\n"
 
 
 def _build_model_replacement(
     operation: ReplaceBuildModelBody,
     span: TargetSpan,
+    normalization_notes: list[str] | None = None,
 ) -> str:
-    replacement = textwrap.dedent(operation.replacement_source).strip("\n")
-    if not replacement.strip():
-        raise WorkflowFailure(
-            "INVALID_EDIT_PLAN",
-            "replace_build_model_body cannot use an empty body.",
-        )
-    try:
-        ast.parse(f"def build_model(params):\n{textwrap.indent(replacement, '    ')}\n")
-    except SyntaxError as exc:
-        raise WorkflowFailure(
-            "INVALID_EDIT_PLAN",
-            f"build_model body replacement is invalid Python: {exc.msg}",
-        ) from exc
+    replacement, normalized = _normalize_body_source(
+        operation.replacement_source,
+        label="replace_build_model_body",
+    )
+    if normalized and normalization_notes is not None:
+        normalization_notes.append("replace_build_model_body indentation normalized")
     return textwrap.indent(replacement, " " * span.indent) + "\n"
 
 
@@ -127,7 +171,11 @@ def _metadata_replacement(
     )
 
 
-def _operation_replacement(operation, span: TargetSpan) -> str:
+def _operation_replacement(
+    operation,
+    span: TargetSpan,
+    normalization_notes: list[str] | None = None,
+) -> str:
     if isinstance(operation, ReplaceParameterField):
         if span.target.kind != "model_parameter":
             raise WorkflowFailure(
@@ -148,14 +196,14 @@ def _operation_replacement(operation, span: TargetSpan) -> str:
                 "INVALID_EDIT_PLAN",
                 "replace_function_body must target a function body.",
             )
-        return _body_replacement(operation, span)
+        return _body_replacement(operation, span, normalization_notes)
     if isinstance(operation, ReplaceBuildModelBody):
         if span.target.kind != "build_model_body":
             raise WorkflowFailure(
                 "INVALID_EDIT_PLAN",
                 "replace_build_model_body must target build_model.",
             )
-        return _build_model_replacement(operation, span)
+        return _build_model_replacement(operation, span, normalization_notes)
     raise WorkflowFailure("INVALID_EDIT_PLAN", "Unsupported edit operation.")
 
 
@@ -212,7 +260,11 @@ def _added_parameter(operation: AddModelParameter) -> str:
             "INVALID_EDIT_PLAN",
             "add_model_parameter must contain one matching annotated assignment with a default.",
         )
-    return textwrap.indent(normalized, "    ") + "\n"
+    return (
+        f"    # CAD-AGENT-START: model_parameter:{operation.name}\n"
+        f"{textwrap.indent(normalized, '    ')}\n"
+        f"    # CAD-AGENT-END: model_parameter:{operation.name}\n"
+    )
 
 
 def _added_helper(operation: AddPrivateHelper) -> str:
@@ -229,7 +281,11 @@ def _added_helper(operation: AddPrivateHelper) -> str:
             "INVALID_EDIT_PLAN",
             "Added helper name must match function_source and begin with one underscore.",
         )
-    return normalized + "\n\n"
+    return (
+        f"# CAD-AGENT-START: private_helper:{operation.function_name}\n"
+        f"{normalized}\n"
+        f"# CAD-AGENT-END: private_helper:{operation.function_name}\n\n"
+    )
 
 
 def _added_feature(operation: AddCadFeature) -> str:
@@ -428,6 +484,7 @@ def apply_edit_plan(
 
     changes: list[tuple[int, int, str, str]] = []
     changed_symbols: list[str] = []
+    normalization_notes: list[str] = []
     (
         parameter_insert,
         definition_insert,
@@ -523,7 +580,7 @@ def apply_edit_plan(
             (
                 span.start,
                 span.end,
-                _operation_replacement(operation, span),
+                _operation_replacement(operation, span, normalization_notes),
                 span.target.name,
             )
         )
@@ -569,4 +626,5 @@ def apply_edit_plan(
         applied_operations=[
             operation.model_dump(mode="json") for operation in plan.operations
         ],
+        normalization_notes=normalization_notes,
     )

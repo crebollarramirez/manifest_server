@@ -3,3 +3,5 @@ __pycache__/
 supabase/.temp
 supabase/.branches
 deno.lock
+services/*/dist/
+services/*/node_modules/

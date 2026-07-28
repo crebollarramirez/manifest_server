@@ -10,7 +10,6 @@ from .contracts import (
     EditContext,
     EditPlan,
     ReplaceBuildModelBody,
-    RepairContext,
     ResolvedEditTarget,
     WorkflowFailure,
 )
@@ -23,7 +22,6 @@ __all__ = [
     "CandidateSource",
     "EditContext",
     "EditPlan",
-    "RepairContext",
     "ReplaceBuildModelBody",
     "ResolvedEditTarget",
     "WorkflowFailure",

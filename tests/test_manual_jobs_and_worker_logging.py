@@ -81,10 +81,14 @@ class ManualJobEdgeContractTests(unittest.TestCase):
 
     def test_project_scoped_cad_chat_queues_an_edit_job_and_exposes_status(self):
         self.assertIn('| "get_edit_job"', EDGE_SOURCE)
-        self.assertIn('.from("edit_jobs")\n    .insert({', EDGE_SOURCE)
+        self.assertIn('supabase.rpc("submit_cad_edit_job"', EDGE_SOURCE)
+        self.assertIn("p_client_request_id: clientRequestId", EDGE_SOURCE)
+        self.assertIn("p_request_fingerprint: requestFingerprint", EDGE_SOURCE)
         self.assertIn("const partId = optionalUuid(body, \"part_id\")", EDGE_SOURCE)
         self.assertIn("const job = await queueEditJob", EDGE_SOURCE)
         self.assertIn("get_edit_job: () => handleGetEditJob", EDGE_SOURCE)
+        self.assertIn('.from("edit_job_events")', EDGE_SOURCE)
+        self.assertIn(".gt(\"sequence\", rawAfterSequence)", EDGE_SOURCE)
         self.assertIn("validation_result", EDGE_SOURCE)
         self.assertIn("changed_symbols", EDGE_SOURCE)
 
@@ -99,12 +103,12 @@ class ManualJobEdgeContractTests(unittest.TestCase):
         self.assertIn('index_status: indexJob?.status ?? "not_queued"', EDGE_SOURCE)
         self.assertIn("Automatic indexing could not be queued", EDGE_SOURCE)
         self.assertIn("function isBlankCadSource", EDGE_SOURCE)
-        self.assertIn("workflow_mode: workflowMode", EDGE_SOURCE)
-        self.assertIn("requested_part_id: requestedPart?.id ?? null", EDGE_SOURCE)
+        self.assertIn("p_workflow_mode: workflowMode", EDGE_SOURCE)
+        self.assertIn("p_requested_part_id: requestedPart?.id ?? null", EDGE_SOURCE)
         self.assertIn('job_type: "initial_cad_design"', EDGE_SOURCE)
 
     def test_linked_cad_target_is_persisted_and_constrained_to_its_project(self):
-        self.assertIn("requested_part_id: requestedPart?.id ?? null", EDGE_SOURCE)
+        self.assertIn("p_requested_part_id: requestedPart?.id ?? null", EDGE_SOURCE)
         self.assertIn("add column requested_part_id uuid", REQUESTED_PART_MIGRATION)
         self.assertIn(
             "foreign key (project_id, requested_part_id)",

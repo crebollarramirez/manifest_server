@@ -1,0 +1,32 @@
+---
+import ArchitecturePage from '../../components/ArchitecturePage.astro';
+import BoundaryMatrix from '../../components/service-docs/BoundaryMatrix.astro';
+import KeyGuarantees from '../../components/service-docs/KeyGuarantees.astro';
+import OperationsAndSource from '../../components/service-docs/OperationsAndSource.astro';
+import ServiceAtGlance from '../../components/service-docs/ServiceAtGlance.astro';
+import cadAgent from '../../data/architecture/cad-editor.json';
+import '../../styles/service-docs.css';
+
+const guarantees = [
+	{ title: 'Durable orchestration outlives clients', description: 'edit_jobs is the workflow source of truth and edit_job_events is the ordered replay log. A WebSocket only delivers persisted state.', evidence: 'services/cad_agent/src/orchestrator.service.ts and services/cad_agent/src/cad-edits.gateway.ts' },
+	{ title: 'Reasoning cannot mutate source', description: 'OpenAI returns a strict versioned ToolPlan; the separate Python worker validates and executes registered operations, while Nest alone decides commit.', evidence: 'services/cad_agent/src/reasoner.service.ts and workers/cad_editor/cad_editor/tool_executor.py' },
+	{ title: 'Commit is proof and hash guarded', description: 'Nest accepts only a validation proof for the exact candidate and only while canonical source still matches the accepted base hash.', evidence: 'services/cad_agent/src/orchestrator.service.ts — OrchestratorService.commit' },
+	{ title: 'Submission is idempotent', description: 'The same client_request_id and request fingerprint reuses one workflow; a conflicting reuse is rejected.', evidence: 'services/cad_agent/src/submission.service.ts' },
+];
+---
+
+<ArchitecturePage title="CAD Agent" summary="The standalone NestJS control plane accepts idempotent CAD-edit requests, orchestrates durable work and OpenAI planning, replays public progress, and commits only independently validated candidates." section="Service view" active="cad-agent" document={cadAgent} fallback="Loading the CAD Agent diagram…" showExampleNotice={false} sidebarNote="Production CAD Agent service: durable orchestration, structured planning, progress replay, proof-gated commit, reindex, and export handoff.">
+	<div slot="beforeDiagram">
+		<ServiceAtGlance items={[{ label: 'Public boundary', value: 'NestJS HTTP status/submission API and native WebSocket progress channel' }, { label: 'Durable truth', value: 'edit_jobs and ordered edit_job_events' }, { label: 'Reasoning', value: 'OpenAI Responses API returns a strict ToolPlan only' }, { label: 'Mutation boundary', value: 'Separate Python CAD Tool Worker' }, { label: 'Commit', value: 'Validation proof plus canonical source hash guard' }, { label: 'Downstream', value: 'Required reindex and best-effort export handoff' }]} />
+		<article class="doc-prose">
+			<h2>Purpose and boundary</h2>
+			<p><code>services/cad_agent/</code> is its own NestJS service. It owns HTTP/WebSocket submission, idempotency, OpenAI planning, edit-job leasing, progress replay, validation coordination, guarded commit, rollback, reindex, and export handoff. The CAD Tool Worker is a separate microservice reached only through <code>cad_tool_jobs</code>.</p>
+			<p>The workflow starts with a durable job reference. Nest ensures a fresh semantic index, queues bounded context preparation, asks OpenAI for a plan, queues transactional execution, requests independent validation, and commits only after proof and source-hash checks. Repair uses the latest isolated candidate, previous plan, and structured diagnostics; temporary repair inputs never become accepted index data.</p>
+			<h2>Public progress contract</h2>
+			<p>Clients may read durable status over HTTP or subscribe to <code>/v1/cad-edits/ws</code>. Each public event is persisted with an increasing sequence before delivery. Reconnecting with <code>after_sequence</code> receives a snapshot and missed events, without exposing prompts, source bodies, credentials, or private reasoning.</p>
+		</article>
+		<BoundaryMatrix owns={['Idempotent submission, edit-job lease/state machine, public progress, OpenAI structured planning, proof verification, commit, rollback, and downstream handoffs.', 'The durable control-plane boundary between edit_jobs and cad_tool_jobs.', 'HTTP status and WebSocket snapshot-plus-replay delivery.']} doesNotOwn={['Python AST/source execution or isolated candidate construction.', 'Independent CAD validity execution, semantic-index construction, or export rendering.', 'Unrestricted code writing or model access to database/storage credentials.']} dependsOn={['Postgres edit_jobs, edit_job_events, cad_tool_jobs, index_jobs, and generation_jobs.', '3dProjects canonical/candidate storage.', 'OpenAI Responses API, CAD Tool Worker, Indexer, CAD Validator, and CAD Exporter.']} />
+	</div>
+	<KeyGuarantees items={guarantees} />
+	<OperationsAndSource facts={[{ label: 'HTTP', value: 'POST /v1/cad-edits submits; GET /v1/cad-edits/:jobId reads durable status and event replay.' }, { label: 'WebSocket', value: '/v1/cad-edits/ws supports submit, subscribe, unsubscribe, and acknowledgement.' }, { label: 'Polling', value: 'CAD_AGENT_POLL_INTERVAL_MS defaults to 2000; dependency polling defaults to 500 ms.' }, { label: 'Leases', value: 'CAD_AGENT_LEASE_SECONDS and dependency timeout default to 300 seconds.' }, { label: 'Repair limit', value: 'Three validation attempts total, including the first candidate.' }]} sources={[{ path: 'services/cad_agent/src/submission.service.ts', symbol: 'SubmissionService', description: 'Idempotent public submission.' }, { path: 'services/cad_agent/src/cad-edits.gateway.ts', symbol: 'CadEditsGateway', description: 'WebSocket replay and live delivery.' }, { path: 'services/cad_agent/src/orchestrator.service.ts', symbol: 'OrchestratorService', description: 'Leased workflow, repair, commit, rollback, reindex, and export.' }, { path: 'services/cad_agent/src/reasoner.service.ts', symbol: 'ReasonerService', description: 'Structured ToolPlan generation without mutation authority.' }]} />
+</ArchitecturePage>

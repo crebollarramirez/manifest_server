@@ -34,9 +34,13 @@ background development server.
 
 ## What the site provides
 
-The current site includes a combined Backend System Design overview, an
-infrastructure foundation view, and focused service pages for Indexer Worker,
-CAD Editor, CAD Validator, and CAD Exporter.
+The current site includes a combined Backend System Design overview and focused
+service pages for Indexer Worker, the NestJS CAD Agent, the separate Python CAD
+Tool Worker, CAD Validator, and CAD Exporter. The CAD Agent page documents
+idempotent submission, durable WebSocket progress replay, strict OpenAI tool
+plans, proof-gated commit, reindex, and export. The CAD Tool Worker page
+documents its independent bounded-context and transactional AST/source
+execution boundary.
 
 Each page can provide:
 

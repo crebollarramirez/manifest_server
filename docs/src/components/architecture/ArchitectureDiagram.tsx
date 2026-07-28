@@ -515,6 +515,16 @@ function InteractiveArchitectureDiagram({
 				className="architecture-interactive"
 				aria-label={`${document.title} interactive architecture diagram`}
 				aria-describedby={`architecture-instructions-${document.id}`}
+				onKeyDown={(event) => {
+					if (event.key !== 'Enter' && event.key !== ' ') return;
+					if (!(event.target instanceof Element)) return;
+					const edge = event.target.closest<SVGGElement>('.react-flow__edge[data-id]');
+					const edgeId = edge?.dataset.id;
+					if (!edgeId) return;
+					event.preventDefault();
+					event.stopPropagation();
+					onSelectEdge(edgeId);
+				}}
 			>
 					<ReactFlow<ArchitectureFlowNode, ArchitectureFlowEdge>
 						nodes={allDisplayNodes}

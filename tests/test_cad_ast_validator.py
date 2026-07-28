@@ -4,6 +4,7 @@ import textwrap
 import unittest
 
 from workers.cad_validator.cad_ast_validator import validate_cad_source
+from tests.test_indexer_smoke import DEPENDENT_SOURCE
 
 
 def model_source(decorator_fields: str) -> str:
@@ -88,6 +89,36 @@ class CadPartDecoratorTests(unittest.TestCase):
         errors = report["checks"]["decorator_fields"]["errors"]
         self.assertEqual(errors[0]["code"], "unknown_dependencies")
         self.assertIn("semantic_ids", errors[0]["message"])
+
+    def test_rejects_parameter_metadata_drift_with_repairable_diagnostic(self):
+        report = validate_cad_source(DEPENDENT_SOURCE)
+
+        self.assertFalse(report["valid"])
+        self.assertTrue(report["repairable_hint"])
+        diagnostic = next(
+            item
+            for item in report["diagnostics"]
+            if item["error_code"] == "PARAMETER_METADATA_MISMATCH"
+        )
+        self.assertEqual(diagnostic["semantic_id"], "legs")
+        self.assertIn("holder_length_mm", diagnostic["message"])
+
+    def test_rejects_dependency_cycles(self):
+        source = DEPENDENT_SOURCE.replace(
+            'depends_on=(),\n    search_keys=("holder", "body"),',
+            'depends_on=("legs",),\n    search_keys=("holder", "body"),',
+        )
+
+        report = validate_cad_source(source)
+
+        self.assertFalse(report["valid"])
+        self.assertTrue(
+            any(
+                diagnostic["error_code"] == "INVALID_DEPENDENCY"
+                and "acyclic" in diagnostic["message"]
+                for diagnostic in report["diagnostics"]
+            )
+        )
 
 
 if __name__ == "__main__":

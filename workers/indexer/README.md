@@ -126,6 +126,10 @@ For every `model.py`, the extractor records:
 - Public functions decorated with `@cad_part(...)`.
 - Semantic IDs, roles, parameters, dependencies, search keys, and source
   boundaries from those decorators.
+- Effective `params.<field>` references, including references reached through
+  private helpers.
+- Direct dependency edges, reverse dependents, transitive closures, dependency
+  paths, and parameter consumers.
 
 The decorator metadata is the semantic layer that connects user language to
 code. A function name describes implementation, while `role` and `search_keys`
@@ -138,7 +142,15 @@ The extractor rejects an invalid model when:
 - `library` is not `"cadquery"`.
 - A decorator references an unknown `ModelParams` field.
 - A dependency references an unknown semantic ID in the same database part.
+- Direct dependencies contain duplicates or cycles.
+- Direct dependency metadata disagrees with named-local dataflow in
+  `build_model`.
 - Semantic IDs are duplicated within one database part.
+
+Parameter metadata drift is recorded as an index warning rather than blocking
+the fresh index, so the CAD Editor can receive the accepted source and repair
+it. The CAD Validator remains the strict commit gate and rejects candidates
+whose decorator parameters do not match effective source usage.
 
 Private helpers and `build_model` are recorded as functions when applicable,
 but they are not treated as searchable semantic features.

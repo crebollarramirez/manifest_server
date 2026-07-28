@@ -10,16 +10,6 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class SearchQueryPlan(StrictModel):
-    queries: list[str] = Field(min_length=1, max_length=3)
-
-
-class TargetSelection(StrictModel):
-    part_id: str
-    semantic_ids: list[str] = Field(min_length=1)
-    reason: str
-
-
 class ReplaceParameterField(StrictModel):
     operation: Literal["replace_parameter_field"]
     target_id: str
@@ -87,27 +77,6 @@ class EditPlan(StrictModel):
     operations: list[EditOperation] = Field(min_length=1, max_length=12)
 
 
-class InitialCadModel(StrictModel):
-    """The AI-owned body for a previously blank CAD part."""
-
-    summary: str
-    model_body: str = Field(min_length=1)
-
-
-class InitialCadDesignContext(StrictModel):
-    request: str
-    conversation: list[dict[str, str]]
-    part_id: str
-    part_name: str
-
-
-class InitialCadRepairContext(StrictModel):
-    original_request: str
-    conversation: list[dict[str, str]]
-    previous_model_body: str
-    validation_result: dict[str, Any]
-
-
 class AllowedTarget(StrictModel):
     target_id: str
     kind: Literal[
@@ -140,18 +109,6 @@ class EditContext(StrictModel):
     allowed_targets: list[AllowedTarget]
 
 
-class RepairContext(StrictModel):
-    original_request: str
-    conversation: list[dict[str, str]]
-    previous_plan: dict[str, Any]
-    failed_candidate_hash: str
-    failed_candidate_chunks: list[dict[str, Any]]
-    validation_result: dict[str, Any]
-    accepted_source_context: dict[str, Any]
-    related_index_results: list[dict[str, Any]]
-    allowed_targets: list[AllowedTarget]
-
-
 @dataclass(frozen=True)
 class ResolvedEditTarget:
     part_id: str
@@ -169,17 +126,7 @@ class CandidateSource:
     base_hash: str
     changed_symbols: list[str]
     applied_operations: list[dict[str, Any]]
-
-
-@dataclass(frozen=True)
-class ErrorClassification:
-    repairable: bool
-    category: str
-    related_function_names: list[str] = field(default_factory=list)
-    related_parameter_queries: list[str] = field(default_factory=list)
-    stop_reason: str | None = None
-
-
+    normalization_notes: list[str] = field(default_factory=list)
 class WorkflowFailure(RuntimeError):
     def __init__(
         self,

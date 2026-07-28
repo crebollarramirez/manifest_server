@@ -1,7 +1,7 @@
 {
   "id": "backend-system-overview",
   "title": "Backend System Design Overview",
-  "summary": "The top backend layer: a Supabase Edge Function validates API actions, manages project resources, creates durable worker jobs, serves status reads, and handles the direct mesh-generation path.",
+  "summary": "The top backend layer: a Supabase Edge Function manages action-based resources and compatibility submissions, while the NestJS CAD Agent owns CAD-edit orchestration and replayable live progress.",
   "scope": "system",
   "direction": "RIGHT",
   "nodes": [
@@ -70,6 +70,36 @@
       }
     },
     {
+      "id": "cad-agent-service",
+      "label": "NestJS CAD Agent",
+      "description": "The CAD-edit submission, orchestration, OpenAI reasoning, durable-status, and WebSocket progress service.",
+      "type": "service",
+      "icon": "service",
+      "href": "/services/cad-agent/",
+      "position": { "column": 1, "row": 2 },
+      "mobileOrder": 7,
+      "details": {
+        "responsibility": "Create or reuse idempotent CAD edit jobs, advance them independently of clients, and expose snapshot-plus-replay progress.",
+        "ownedBy": "Manifest backend",
+        "runsIn": "services/cad_agent",
+        "inputs": [
+          { "name": "CAD edit submission", "description": "Project, optional linked part, request text, recent messages, and client_request_id." }
+        ],
+        "outputs": [
+          { "name": "durable workflow", "description": "Job reference, status, and ordered public progress events." }
+        ],
+        "guarantees": [
+          "The WebSocket is a delivery channel, not a durable queue.",
+          "OpenAI returns only a strict tool plan and has no mutation or commit authority."
+        ],
+        "evidence": [
+          { "path": "services/cad_agent/src/submission.service.ts", "symbol": "SubmissionService", "kind": "source" },
+          { "path": "services/cad_agent/src/orchestrator.service.ts", "symbol": "OrchestratorService", "kind": "source" },
+          { "path": "services/cad_agent/src/cad-edits.gateway.ts", "symbol": "CadEditsGateway", "kind": "source" }
+        ]
+      }
+    },
+    {
       "id": "project-catalog",
       "label": "Project Catalog",
       "description": "Postgres projects and parts tables holding project identity, part identity, names, and CAD/mesh type.",
@@ -91,16 +121,16 @@
     },
     {
       "id": "job-tables",
-      "label": "Workflow Job Tables",
-      "description": "Postgres index_jobs, generation_jobs, and edit_jobs rows used for asynchronous index, validation, export, retrieval-test, and CAD-edit work.",
+      "label": "Workflow Data Tables",
+      "description": "Postgres durable jobs, bounded CAD tool handoffs, and ordered CAD-edit progress used across asynchronous backend workflows.",
       "type": "database",
       "icon": "database",
       "foundation": true,
       "position": { "column": 2, "row": 1 },
       "mobileOrder": 4,
       "details": {
-        "responsibility": "Durably own queued work and expose job status/results without the Edge Function calling workers directly.",
-        "ownedBy": "Postgres index_jobs, generation_jobs, and edit_jobs",
+        "responsibility": "Durably own queued work, edit/tool leases, results, and reconnectable public progress without relying on a client connection.",
+        "ownedBy": "Postgres index_jobs, generation_jobs, edit_jobs, cad_tool_jobs, and edit_job_events",
         "inputs": [
           { "name": "index work", "description": "build_index or test_getter row." },
           { "name": "generation work", "description": "validate_cad, export_cad, or export_mesh row." },
@@ -110,14 +140,15 @@
           { "name": "job reference", "description": "Durable UUID and initial status." },
           { "name": "status record", "description": "Selected index or edit job fields safe for the API response." }
         ],
-        "durableWrites": ["automatic build_index row during CAD part creation", "explicitly queued job rows", "queued-job cancellation during deletion preparation"],
+        "durableWrites": ["automatic build_index row during CAD part creation", "idempotent CAD edit submission", "bounded Python tool handoff", "ordered public progress", "explicitly queued worker rows", "queued-job cancellation during deletion preparation"],
         "downstream": ["Independent workers claim these rows outside the Edge Function layer."],
         "evidence": [
           { "path": "supabase/functions/cad-agent/index.ts", "symbol": "queueGenerationJob / queueIndexJob / queueEditJob", "kind": "source" },
           { "path": "supabase/migrations/20260724000000_add_index_jobs.sql", "symbol": "index_jobs", "kind": "migration" },
           { "path": "supabase/migrations/20260725000000_add_cad_edit_workflow.sql", "symbol": "edit_jobs", "kind": "migration" },
           { "path": "supabase/migrations/20260726000000_add_initial_cad_design.sql", "symbol": "workflow_mode", "kind": "migration" },
-          { "path": "supabase/migrations/20260726010000_add_requested_cad_part.sql", "symbol": "requested_part_id", "kind": "migration" }
+          { "path": "supabase/migrations/20260726010000_add_requested_cad_part.sql", "symbol": "requested_part_id", "kind": "migration" },
+          { "path": "supabase/migrations/20260727000000_add_cad_agent_progress_and_tools.sql", "symbol": "edit_job_events / cad_tool_jobs / submit_cad_edit_job", "kind": "migration" }
         ]
       }
     },
@@ -148,28 +179,29 @@
     {
       "id": "openai",
       "label": "OpenAI Responses API",
-      "description": "External structured-output dependency used only when chat targets a linked mesh part.",
+      "description": "External structured-output dependency used by direct linked-mesh generation and by the Nest CAD Agent’s bounded tool-plan reasoner.",
       "type": "external",
       "icon": "external",
       "foundation": true,
       "position": { "column": 1, "row": 3 },
       "mobileOrder": 6,
       "details": {
-        "responsibility": "Return a strict generated_code string containing the complete replacement mesh model body.",
+        "responsibility": "Return either a strict generated_code mesh body or a strict versioned CAD ToolPlan, depending on the initiating service.",
         "ownedBy": "OpenAI",
         "inputs": [
-          { "name": "mesh conversation", "description": "At most eight normalized messages plus the current mesh model.py source." }
+          { "name": "bounded generation context", "description": "Mesh source for the Edge path, or bounded CAD source targets and diagnostics for the Nest reasoner." }
         ],
         "outputs": [
-          { "name": "model_agent_response", "description": "Strict JSON schema with one non-empty generated_code field." }
+          { "name": "structured output", "description": "A strict mesh generated_code response or registered CAD tool_plan_v1." }
         ],
-        "shortCircuit": "Empty output, invalid JSON, missing code, or a status-only value fails the HTTP request before storage replacement.",
+        "shortCircuit": "Refusal or invalid structured output fails before mesh storage replacement or CAD candidate mutation.",
         "operations": {
           "retry": "No Edge Function retry is implemented.",
           "controls": ["OPENAI_MODEL defaults to gpt-5.4-mini."]
         },
         "evidence": [
-          { "path": "supabase/functions/cad-agent/index.ts", "symbol": "handleChat / RESPONSE_SCHEMA", "kind": "source" }
+          { "path": "supabase/functions/cad-agent/index.ts", "symbol": "handleChat / RESPONSE_SCHEMA", "kind": "source" },
+          { "path": "services/cad_agent/src/reasoner.service.ts", "symbol": "ReasonerService", "kind": "source" }
         ]
       }
     }
@@ -201,6 +233,33 @@
         "evidence": [
           { "path": "supabase/functions/cad-agent/index.ts", "symbol": "Deno.serve / requestAction", "kind": "source" },
           { "path": "supabase/config.toml", "symbol": "functions.cad-agent.verify_jwt", "kind": "configuration" }
+        ]
+      }
+    },
+    {
+      "id": "direct-cad-edit",
+      "source": "api-clients",
+      "target": "cad-agent-service",
+      "label": "submit or follow CAD editing",
+      "protocol": "event",
+      "direction": "two-way",
+      "flow": "asynchronous",
+      "request": {
+        "label": "idempotent request or progress subscription",
+        "type": "POST /v1/cad-edits or native WebSocket message",
+        "exampleBody": "{\"event\":\"subscribe\",\"job_id\":\"edit-job-uuid\",\"after_sequence\":4}"
+      },
+      "response": {
+        "label": "job reference, snapshot, or ordered progress",
+        "type": "HTTP JSON or WebSocket event",
+        "exampleBody": "{\"event\":\"progress\",\"sequence\":5,\"type\":\"validating\",\"message\":\"Validating candidate attempt 1.\"}"
+      },
+      "details": {
+        "summary": "Clients may submit directly to Nest or keep using the Edge compatibility action; both create the same durable edit_jobs workflow.",
+        "durability": "The job and progress events remain queryable after a disconnect.",
+        "evidence": [
+          { "path": "services/cad_agent/src/cad-edits.controller.ts", "symbol": "CadEditsController", "kind": "source" },
+          { "path": "services/cad_agent/src/cad-edits.gateway.ts", "symbol": "CadEditsGateway", "kind": "source" }
         ]
       }
     },
@@ -254,6 +313,56 @@
         "failureBehavior": "Most failed inserts or lookups fail the request. If only automatic indexing fails after CAD creation, the part remains and the response reports index_status=not_queued with a manual /index warning. Deletion preparation cancels queued rows but blocks while applicable work is running.",
         "evidence": [
           { "path": "supabase/functions/cad-agent/index.ts", "symbol": "queueGenerationJob / queueIndexJob / queueEditJob / prepareForDeletion", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "cad-agent-workflow",
+      "source": "cad-agent-service",
+      "target": "job-tables",
+      "label": "claim edits, queue tools, and append progress",
+      "protocol": "database",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": {
+        "label": "workflow, tool, or progress operation",
+        "type": "Postgres RPC/table operation",
+        "exampleBody": "{\"edit_job_id\":\"edit-job-uuid\",\"event_type\":\"planning\",\"message\":\"Planning bounded CAD changes.\"}"
+      },
+      "response": {
+        "label": "owned work or durable acknowledgement",
+        "type": "edit_jobs / cad_tool_jobs / edit_job_events data",
+        "exampleBody": "{\"id\":\"edit-job-uuid\",\"status\":\"running\",\"state\":\"planning_edit\"}"
+      },
+      "details": {
+        "summary": "Nest initiates every database interaction; durable rows allow processing and replay to outlive clients.",
+        "evidence": [
+          { "path": "services/cad_agent/src/cad-agent.repository.ts", "symbol": "CadAgentRepository", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "cad-planning",
+      "source": "cad-agent-service",
+      "target": "openai",
+      "label": "bounded CAD tool-plan exchange",
+      "protocol": "http",
+      "direction": "two-way",
+      "flow": "synchronous",
+      "request": {
+        "label": "request plus allowed source context",
+        "type": "Responses API structured-output request",
+        "exampleBody": "{\"mode\":\"edit\",\"request_text\":\"Add two holes\",\"allowed_targets\":[\"feature:mount\"]}"
+      },
+      "response": {
+        "label": "registered versioned tool plan",
+        "type": "tool_plan_v1",
+        "exampleBody": "{\"schema_version\":1,\"summary\":\"Add mounting holes\",\"operations\":[]}"
+      },
+      "details": {
+        "summary": "OpenAI selects typed operations only; it cannot execute tools or access canonical storage.",
+        "evidence": [
+          { "path": "services/cad_agent/src/reasoner.service.ts", "symbol": "ReasonerService", "kind": "source" }
         ]
       }
     },
@@ -320,6 +429,13 @@
       "kind": "service",
       "description": "The current top backend layer contains one deployed request-scoped function.",
       "nodeIds": ["cad-agent"]
+    },
+    {
+      "id": "cad-agent-service-layer",
+      "label": "NestJS CAD Agent",
+      "kind": "service",
+      "description": "The long-running CAD edit control plane and progress service.",
+      "nodeIds": ["cad-agent-service"]
     }
   ]
 }

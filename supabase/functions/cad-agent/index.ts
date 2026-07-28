@@ -1,8 +1,11 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import OpenAI from "openai";
 import { DEFAULT_MESH_MODEL_BODY } from "./mesh_model_template.ts";
-import { MESH_SYSTEM_PROMPT } from "./mesh_prompt.ts";
-import { SYSTEM_PROMPT } from "./prompt.ts";
+
+const [CAD_SYSTEM_PROMPT, MESH_SYSTEM_PROMPT] = await Promise.all([
+  Deno.readTextFile(new URL("./CAD_SYSTEM_PROMPT.md", import.meta.url)),
+  Deno.readTextFile(new URL("./MESH_SYSTEM_PROMPT.md", import.meta.url)),
+]);
 
 const DEFAULT_OPENAI_MODEL = "gpt-5.4-mini";
 const STORAGE_BUCKET = "3dProjects";
@@ -79,7 +82,7 @@ type PartRecord = {
 
 const PART_CONFIGS: Record<PartType, PartConfig> = {
   cad: {
-    instructions: SYSTEM_PROMPT,
+    instructions: CAD_SYSTEM_PROMPT,
     jobType: "validate_cad",
     runtimeImports: [CAD_MODEL_RUNTIME_IMPORT],
   },
@@ -528,9 +531,10 @@ async function queueEditJob(
   supabase: SupabaseClient,
   projectId: string,
   messages: ChatMessage[],
+  clientRequestId: string,
   requestedPart?: PartRecord,
   workflowMode: "edit" | "initial_design" = "edit",
-): Promise<{ id: string; status: string }> {
+): Promise<{ id: string; status: string; clientRequestId: string }> {
   const latestRequest = messages.at(-1)?.content.trim();
   if (!latestRequest) {
     throw new RequestError(
@@ -540,38 +544,53 @@ async function queueEditJob(
   }
 
   const initialDesign = workflowMode === "initial_design";
-  const { data: job, error } = await supabase
-    .from("edit_jobs")
-    .insert({
-      project_id: projectId,
-      request_text: latestRequest,
-      messages: messages.slice(-MAX_HISTORY_MESSAGES),
-      status: "queued",
-      state: "received",
-      workflow_mode: workflowMode,
-      requested_part_id: requestedPart?.id ?? null,
-      ...(initialDesign && requestedPart
-        ? {
-          resolved_part_id: requestedPart.id,
-          resolved_targets: [{
-            part_id: requestedPart.id,
-            part_name: requestedPart.part_name,
-            semantic_ids: [],
-            confidence: 1,
-            reason: "Linked blank CAD part selected for initial design.",
-            candidates: [],
-          }],
-        }
-        : {}),
-    })
-    .select("id, status")
-    .single();
+  const boundedMessages = messages.slice(-MAX_HISTORY_MESSAGES).map((message) => ({
+    role: message.role,
+    content: message.content.trim(),
+  }));
+  const resolvedTargets = initialDesign && requestedPart
+    ? [{
+      part_id: requestedPart.id,
+      part_name: requestedPart.part_name,
+      semantic_ids: [],
+      confidence: 1,
+      reason: "Linked blank CAD part selected for initial design.",
+      candidates: [],
+    }]
+    : [];
+  const requestFingerprint = await sha256Hex(JSON.stringify({
+    project_id: projectId,
+    part_id: requestedPart?.id ?? null,
+    request_text: latestRequest,
+    messages: boundedMessages,
+  }));
+  const { data, error } = await supabase.rpc("submit_cad_edit_job", {
+    p_project_id: projectId,
+    p_request_text: latestRequest,
+    p_messages: boundedMessages,
+    p_requested_part_id: requestedPart?.id ?? null,
+    p_workflow_mode: workflowMode,
+    p_client_request_id: clientRequestId,
+    p_request_fingerprint: requestFingerprint,
+    p_resolved_targets: resolvedTargets,
+  });
+  const job = Array.isArray(data) ? data[0] : data;
   if (error || !job?.id) {
+    if (error?.message.includes("CLIENT_REQUEST_ID_CONFLICT")) {
+      throw new RequestError(
+        "The client_request_id is already bound to a different CAD request.",
+        409,
+      );
+    }
     throw new Error(
       `Could not queue CAD edit job: ${error?.message ?? "missing job id"}`,
     );
   }
-  return { id: String(job.id), status: String(job.status) };
+  return {
+    id: String(job.id),
+    status: String(job.status),
+    clientRequestId,
+  };
 }
 
 function isBlankCadSource(source: string): boolean {
@@ -1195,10 +1214,21 @@ async function handleGetEditJob(
   body: Record<string, unknown>,
 ): Promise<unknown> {
   const jobId = requiredUuid(body, "job_id");
+  const rawAfterSequence = body.after_sequence ?? 0;
+  if (
+    typeof rawAfterSequence !== "number" ||
+    !Number.isSafeInteger(rawAfterSequence) ||
+    rawAfterSequence < 0
+  ) {
+    throw new RequestError(
+      "`after_sequence` must be a non-negative integer when provided.",
+      400,
+    );
+  }
   const { data: job, error } = await supabase
     .from("edit_jobs")
     .select(
-      "id, project_id, requested_part_id, workflow_mode, resolved_part_id, resolved_targets, status, state, attempt_count, max_attempts, validation_job_id, index_job_id, export_job_id, history, result, error_code, error_message, created_at, started_at, heartbeat_at, completed_at",
+      "id, project_id, requested_part_id, workflow_mode, resolved_part_id, resolved_targets, status, state, attempt_count, max_attempts, validation_job_id, index_job_id, export_job_id, history, result, error_code, error_message, client_request_id, last_event_sequence, created_at, started_at, heartbeat_at, completed_at",
     )
     .eq("id", jobId)
     .maybeSingle();
@@ -1234,10 +1264,22 @@ async function handleGetEditJob(
       );
     })
     : [];
+  const { data: events, error: eventsError } = await supabase
+    .from("edit_job_events")
+    .select(
+      "id, edit_job_id, sequence, event_type, state, message, metadata, created_at",
+    )
+    .eq("edit_job_id", jobId)
+    .gt("sequence", rawAfterSequence)
+    .order("sequence", { ascending: true });
+  if (eventsError) {
+    throw new Error(`Could not inspect CAD edit progress: ${eventsError.message}`);
+  }
   return {
     message: `CAD edit job ${jobId} is ${job.status} (${job.state}).`,
     status: job.status,
     job: { ...job, history: safeHistory },
+    events: events ?? [],
   };
 }
 
@@ -1311,6 +1353,8 @@ async function handleChat(
 ): Promise<unknown> {
   const projectId = requiredUuid(body, "project_id");
   const partId = optionalUuid(body, "part_id");
+  const clientRequestId = optionalUuid(body, "client_request_id") ??
+    crypto.randomUUID();
   const messages = normalizeMessages(body.messages);
   if (messages.length === 0 || messages.at(-1)?.role !== "user") {
     throw new RequestError(
@@ -1337,6 +1381,7 @@ async function handleChat(
         supabase,
         projectId,
         messages,
+        clientRequestId,
         part,
         "initial_design",
       );
@@ -1347,6 +1392,7 @@ async function handleChat(
         project_id: projectId,
         part_id: part.id,
         job_id: job.id,
+        client_request_id: job.clientRequestId,
       };
     }
   }
@@ -1357,6 +1403,7 @@ async function handleChat(
       supabase,
       projectId,
       messages,
+      clientRequestId,
       part ?? undefined,
     );
     return {
@@ -1365,8 +1412,9 @@ async function handleChat(
       status: job.status,
       job_type: "edit_cad",
       project_id: projectId,
-      part_id: null,
+      part_id: part?.id ?? null,
       job_id: job.id,
+      client_request_id: job.clientRequestId,
     };
   }
 

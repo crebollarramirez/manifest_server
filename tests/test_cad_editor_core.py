@@ -3,15 +3,10 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from workers.cad_editor.cad_editor.agent import CadEditAgent
 from workers.cad_editor.cad_editor.applier import apply_edit_plan
 from workers.cad_editor.cad_editor.contracts import (
     EditPlan,
-    SearchQueryPlan,
     WorkflowFailure,
-)
-from workers.cad_editor.cad_editor.error_classifier import (
-    classify_validation_error,
 )
 from workers.cad_editor.cad_editor.repository import SupabaseEditRepository
 from workers.cad_editor.cad_editor.targets import source_hash
@@ -301,97 +296,6 @@ class DeterministicEditTests(unittest.TestCase):
                         semantic_ids=["mount_holes"],
                         plan=edit_plan,
                     )
-
-
-class ErrorClassificationTests(unittest.TestCase):
-    def test_validator_nonrepairable_hint_stops_a_retry(self):
-        result = {
-            "stage": "cadquery_runtime",
-            "repairable_hint": False,
-            "diagnostics": [
-                {
-                    "error_code": "CADQUERY_RUNTIME_ERROR",
-                    "repairable_hint": False,
-                    "file_path": "candidate/model.py",
-                }
-            ],
-        }
-
-        classification = classify_validation_error(
-            result,
-            candidate_path="candidate/model.py",
-        )
-
-        self.assertFalse(classification.repairable)
-
-    def test_diagnostic_outside_candidate_scope_stops_a_retry(self):
-        result = {
-            "stage": "cadquery_runtime",
-            "repairable_hint": True,
-            "diagnostics": [
-                {
-                    "error_code": "CADQUERY_RUNTIME_ERROR",
-                    "file_path": "another/model.py",
-                }
-            ],
-        }
-
-        classification = classify_validation_error(
-            result,
-            candidate_path="candidate/model.py",
-        )
-
-        self.assertFalse(classification.repairable)
-        self.assertEqual(classification.category, "scope")
-
-
-class StructuredAgentTests(unittest.TestCase):
-    def test_uses_responses_parse_with_the_pydantic_output_type(self):
-        calls = []
-
-        class Responses:
-            def parse(self, **kwargs):
-                calls.append(kwargs)
-                return SimpleNamespace(
-                    output_parsed=SearchQueryPlan(
-                        queries=["mounting holes"],
-                    ),
-                    output=[],
-                )
-
-        client = SimpleNamespace(responses=Responses())
-        agent = CadEditAgent(client=client, model="test-model")
-
-        result = agent.extract_search_queries("make the holes larger")
-
-        self.assertEqual(result.queries, ["mounting holes"])
-        self.assertEqual(calls[0]["model"], "test-model")
-        self.assertIs(calls[0]["text_format"], SearchQueryPlan)
-
-    def test_surfaces_a_structured_output_refusal(self):
-        class Responses:
-            def parse(self, **_kwargs):
-                return SimpleNamespace(
-                    output_parsed=None,
-                    output=[
-                        SimpleNamespace(
-                            content=[
-                                SimpleNamespace(
-                                    type="refusal",
-                                    refusal="Request refused.",
-                                )
-                            ]
-                        )
-                    ],
-                )
-
-        agent = CadEditAgent(
-            client=SimpleNamespace(responses=Responses()),
-            model="test-model",
-        )
-
-        with self.assertRaisesRegex(WorkflowFailure, "Request refused"):
-            agent.extract_search_queries("unsafe request")
 
 
 class SupabaseEditRepositoryTests(unittest.TestCase):
