@@ -1,6 +1,6 @@
 # Manifest Server
 
-Manifest Server contains the backend workers, Supabase Edge Functions, CLI,
+Manifest Server contains the NestJS backend, Supabase-backed workers, CLI,
 and the architecture documentation site.
 
 ## Start with the documentation
@@ -49,23 +49,21 @@ node --test --experimental-strip-types src/components/architecture/*.test.ts
 ## Backend setup
 
 Use the [backend local runbook](docs/src/pages/index.astro#local-runbook) for
-the commands and environment variables needed to start Supabase, serve
-`cad-agent`, run the worker containers, and use the CLI. It also documents what
+the commands and environment variables needed to start Supabase, run the
+NestJS CAD Agent and worker containers, and use the CLI. It also documents what
 each command does and how to check asynchronous job status.
 
 The backend implementation is organized as:
 
-- `supabase/functions/cad-agent/` — action-based request validation, catalog
-  operations, compatible durable submissions, status reads, and linked mesh
-  generation.
-- `services/cad_agent/` — NestJS CAD edit submission, OpenAI tool planning,
-  durable orchestration, WebSocket progress replay, and guarded commit.
+- `services/cad_agent/` — NestJS action API, catalog and job operations, CAD
+  edit submission, linked-mesh generation, OpenAI tool planning, durable
+  orchestration, WebSocket progress replay, and guarded commit.
 - `workers/cad_editor/` — bounded Python CAD context and transactional
   AST/source tool execution against isolated candidates.
 - `workers/indexer/` — static CAD source indexing and Getter retrieval.
 - `workers/cad_validator/` — candidate source and geometry validation.
 - `workers/cad_exporter/` — hash-bound CAD and mesh artifact export.
-- `cad_agent_cli.py` — terminal client for the Edge Function actions.
+- `cad_agent_cli.py` — terminal client for the NestJS action and progress APIs.
 
 ## Verification
 
@@ -73,7 +71,7 @@ Run the backend tests from the repository root:
 
 ```bash
 python -m unittest discover -s tests -p 'test_*.py'
-deno check --config supabase/functions/cad-agent/deno.json supabase/functions/cad-agent/index.ts
+cd services/cad_agent && npm test && npm run build
 ```
 
 For service behavior, diagrams, API examples, and operational details, use the

@@ -8,7 +8,7 @@ import indexerWorker from '../../data/architecture/indexer-worker.json';
 		<h2>Purpose and boundaries</h2>
 		<p>The Indexer Worker processes <code>build_index</code> and <code>test_getter</code> jobs from <code>index_jobs</code>. For a build, it reads CAD <code>model.py</code> files, parses them with Python&rsquo;s built-in AST module without executing them, assembles one project-wide semantic index, verifies source freshness, stores the result, and records the outcome.</p>
 		<p>It does not accept client traffic, modify canonical CAD sources, or retain durable worker state between jobs. Index Jobs owns lifecycle state, 3dProjects storage owns source inputs and published indexes, and the worker owns only the active in-memory operation.</p>
-		<p>The diagram begins at <code>index_jobs</code>, the worker&rsquo;s direct trigger and durable boundary. Jobs live in the Postgres table, while its service-role claim function supplies queue semantics. Client and Edge Function interactions remain on the Backend System Design page because they do not call this worker directly.</p>
+		<p>The diagram begins at <code>index_jobs</code>, the worker&rsquo;s direct trigger and durable boundary. Jobs live in the Postgres table, while its service-role claim function supplies queue semantics. Client and NestJS action interactions remain on the Backend System Design page because they do not call this worker directly.</p>
 	</article>
 	<h2>How it works</h2>
 	<ol>

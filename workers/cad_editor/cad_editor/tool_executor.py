@@ -25,6 +25,7 @@ from .tool_contracts import (
     AddCadFeature,
     AddModelParameter,
     AddPrivateHelper,
+    ConfirmNoChange,
     DeleteCadFeature,
     DeleteModelParameter,
     DeletePrivateHelper,
@@ -1121,6 +1122,55 @@ class CadToolExecutor:
                 part_id=part_id,
                 semantic_ids=semantic_ids,
             )
+            confirmations = [
+                operation
+                for operation in plan.operations
+                if isinstance(operation, ConfirmNoChange)
+            ]
+            if confirmations:
+                confirmation = confirmations[0]
+                evidence_ids = [item.semantic_id for item in confirmation.evidence]
+                if len(evidence_ids) != len(set(evidence_ids)):
+                    raise WorkflowFailure(
+                        "NO_CHANGE_EVIDENCE_INVALID",
+                        "confirm_no_change evidence must contain each semantic ID at most once.",
+                    )
+                verified_evidence: list[dict[str, str]] = []
+                for evidence in confirmation.evidence:
+                    try:
+                        target = resolve_feature_body_span(
+                            inventory, evidence.semantic_id
+                        )
+                    except WorkflowFailure as error:
+                        if error.code != "TARGET_NOT_FOUND":
+                            raise
+                        raise WorkflowFailure(
+                            "NO_CHANGE_EVIDENCE_INVALID",
+                            f'No current CAD feature has semantic ID "{evidence.semantic_id}".',
+                        ) from error
+                    if target.fingerprint != evidence.target_fingerprint:
+                        raise WorkflowFailure(
+                            "NO_CHANGE_EVIDENCE_INVALID",
+                            f'CAD feature "{evidence.semantic_id}" changed after the no-change review.',
+                        )
+                    verified_evidence.append(
+                        {
+                            "semantic_id": evidence.semantic_id,
+                            "target_fingerprint": target.fingerprint,
+                            "reason": evidence.reason,
+                        }
+                    )
+                _validate_system_contract(source)
+                return {
+                    "schema_version": 1,
+                    "outcome": "no_change",
+                    "base_source_sha256": actual_hash,
+                    "changed_symbols": [],
+                    "semantic_ids": semantic_ids,
+                    "evidence": verified_evidence,
+                    "summary": plan.summary,
+                    "reason": confirmation.reason,
+                }
             _validate_impact_review(source, plan, inventory=inventory)
             _preflight_feature_plan(list(plan.operations), inventory=inventory)
             operations = _normalize_feature_operations(

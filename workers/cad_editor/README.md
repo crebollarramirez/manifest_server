@@ -46,6 +46,8 @@ with its last acknowledged event sequence and replay everything it missed.
 
 The shared Nest Zod and Python Pydantic contracts permit:
 
+- evidence-bearing `confirm_no_change` for established source that already
+  satisfies the request;
 - `write_initial_model` for an exact blank linked CAD part only;
 - parameter field replacement, addition, and eligible deletion;
 - `@cad_part` metadata updates;
@@ -56,6 +58,11 @@ The shared Nest Zod and Python Pydantic contracts permit:
 Initial design may generate the complete AI-owned model body, but the runtime
 import remains system-owned. Established parts never allow unrestricted
 whole-file replacement.
+
+`confirm_no_change` must be the only operation and have an empty impact review.
+The worker verifies every cited semantic feature and function-body fingerprint
+against the accepted source, then completes without creating a candidate or
+queueing validation, commit, post-edit reindexing, or export.
 
 Newly reasoned plans use ToolPlan schema version 2. Each established-source
 plan includes an `impact_review` covering the feature operations, consumers of
@@ -80,7 +87,7 @@ deleted.
 NestJS is the only CAD AI reasoning boundary. It loads and caches five focused
 Markdown prompt sources:
 
-- `supabase/functions/cad-agent/CAD_SYSTEM_PROMPT.md` defines only the strict
+- `services/cad_agent/prompts/cad-system.md` defines only the strict
   CadQuery source style and modeling contract.
 - `services/cad_agent/prompts/tool-plan.md` defines the registered tool catalog,
   arguments, effects, and safety preconditions.
@@ -101,8 +108,8 @@ dependency and owns no prompts. There are no generated prompt modules or
 synchronization commands. Restart Nest after changing a prompt so its in-memory
 cache is reloaded.
 
-`supabase/functions/cad-agent/MESH_SYSTEM_PROMPT.md` remains the separate Edge
-mesh-generation prompt.
+`services/cad_agent/prompts/mesh-system.md` remains the separate synchronous
+mesh-generation prompt used by the Nest action API.
 
 ## Run locally
 
@@ -116,7 +123,7 @@ OPENAI_API_KEY=replace-with-openai-key
 # Optional
 SUPABASE_URL_DOCKER=http://host.docker.internal:54321
 OPENAI_MODEL=gpt-5.4-mini
-CAD_AGENT_PORT=3010
+CAD_AGENT_PORT=3000
 CAD_AGENT_POLL_INTERVAL_MS=2000
 CAD_AGENT_DEPENDENCY_POLL_INTERVAL_MS=500
 CAD_AGENT_DEPENDENCY_TIMEOUT_SECONDS=300
@@ -150,13 +157,15 @@ is not loaded.
 
 Nest listens on `http://127.0.0.1:3010` by default:
 
+- `POST /v1/cad-agent/actions`
 - `POST /v1/cad-edits`
 - `GET /v1/cad-edits/:jobId?after_sequence=0`
 - `ws://127.0.0.1:3010/v1/cad-edits/ws`
 
-The existing Supabase `cad-agent` Edge Function remains a compatible action
-API. CAD chat submissions use the same `submit_cad_edit_job` database contract,
-so Edge and direct Nest submissions share idempotency and durable processing.
+Nest is the sole CAD Agent API runtime. The compatibility action endpoint owns
+catalog, manual job, status, deletion, CAD chat, and linked-mesh requests; CAD
+chat and direct edit submissions share the same idempotent
+`submit_cad_edit_job` database contract.
 
 ## Development checks
 

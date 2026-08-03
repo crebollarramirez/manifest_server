@@ -21,13 +21,13 @@ function readPrompt(path: string): string {
 
 export function loadCadSystemPrompt(): string {
   const configuredPath = process.env.CAD_SYSTEM_PROMPT_PATH?.trim();
-  const path =
-    configuredPath ||
-    resolve(
-      __dirname,
-      '../../../supabase/functions/cad-agent/CAD_SYSTEM_PROMPT.md',
-    );
+  const path = configuredPath || resolve(__dirname, '../prompts/cad-system.md');
   return readPrompt(path);
+}
+
+export function loadMeshSystemPrompt(): string {
+  const configuredPath = process.env.MESH_SYSTEM_PROMPT_PATH?.trim();
+  return readPrompt(configuredPath || resolve(__dirname, '../prompts/mesh-system.md'));
 }
 
 export function loadServicePrompt(name: ServicePromptName): string {

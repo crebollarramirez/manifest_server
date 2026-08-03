@@ -479,6 +479,153 @@ test('feature provenance target mismatch replans with semantic replacement', asy
   assert.equal(files.get(CANONICAL_PATH), candidate);
 });
 
+test('confirmed no-change completes without candidate validation, commit, reindex, or export', async () => {
+  const accepted = 'accepted CAD source';
+  const acceptedHash = sha256(accepted);
+  const featureFingerprint = 'f'.repeat(64);
+  const originalPath = `${PROJECT_ID}/candidates/cad/${PART_ID}/${JOB_ID}/original/model.py`;
+  let job = editJob({
+    state: 'received',
+    attempt_count: 0,
+    accepted_source_sha256: null,
+    original_storage_path: null,
+    current_candidate_path: null,
+    current_candidate_sha256: null,
+    validation_job_id: null,
+  });
+  const files = new Map([
+    [CANONICAL_PATH, accepted],
+    [originalPath, accepted],
+  ]);
+  const calls = {
+    writes: 0,
+    queueIndex: 0,
+    queueValidation: 0,
+    queueExport: 0,
+  };
+  const noChangePlan = ToolPlanSchema.parse({
+    schema_version: 2,
+    summary: 'Confirmed the requested drainage is already present.',
+    target_part_id: PART_ID,
+    base_source_sha256: acceptedHash,
+    operations: [
+      {
+        tool: 'confirm_no_change',
+        reason: 'The drainage feature already cuts the requested holes.',
+        evidence: [
+          {
+            semantic_id: 'soap_drain_holes',
+            target_fingerprint: featureFingerprint,
+            reason: 'The feature cuts three centered cylinders through the base.',
+          },
+        ],
+      },
+    ],
+    impact_review: [],
+  });
+  const repository = {
+    patchEditJob: async (_id: string, values: Record<string, unknown>) => {
+      job = { ...job, ...values } as EditJob;
+      return job;
+    },
+    heartbeatEditJob: async () => undefined,
+    editJob: async () => job,
+    queueIndex: async () => {
+      calls.queueIndex += 1;
+      return '55555555-5555-4555-8555-555555555555';
+    },
+    indexJob: async () => ({ status: 'completed' }),
+    canonicalPath: () => CANONICAL_PATH,
+    originalPath: () => originalPath,
+    readText: async (path: string) => {
+      const value = files.get(path);
+      if (value === undefined) {
+        throw new WorkflowError('SOURCE_MISSING', `Missing ${path}`);
+      }
+      return value;
+    },
+    writeText: async (path: string, value: string) => {
+      calls.writes += 1;
+      files.set(path, value);
+    },
+    toolJobFor: async () => null,
+    queueToolJob: async (input: {
+      kind: string;
+      payload: Record<string, unknown>;
+    }) => {
+      if (input.kind === 'prepare_context') {
+        return {
+          id: 'context-tool',
+          status: 'completed',
+          result: {
+            part_id: PART_ID,
+            part_name: 'soap holder',
+            storage_path: CANONICAL_PATH,
+            base_source_sha256: acceptedHash,
+            semantic_ids: ['soap_drain_holes'],
+            existing_features: [
+              {
+                semantic_id: 'soap_drain_holes',
+                target_fingerprint: featureFingerprint,
+              },
+            ],
+          },
+        };
+      }
+      assert.equal(input.kind, 'apply_plan');
+      return {
+        id: 'no-change-tool',
+        status: 'completed',
+        input: input.payload,
+        result: {
+          schema_version: 1,
+          outcome: 'no_change',
+          base_source_sha256: acceptedHash,
+          changed_symbols: [],
+          semantic_ids: ['soap_drain_holes'],
+          evidence: noChangePlan.operations[0].evidence,
+          summary: noChangePlan.summary,
+        },
+      };
+    },
+    queueValidation: async () => {
+      calls.queueValidation += 1;
+      throw new Error('No-change must not queue validation.');
+    },
+    queueExport: async () => {
+      calls.queueExport += 1;
+      throw new Error('No-change must not queue export.');
+    },
+  };
+  const reasoner = {
+    createPlan: async () => noChangePlan,
+  };
+  const service = new OrchestratorService(
+    repository as never,
+    { emit: async () => ({}) } as never,
+    reasoner as never,
+  );
+  const process = (
+    service as unknown as {
+      process: (jobValue: EditJob) => Promise<Record<string, unknown>>;
+    }
+  ).process.bind(service);
+
+  const result = await process(job);
+
+  assert.equal(result.status, 'completed');
+  assert.equal(result.outcome, 'no_change');
+  assert.deepEqual(result.changed_files, []);
+  assert.deepEqual(result.changed_symbols, []);
+  assert.equal(result.validation_result, null);
+  assert.equal(result.export_job_id, null);
+  assert.equal(files.get(CANONICAL_PATH), accepted);
+  assert.equal(calls.writes, 0);
+  assert.equal(calls.queueIndex, 1);
+  assert.equal(calls.queueValidation, 0);
+  assert.equal(calls.queueExport, 0);
+});
+
 test('validation repair passes the exact previous plan and candidate proof', async () => {
   const job = editJob();
   const previousPlan = plan(job.accepted_source_sha256!);

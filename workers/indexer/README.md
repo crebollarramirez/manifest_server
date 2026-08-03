@@ -41,8 +41,8 @@ being confused with each other.
 
 ```mermaid
 flowchart LR
-    CLI["CLI<br/>/index or /index -test"] --> Edge["cad-agent<br/>Edge Function"]
-    Edge --> Jobs[("index_jobs")]
+    CLI["CLI<br/>/index or /index -test"] --> Nest["NestJS CAD Agent<br/>action API"]
+    Nest --> Jobs[("index_jobs")]
     Jobs --> Worker["Single indexer<br/>worker"]
     Worker --> ProjectData[("projects + CAD parts")]
     Worker --> Source["3dProjects storage<br/>model.py files"]
@@ -54,11 +54,11 @@ flowchart LR
     Editor["Independent cad-editor"] --> Getter
     Editor --> Jobs
     Getter --> Jobs
-    Jobs --> Edge
-    Edge --> CLI
+    Jobs --> Nest
+    Nest --> CLI
 ```
 
-The CLI never talks directly to the worker. The Edge Function validates the
+The CLI never talks directly to the worker. The NestJS action API validates the
 request and creates an `index_jobs` row. The worker claims the oldest queued
 job through a service-role-only database function.
 
@@ -87,7 +87,7 @@ are completed results.
 
 Running `/index <project_id>` starts this flow:
 
-1. The Edge Function confirms that the project exists and has at least one CAD
+1. The NestJS CAD Agent confirms that the project exists and has at least one CAD
    part.
 2. A `build_index` job is queued. Only one queued or running build is allowed
    per project.

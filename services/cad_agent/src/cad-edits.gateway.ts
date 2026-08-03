@@ -19,7 +19,7 @@ import {
 } from './contracts';
 import { ProgressService } from './progress.service';
 import { SubmissionService } from './submission.service';
-import { publicJob } from './cad-edits.controller';
+import { publicJob } from './public-job';
 
 type SubscriptionState = {
   replaying: boolean;

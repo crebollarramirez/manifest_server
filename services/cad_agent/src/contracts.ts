@@ -32,6 +32,88 @@ export const CadEditSubmissionSchema = z
     }
   });
 
+const ActionBase = z.object({ action: z.string() });
+
+export const CadAgentActionSchema = z.discriminatedUnion('action', [
+  ActionBase.extend({
+    action: z.literal('create_project'),
+    project_name: NonBlankSchema,
+  }).strict(),
+  ActionBase.extend({
+    action: z.literal('create_part'),
+    project_id: UuidSchema,
+    part_name: NonBlankSchema,
+    part_type: z.enum(['cad', 'mesh']),
+  }).strict(),
+  ActionBase.extend({
+    action: z.literal('link_project'),
+    project_id: UuidSchema,
+  }).strict(),
+  ActionBase.extend({
+    action: z.literal('link_part'),
+    project_id: UuidSchema,
+    part_id: UuidSchema,
+  }).strict(),
+  ActionBase.extend({ action: z.literal('list_projects') }).strict(),
+  ActionBase.extend({
+    action: z.literal('list_parts'),
+    project_id: UuidSchema,
+  }).strict(),
+  ActionBase.extend({
+    action: z.literal('export_part'),
+    part_id: UuidSchema,
+  }).strict(),
+  ActionBase.extend({
+    action: z.literal('validate_part'),
+    part_id: UuidSchema,
+  }).strict(),
+  ActionBase.extend({
+    action: z.literal('index_project'),
+    project_id: UuidSchema,
+  }).strict(),
+  ActionBase.extend({
+    action: z.literal('test_index'),
+    project_id: UuidSchema,
+    request_text: NonBlankSchema.max(20_000),
+  }).strict(),
+  ActionBase.extend({
+    action: z.literal('get_index_job'),
+    project_id: UuidSchema,
+    job_id: UuidSchema,
+  }).strict(),
+  ActionBase.extend({
+    action: z.literal('get_edit_job'),
+    job_id: UuidSchema,
+    after_sequence: z.number().int().min(0).optional(),
+  }).strict(),
+  ActionBase.extend({
+    action: z.literal('delete_project'),
+    project_id: UuidSchema,
+  }).strict(),
+  ActionBase.extend({
+    action: z.literal('delete_part'),
+    project_id: UuidSchema,
+    part_id: UuidSchema,
+  }).strict(),
+  ActionBase.extend({
+    action: z.literal('chat'),
+    project_id: UuidSchema,
+    part_id: UuidSchema.optional(),
+    client_request_id: UuidSchema.optional(),
+    messages: z.array(ConversationMessageSchema).min(1).max(8),
+  })
+    .strict()
+    .superRefine((value, context) => {
+      if (value.messages.at(-1)?.role !== 'user') {
+        context.addIssue({
+          code: 'custom',
+          path: ['messages'],
+          message: 'Messages must end with a non-empty user message.',
+        });
+      }
+    }),
+]);
+
 const TargetedOperationBase = z.object({
   target_id: NonBlankSchema,
   target_fingerprint: Sha256Schema,
@@ -117,6 +199,22 @@ const DeleteCadFeature = TargetedOperationBase.extend({
   tool: z.literal('delete_cad_feature'),
 }).strict();
 
+const NoChangeEvidenceSchema = z
+  .object({
+    semantic_id: NonBlankSchema,
+    target_fingerprint: Sha256Schema,
+    reason: NonBlankSchema.max(500),
+  })
+  .strict();
+
+const ConfirmNoChange = z
+  .object({
+    tool: z.literal('confirm_no_change'),
+    reason: NonBlankSchema.max(500),
+    evidence: z.array(NoChangeEvidenceSchema).min(1).max(64),
+  })
+  .strict();
+
 export const ToolOperationSchema = z.discriminatedUnion('tool', [
   WriteInitialModelSchema,
   ReplaceParameterField,
@@ -130,6 +228,7 @@ export const ToolOperationSchema = z.discriminatedUnion('tool', [
   DeleteModelParameter,
   DeletePrivateHelper,
   DeleteCadFeature,
+  ConfirmNoChange,
 ]);
 
 const ToolPlanBase = z
@@ -155,7 +254,27 @@ export const ToolPlanV1Schema = ToolPlanBase.extend({
 export const ToolPlanV2Schema = ToolPlanBase.extend({
   schema_version: z.literal(2),
   impact_review: z.array(ImpactReviewSchema).max(64),
-}).strict();
+})
+  .strict()
+  .superRefine((value, context) => {
+    const confirmations = value.operations.filter(
+      (operation) => operation.tool === 'confirm_no_change',
+    );
+    if (confirmations.length && value.operations.length !== 1) {
+      context.addIssue({
+        code: 'custom',
+        path: ['operations'],
+        message: 'confirm_no_change must be the plan’s only operation.',
+      });
+    }
+    if (confirmations.length && value.impact_review.length) {
+      context.addIssue({
+        code: 'custom',
+        path: ['impact_review'],
+        message: 'confirm_no_change requires an empty impact_review.',
+      });
+    }
+  });
 
 export const InitialDesignToolPlanV2Schema = ToolPlanBase.extend({
   schema_version: z.literal(2),
@@ -187,6 +306,7 @@ export const AckMessageSchema = z
   .strict();
 
 export type CadEditSubmission = z.infer<typeof CadEditSubmissionSchema>;
+export type CadAgentAction = z.infer<typeof CadAgentActionSchema>;
 export type ToolPlan = z.infer<typeof ToolPlanSchema>;
 export type ToolPlanV2 = z.infer<typeof ToolPlanV2Schema>;
 export type ToolOperation = z.infer<typeof ToolOperationSchema>;
@@ -233,6 +353,29 @@ export type EditJobEvent = {
   metadata: Record<string, unknown>;
   created_at: string;
 };
+
+export type ProjectRecord = {
+  id: string;
+  project_name: string;
+};
+
+export type PartType = 'cad' | 'mesh';
+
+export type PartRecord = {
+  id: string;
+  project_id: string;
+  part_name: string;
+  part_type: PartType;
+};
+
+export class ActionError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
 
 export class WorkflowError extends Error {
   constructor(

@@ -115,6 +115,57 @@ test('tool plan v2 requires explicit dependency impact review', () => {
   );
 });
 
+test('tool plan supports an evidence-bearing no-change confirmation only by itself', () => {
+  const confirmation = {
+    tool: 'confirm_no_change',
+    reason: 'The accepted feature already contains the requested holes.',
+    evidence: [
+      {
+        semantic_id: 'soap_drain_holes',
+        target_fingerprint: HASH,
+        reason: 'The feature cuts three centered cylinders through the tray base.',
+      },
+    ],
+  };
+  const plan = ToolPlanSchema.parse({
+    schema_version: 2,
+    summary: 'Confirmed the requested drainage is already present.',
+    target_part_id: PART_ID,
+    base_source_sha256: HASH,
+    operations: [confirmation],
+    impact_review: [],
+  });
+  assert.equal(plan.operations[0]?.tool, 'confirm_no_change');
+
+  assert.equal(
+    ToolPlanSchema.safeParse({
+      ...plan,
+      operations: [
+        confirmation,
+        {
+          tool: 'add_model_parameter',
+          name: 'hole_count',
+          field_source: 'hole_count: int = 3',
+        },
+      ],
+    }).success,
+    false,
+  );
+  assert.equal(
+    ToolPlanSchema.safeParse({
+      ...plan,
+      impact_review: [
+        {
+          semantic_id: 'soap_drain_holes',
+          decision: 'verified_compatible',
+          reason: 'Already present.',
+        },
+      ],
+    }).success,
+    false,
+  );
+});
+
 test('initial-design v2 schema permits only one full-model write', () => {
   const valid = InitialDesignToolPlanV2Schema.parse({
     schema_version: 2,

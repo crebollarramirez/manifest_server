@@ -4,6 +4,29 @@ The reasoner may use only the tools in this catalog. The tool executor validates
 every argument, applies the complete plan transactionally, and independently
 validates the resulting candidate.
 
+## `confirm_no_change`
+
+Confirms that the accepted source already satisfies the current edit request.
+This is an evidence-bearing, non-mutating operation, not a substitute for an
+edit when geometry must change.
+
+Arguments:
+
+- `reason`: concise explanation of why no source change is required;
+- `evidence`: one or more relevant current features, each with:
+  - `semantic_id`: exact stable ID from `existing_features`;
+  - `target_fingerprint`: exact `function_body_fingerprint` from that feature;
+  - `reason`: concrete source-level evidence showing how the feature already
+    implements the requested behavior.
+
+This tool is legal only for established edit workflows. It must be the plan's
+only operation and schema version 2 requires an empty `impact_review`. Evidence
+must cite current feature construction, parameter use, dimensions, placement,
+or assembly behavior; names, metadata, comments, docstrings, and the user's
+earlier wording are not sufficient by themselves. Never use this tool when the
+request is ambiguous, when geometric satisfaction cannot be established from
+the supplied source, or when any source operation is required.
+
 ## `write_initial_model`
 
 Writes the complete agent-owned body for an exact blank linked CAD part.

@@ -35,6 +35,23 @@ operation, then assemble it with `replace_build_model_body`. The new semantic
 ID may be modified with `replace_cad_feature_body` only in a later edit job,
 after it has been validated, committed, and appears in `existing_features`.
 
+## Already-satisfied requests
+
+If the accepted source already satisfies the requested edit, use exactly one
+`confirm_no_change` operation and set `impact_review` to an empty array. Do not
+invent a source modification merely to produce an edit operation.
+
+For every evidence entry, copy the exact semantic ID and function-body
+fingerprint from `existing_features` (`function_body_fingerprint` becomes the
+evidence `target_fingerprint`), then explain the concrete construction,
+parameter use, dimensions, placement, or assembly behavior in the supplied
+source that proves the request is already satisfied. Feature names, metadata,
+comments, docstrings, and conversational claims are not proof by themselves.
+
+Use `confirm_no_change` only when the conclusion is definite from the current
+source. If geometry needs to change, or satisfaction is uncertain or
+ambiguous, form the smallest sufficient edit plan instead.
+
 ## Established-feature modification
 
 When the requested feature's semantic ID exists in `existing_features`, use

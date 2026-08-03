@@ -3,11 +3,13 @@ import test from 'node:test';
 import {
   loadCadSystemPrompt,
   loadCadReasoningPrompt,
+  loadMeshSystemPrompt,
   loadServicePrompt,
 } from '../src/prompt-loader';
 import { shouldUseRepairPrompt } from '../src/reasoner.service';
 
 const TOOL_NAMES = [
+  'confirm_no_change',
   'write_initial_model',
   'replace_parameter_field',
   'update_cad_part_metadata',
@@ -28,6 +30,7 @@ test('loads separated style, tool, initialization, edit, and repair prompts from
   const initialization = loadServicePrompt('initialization');
   const editPlan = loadServicePrompt('edit-plan');
   const repair = loadServicePrompt('repair');
+  const mesh = loadMeshSystemPrompt();
 
   assert.match(contract, /CadQuery Source Style Contract/);
   assert.doesNotMatch(contract, /ToolPlan|Registered CAD Tools|original request/);
@@ -41,6 +44,7 @@ test('loads separated style, tool, initialization, edit, and repair prompts from
   assert.doesNotMatch(editPlan, /Arguments:/);
   assert.match(repair, /CAD Plan Repair/);
   assert.match(repair, /validator diagnostics/);
+  assert.match(mesh, /Blender Mesh Model Generation/);
 });
 
 test('composes workflow-specific normal and repair instructions', () => {

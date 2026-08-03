@@ -15,34 +15,7 @@ import type { Response } from 'express';
 import { CadAgentRepository } from './cad-agent.repository';
 import { SubmissionService } from './submission.service';
 import { WorkflowError } from './contracts';
-
-function publicJob(job: Record<string, unknown>) {
-  const allowed = [
-    'id',
-    'project_id',
-    'requested_part_id',
-    'workflow_mode',
-    'resolved_part_id',
-    'resolved_targets',
-    'status',
-    'state',
-    'attempt_count',
-    'max_attempts',
-    'validation_job_id',
-    'index_job_id',
-    'export_job_id',
-    'result',
-    'error_code',
-    'error_message',
-    'client_request_id',
-    'last_event_sequence',
-    'created_at',
-    'started_at',
-    'heartbeat_at',
-    'completed_at',
-  ];
-  return Object.fromEntries(allowed.filter((key) => key in job).map((key) => [key, job[key]]));
-}
+import { publicJob } from './public-job';
 
 function httpError(error: unknown): HttpException {
   if (error instanceof WorkflowError) {
@@ -107,4 +80,4 @@ export class CadEditsController {
   }
 }
 
-export { publicJob };
+export { publicJob } from './public-job';

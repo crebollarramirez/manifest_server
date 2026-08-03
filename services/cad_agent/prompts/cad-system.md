@@ -119,6 +119,15 @@ Decorator rules:
 ## Geometry practices
 
 - Prefer readable, stepwise CadQuery construction over dense fluent chains.
+- Build geometry as explicit constructive-solid-geometry stages with names that
+  reflect their purpose, such as `outer_body`, `inner_cavity`, `wall_ring`,
+  `cutters`, and `result`.
+- Match Boolean operations to geometric intent. Geometry named `cavity`,
+  `pocket`, `hole`, `slot`, or `cutters` normally removes material with
+  `.cut()`. Additive geometry such as bosses, ribs, walls, and supports normally
+  combines with `.union()`.
+- Never create an intended cavity by unioning its solid volume into the model.
+  Construct a wall ring directly or subtract an inner solid from an outer solid.
 - Place features relative to faces, workplanes, and existing geometry instead
   of relying on unrelated global coordinates.
 - Derive dependent placement from shared `ModelParams`, tagged anchors, or the
@@ -136,8 +145,41 @@ Decorator rules:
 - Apply fillets and chamfers near the end of the model unless an earlier
   operation is geometrically necessary.
 - Keep structural operations separate from finishing operations.
-- Use loops and small private helpers for repeated deterministic geometry.
+- For repeated point patterns, compute the complete point list first and call
+  `.pushPoints(points)` once. Do not accumulate a pattern through repeated
+  `.pushPoints()` calls.
+- Use loops and small private helpers for repeated deterministic geometry while
+  preserving the exact requested instance count.
+- Establish and preserve a clear coordinate and extrusion-direction convention
+  for the model. Before applying a Boolean operation, ensure the tool solid
+  overlaps the intended target volume rather than merely touching a coincident
+  face.
+- Extend cutting tools slightly beyond both sides of the material they must
+  remove. Use a small, dimensionally appropriate tolerance so holes, pockets,
+  and slots are not lost to coincident-face Boolean behavior.
+- Prefer `.hole()` or `.cutThruAll()` when the selected face, cutting direction,
+  and intended through-depth are unambiguous. Otherwise construct an explicit
+  cutter whose start, direction, and depth span the complete target thickness.
+- A requested through-hole or drainage opening must connect the intended
+  interior and exterior; it must not terminate as a blind or capped pocket.
+- Do not retain unused `ModelParams` fields. Keep parameter declarations,
+  feature references, and `cad_part.parameters` synchronized.
+- Do not conclude that geometry is correct merely because a semantic ID,
+  function name, variable name, docstring, or search key describes the requested
+  feature. Trace the actual CadQuery construction and Boolean result.
 - Keep source AST-friendly and straightforward to modify locally.
+
+Before returning authored source, review each semantic feature for geometric
+intent:
+
+1. confirm additive geometry uses material-producing operations and subtractive
+   geometry uses material-removing operations;
+2. confirm every Boolean operand occupies overlapping three-dimensional volume;
+3. confirm repeated features produce exactly the requested number of instances;
+4. confirm cavities remain empty and through-features span the full intended
+   thickness;
+5. confirm every declared parameter is used and every referenced parameter is
+   declared in the feature metadata.
 
 ## Assembly practices
 

@@ -1,8 +1,17 @@
 import { Injectable } from '@nestjs/common';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { EditJob, EditJobEvent, WorkflowError } from './contracts';
+import {
+  EditJob,
+  EditJobEvent,
+  PartRecord,
+  PartType,
+  ProjectRecord,
+  WorkflowError,
+} from './contracts';
 
 const STORAGE_BUCKET = '3dProjects';
+const STORAGE_PAGE_SIZE = 1000;
+const STORAGE_DELETE_BATCH_SIZE = 100;
 
 function requireEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -305,5 +314,287 @@ export class CadAgentRepository {
     });
     if (error) throw new Error(error.message);
     return scalar(data);
+  }
+
+  async projects(): Promise<ProjectRecord[]> {
+    const { data, error } = await this.client
+      .from('projects')
+      .select('id, project_name')
+      .order('project_name', { ascending: true });
+    if (error) throw new Error(`Could not list projects: ${error.message}`);
+    return (data ?? []) as ProjectRecord[];
+  }
+
+  async createProject(projectName: string): Promise<ProjectRecord> {
+    const { data, error } = await this.client
+      .from('projects')
+      .insert({ project_name: projectName })
+      .select('id, project_name')
+      .single();
+    if (error?.code === '23505') {
+      throw new WorkflowError('PROJECT_EXISTS', `A project named "${projectName}" already exists.`);
+    }
+    if (error || !data) {
+      throw new Error(`Could not create project: ${error?.message ?? 'missing row'}`);
+    }
+    return data as ProjectRecord;
+  }
+
+  async parts(projectId: string): Promise<PartRecord[]> {
+    const { data, error } = await this.client
+      .from('parts')
+      .select('id, project_id, part_name, part_type')
+      .eq('project_id', projectId)
+      .order('part_name', { ascending: true });
+    if (error) throw new Error(`Could not list parts: ${error.message}`);
+    return (data ?? []) as PartRecord[];
+  }
+
+  async partById(partId: string): Promise<PartRecord> {
+    const { data, error } = await this.client
+      .from('parts')
+      .select('id, project_id, part_name, part_type')
+      .eq('id', partId)
+      .maybeSingle();
+    if (error) throw new Error(`Part lookup failed: ${error.message}`);
+    if (!data) throw new WorkflowError('PART_NOT_FOUND', `No part was found with id "${partId}".`);
+    return data as PartRecord;
+  }
+
+  async createPart(input: {
+    projectId: string;
+    partName: string;
+    partType: PartType;
+  }): Promise<PartRecord> {
+    const { data, error } = await this.client
+      .from('parts')
+      .insert({
+        project_id: input.projectId,
+        part_name: input.partName,
+        part_type: input.partType,
+      })
+      .select('id, project_id, part_name, part_type')
+      .single();
+    if (error?.code === '23505') {
+      throw new WorkflowError(
+        'PART_EXISTS',
+        `A part named "${input.partName}" already exists in the linked project.`,
+      );
+    }
+    if (error?.code === '23503') {
+      throw new WorkflowError('PROJECT_NOT_FOUND', 'The linked project no longer exists.');
+    }
+    if (error || !data) {
+      throw new Error(`Could not create part: ${error?.message ?? 'missing row'}`);
+    }
+    return data as PartRecord;
+  }
+
+  async deleteProject(projectId: string): Promise<void> {
+    const { error } = await this.client.from('projects').delete().eq('id', projectId);
+    if (error) throw new Error(`Could not delete project: ${error.message}`);
+  }
+
+  async deletePart(partId: string): Promise<void> {
+    const { error } = await this.client.from('parts').delete().eq('id', partId);
+    if (error) throw new Error(`Could not delete part: ${error.message}`);
+  }
+
+  async uploadText(
+    path: string,
+    content: string,
+    contentType: string,
+    upsert: boolean,
+  ): Promise<void> {
+    const { error } = await this.client.storage
+      .from(STORAGE_BUCKET)
+      .upload(path, Buffer.from(content, 'utf8'), { contentType, upsert });
+    if (error) throw new Error(`Storage upload failed for ${path}: ${error.message}`);
+  }
+
+  async storageFiles(prefix: string): Promise<string[]> {
+    const files: string[] = [];
+    let offset = 0;
+    while (true) {
+      const { data, error } = await this.client.storage
+        .from(STORAGE_BUCKET)
+        .list(prefix, { limit: STORAGE_PAGE_SIZE, offset });
+      if (error) throw new Error(`Could not list Storage prefix ${prefix}: ${error.message}`);
+      const entries = data ?? [];
+      for (const entry of entries) {
+        const entryPath = `${prefix}/${entry.name}`;
+        if (entry.id === null || entry.metadata === null) {
+          files.push(...await this.storageFiles(entryPath));
+        } else {
+          files.push(entryPath);
+        }
+      }
+      if (entries.length < STORAGE_PAGE_SIZE) break;
+      offset += entries.length;
+    }
+    return files;
+  }
+
+  async deleteStoragePrefix(prefix: string): Promise<void> {
+    const files = await this.storageFiles(prefix);
+    for (let index = 0; index < files.length; index += STORAGE_DELETE_BATCH_SIZE) {
+      const { error } = await this.client.storage
+        .from(STORAGE_BUCKET)
+        .remove(files.slice(index, index + STORAGE_DELETE_BATCH_SIZE));
+      if (error) throw new Error(`Could not delete Storage prefix ${prefix}: ${error.message}`);
+    }
+  }
+
+  async queueGenerationJob(
+    part: PartRecord,
+    jobType: 'validate_cad' | 'export_cad' | 'export_mesh',
+    sourceSha256: string | null,
+  ): Promise<string> {
+    const { data, error } = await this.client
+      .from('generation_jobs')
+      .insert({
+        project_id: part.project_id,
+        part_id: part.id,
+        type: jobType,
+        status: 'queued',
+        source_sha256: sourceSha256,
+      })
+      .select('id')
+      .single();
+    if (error || !data?.id) {
+      throw new Error(`Could not queue ${jobType} job: ${error?.message ?? 'missing job id'}`);
+    }
+    return String(data.id);
+  }
+
+  async queueStandaloneIndexJob(
+    projectId: string,
+    jobType: 'build_index' | 'test_getter',
+    requestText: string | null = null,
+  ): Promise<{ id: string; status: string }> {
+    const { data, error } = await this.client
+      .from('index_jobs')
+      .insert({
+        project_id: projectId,
+        type: jobType,
+        request_text: requestText,
+        status: 'queued',
+      })
+      .select('id, status')
+      .single();
+    if (!error && data?.id) return { id: String(data.id), status: String(data.status) };
+    if (jobType === 'build_index' && error?.code === '23505') {
+      const { data: existing, error: lookupError } = await this.client
+        .from('index_jobs')
+        .select('id, status')
+        .eq('project_id', projectId)
+        .eq('type', 'build_index')
+        .in('status', ['queued', 'running'])
+        .order('created_at', { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      if (!lookupError && existing?.id) {
+        return { id: String(existing.id), status: String(existing.status) };
+      }
+      throw new Error(`Could not resolve active index job: ${lookupError?.message ?? 'missing job'}`);
+    }
+    throw new Error(`Could not queue ${jobType} job: ${error?.message ?? 'missing job id'}`);
+  }
+
+  async indexJobInProject(projectId: string, jobId: string): Promise<Record<string, unknown>> {
+    const { data, error } = await this.client
+      .from('index_jobs')
+      .select('id, project_id, type, request_text, status, result, error_message, created_at, started_at, completed_at')
+      .eq('project_id', projectId)
+      .eq('id', jobId)
+      .maybeSingle();
+    if (error) throw new Error(`Could not inspect index job: ${error.message}`);
+    if (!data) throw new WorkflowError('INDEX_JOB_NOT_FOUND', `No index job was found with id "${jobId}".`);
+    return data;
+  }
+
+  async hasCadParts(projectId: string): Promise<boolean> {
+    const { data, error } = await this.client
+      .from('parts')
+      .select('id')
+      .eq('project_id', projectId)
+      .eq('part_type', 'cad')
+      .limit(1);
+    if (error) throw new Error(`Could not inspect project CAD parts: ${error.message}`);
+    return Boolean(data?.length);
+  }
+
+  async hasRunningGenerationJobs(projectId: string, partId?: string): Promise<boolean> {
+    let query = this.client
+      .from('generation_jobs')
+      .select('id')
+      .eq('project_id', projectId)
+      .eq('status', 'running')
+      .limit(1);
+    if (partId) query = query.eq('part_id', partId);
+    const { data, error } = await query;
+    if (error) throw new Error(`Could not inspect running export jobs: ${error.message}`);
+    return Boolean(data?.length);
+  }
+
+  async cancelQueuedGenerationJobs(projectId: string, partId?: string): Promise<void> {
+    let query = this.client
+      .from('generation_jobs')
+      .update({ status: 'cancelled' })
+      .eq('project_id', projectId)
+      .eq('status', 'queued');
+    if (partId) query = query.eq('part_id', partId);
+    const { error } = await query;
+    if (error) throw new Error(`Could not cancel queued export jobs: ${error.message}`);
+  }
+
+  async hasRunningIndexJobs(projectId: string): Promise<boolean> {
+    const { data, error } = await this.client
+      .from('index_jobs')
+      .select('id')
+      .eq('project_id', projectId)
+      .eq('status', 'running')
+      .limit(1);
+    if (error) throw new Error(`Could not inspect running index jobs: ${error.message}`);
+    return Boolean(data?.length);
+  }
+
+  async cancelQueuedIndexJobs(projectId: string): Promise<void> {
+    const { error } = await this.client
+      .from('index_jobs')
+      .update({ status: 'cancelled', completed_at: new Date().toISOString() })
+      .eq('project_id', projectId)
+      .eq('status', 'queued');
+    if (error) throw new Error(`Could not cancel queued index jobs: ${error.message}`);
+  }
+
+  async hasRunningEditJobs(projectId: string, partId?: string): Promise<boolean> {
+    let query = this.client
+      .from('edit_jobs')
+      .select('id')
+      .eq('project_id', projectId)
+      .eq('status', 'running')
+      .limit(1);
+    if (partId) query = query.or(`resolved_part_id.is.null,resolved_part_id.eq.${partId}`);
+    const { data, error } = await query;
+    if (error) throw new Error(`Could not inspect running edit jobs: ${error.message}`);
+    return Boolean(data?.length);
+  }
+
+  async cancelQueuedEditJobs(projectId: string, partId?: string): Promise<void> {
+    let query = this.client
+      .from('edit_jobs')
+      .update({
+        status: 'cancelled',
+        state: 'cancelled',
+        error_code: 'CANCELLED_FOR_DELETION',
+        error_message: 'The edit was cancelled because its project or part was deleted.',
+        completed_at: new Date().toISOString(),
+      })
+      .eq('project_id', projectId)
+      .eq('status', 'queued');
+    if (partId) query = query.or(`resolved_part_id.is.null,resolved_part_id.eq.${partId}`);
+    const { error } = await query;
+    if (error) throw new Error(`Could not cancel queued edit jobs: ${error.message}`);
   }
 }

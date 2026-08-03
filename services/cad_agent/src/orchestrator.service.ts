@@ -30,6 +30,7 @@ const DEBUG_TOOL_NAMES: Record<string, string> = {
   delete_model_parameter: 'delete_param',
   delete_private_helper: 'delete_helper',
   delete_cad_feature: 'delete_feature',
+  confirm_no_change: 'no_change',
 };
 
 function record(value: unknown): Record<string, unknown> {
@@ -66,11 +67,15 @@ export function planOperationDebug(plan: ToolPlan): {
 } {
   const operations = plan.operations.map((operation, offset) => {
     const value = operation as unknown as Record<string, unknown>;
+    const firstEvidence = Array.isArray(value.evidence)
+      ? record(value.evidence[0])
+      : {};
     const rawTarget = String(
       value.semantic_id ??
         value.name ??
         value.function_name ??
         value.target_id ??
+        firstEvidence.semantic_id ??
         '',
     );
     const target = rawTarget
@@ -427,9 +432,19 @@ export class OrchestratorService implements OnModuleInit, OnModuleDestroy {
       },
     );
     const result = await this.waitForTool(job, existing, 'CAD tool execution');
+    const confirmedNoChange =
+      result.outcome === 'no_change' &&
+      plan.operations.length === 1 &&
+      plan.operations[0]?.tool === 'confirm_no_change' &&
+      result.base_source_sha256 === plan.base_source_sha256 &&
+      Array.isArray(result.evidence) &&
+      result.evidence.length > 0;
+    const validCandidate =
+      /^[0-9a-f]{64}$/.test(String(result.candidate_sha256 ?? '')) &&
+      String(result.candidate_path ?? '').endsWith('/model.py');
     if (
-      !/^[0-9a-f]{64}$/.test(String(result.candidate_sha256 ?? '')) ||
-      !String(result.candidate_path ?? '').endsWith('/model.py')
+      (result.outcome === 'no_change' && !confirmedNoChange) ||
+      (result.outcome !== 'no_change' && !validCandidate)
     ) {
       throw new WorkflowError('INVALID_TOOL_RESULT', 'CAD tool execution returned no valid candidate proof.');
     }
@@ -437,10 +452,13 @@ export class OrchestratorService implements OnModuleInit, OnModuleDestroy {
       job.id,
       'tools.completed',
       applyState,
-      `Applied ${plan.operations.length} CAD operation${plan.operations.length === 1 ? '' : 's'}.`,
+      confirmedNoChange
+        ? 'Confirmed that the accepted CAD source already satisfies the request.'
+        : `Applied ${plan.operations.length} CAD operation${plan.operations.length === 1 ? '' : 's'}.`,
       {
         attempt,
         tool_job_id: existing.id,
+        outcome: result.outcome ?? 'changed',
         changed_symbols: result.changed_symbols,
         normalization_notes: result.normalization_notes ?? [],
       },
@@ -770,6 +788,34 @@ export class OrchestratorService implements OnModuleInit, OnModuleDestroy {
       }
       latestPlan = applied.plan;
       latestCandidate = applied.result;
+      if (latestCandidate.outcome === 'no_change') {
+        job = await this.repository.patchEditJob(
+          job.id,
+          { attempt_count: Math.max(job.attempt_count, attempt) },
+          this.workerId,
+        );
+        return {
+          schema_version: 1,
+          status: 'completed',
+          outcome: 'no_change',
+          message: latestPlan.summary,
+          attempts: job.attempt_count,
+          resolved_target: {
+            part_id: String(job.resolved_part_id),
+            semantic_ids: Array.isArray(latestCandidate.semantic_ids)
+              ? latestCandidate.semantic_ids
+              : [],
+          },
+          changed_files: [],
+          changed_symbols: [],
+          source_sha256: latestCandidate.base_source_sha256,
+          validation_result: null,
+          index_job_id: null,
+          export_job_id: null,
+          evidence: latestCandidate.evidence,
+          warnings: [],
+        };
+      }
       const validation = await this.validateCandidate(job, latestCandidate, attempt);
       job = await this.repository.editJob(job.id);
       if (

@@ -253,7 +253,7 @@ test("accepts strict node details and rejects unknown detail fields", () => {
       observability: ["Request duration."],
     },
     evidence: [{
-      path: "supabase/functions/cad-agent/index.ts",
+      path: "services/cad_agent/src/cad-actions.service.ts",
       symbol: "handler",
       kind: "source",
     }],
@@ -327,7 +327,7 @@ test("validates strict semantic edge details", () => {
     operation: "enqueue_index",
     durability: "The row is durable after commit.",
     evidence: [{
-      path: "supabase/functions/cad-agent/index.ts",
+      path: "services/cad_agent/src/cad-actions.service.ts",
       kind: "source",
     }],
   };

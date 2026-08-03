@@ -12,7 +12,7 @@ import { cadAgentActions } from '../data/cad-agent-actions';
 import '../styles/service-docs.css';
 
 const glance = [
-	{ label: 'Top API layer', value: 'Supabase cad-agent actions plus NestJS CAD edit HTTP/WebSocket endpoints' },
+	{ label: 'Top API layer', value: 'NestJS CAD Agent actions plus CAD edit HTTP/WebSocket endpoints' },
 	{ label: 'Interfaces', value: 'POST JSON actions, direct CAD-edit REST, durable status, and replayable WebSocket progress' },
 	{ label: 'Durable work', value: 'Postgres index, generation, edit, CAD-tool, and edit-progress records' },
 	{ label: 'Microservices', value: 'Nest CAD Agent, Python CAD tools, Indexer, CAD Validator, and CAD Exporter' },
@@ -51,22 +51,22 @@ const guarantees = [
 	{
 		title: 'Worker work is durable before response',
 		description: 'Indexing, Getter tests, validation, export, and CAD editing are represented by Postgres job rows before the HTTP response returns.',
-		evidence: 'supabase/functions/cad-agent/index.ts — queueGenerationJob / queueIndexJob / queueEditJob',
+		evidence: 'services/cad_agent/src/cad-actions.service.ts — exportPart / indexProject / chat',
 	},
 	{
 		title: 'CAD and mesh chat use different paths',
-		description: 'CAD chat enters the durable Nest-orchestrated tool workflow through an idempotent database contract. Linked mesh chat continues to call OpenAI directly in the Edge Function.',
-		evidence: 'supabase/functions/cad-agent/index.ts — handleChat / queueEditJob',
+		description: 'CAD chat enters the durable Nest-orchestrated tool workflow through an idempotent database contract. Linked mesh chat calls OpenAI synchronously inside the Nest service.',
+		evidence: 'services/cad_agent/src/cad-actions.service.ts and mesh-generation.service.ts',
 	},
 	{
 		title: 'Manual CAD work is source-bound',
-		description: 'Before inserting validate_cad or export_cad work, the function downloads canonical model.py and records its SHA-256.',
-		evidence: 'supabase/functions/cad-agent/index.ts — currentCadSourceSha256',
+		description: 'Before inserting validate_cad or export_cad work, Nest downloads canonical model.py and records its SHA-256.',
+		evidence: 'services/cad_agent/src/cad-actions.service.ts — currentCadSourceSha256',
 	},
 	{
 		title: 'Deletion checks running work twice',
 		description: 'Queued work is cancelled only after an initial running-job check, followed by another check to catch work that started during preparation.',
-		evidence: 'supabase/functions/cad-agent/index.ts — prepareForDeletion',
+		evidence: 'services/cad_agent/src/cad-actions.service.ts — prepareForDeletion',
 	},
 	{
 		title: 'CAD progress is replayable',
@@ -79,13 +79,13 @@ const failures = [
 	{
 		condition: 'Method is not POST',
 		durableOutcome: 'No data is changed.',
-		runtime: 'The function returns HTTP 405.',
+		runtime: 'Nest does not route the request to the POST action controller.',
 		downstream: 'No action handler runs.',
 	},
 	{
 		condition: 'Invalid body, action, name, UUID, or operation',
 		durableOutcome: 'No later handler effect runs after validation fails.',
-		runtime: 'RequestError returns HTTP 400, 404, or 409.',
+		runtime: 'The action controller returns HTTP 400, 404, or 409.',
 		downstream: 'The caller receives a JSON error.',
 	},
 	{
@@ -103,7 +103,7 @@ const failures = [
 	{
 		condition: 'Deletion finds applicable running work',
 		durableOutcome: 'Project, part, and stored files remain.',
-		runtime: 'The function returns HTTP 409 before deletion.',
+		runtime: 'The action API returns HTTP 409 before deletion.',
 		downstream: 'Retry after the work reaches a terminal state.',
 	},
 	{
@@ -129,7 +129,7 @@ const failures = [
 	document={backendSystem}
 	fallback="Loading the backend system design diagram…"
 	showExampleNotice={false}
-	sidebarNote="Backend overview: Edge Function actions, NestJS CAD orchestration and WebSockets, durable jobs, local Supabase, and independent workers."
+	sidebarNote="Backend overview: NestJS actions, CAD orchestration and WebSockets, durable jobs, local Supabase, and independent workers."
 	diagramFirst={true}
 >
 	<div slot="beforeDiagram" class="backend-overview">
@@ -137,22 +137,21 @@ const failures = [
 
 		<article class="doc-prose">
 			<h2>Backend boundary</h2>
-			<p>The Supabase <code>cad-agent</code> Edge Function remains the action-based boundary for projects, parts, explicit job creation, status, deletion, blank CAD initialization, and direct linked-mesh generation. CAD chat uses the shared idempotent edit-submission RPC, so existing clients remain compatible.</p>
-			<p><code>services/cad_agent/</code> is the long-running NestJS CAD edit control plane. It also accepts direct HTTP or WebSocket submissions, owns OpenAI tool planning and orchestration, and exposes replayable progress. Python CAD tools, Indexer, CAD Validator, and CAD Exporter consume durable Postgres work; none is a synchronous Edge Function callee.</p>
+			<p><code>services/cad_agent/</code> is the sole CAD Agent API runtime. Its action endpoint owns projects, parts, explicit job creation, status, deletion, blank CAD initialization, and linked-mesh generation, while its CAD-edit REST and WebSocket endpoints provide durable submissions and replayable progress.</p>
+			<p>The same Nest process owns OpenAI planning and durable CAD orchestration. Python CAD tools, Indexer, CAD Validator, and CAD Exporter consume durable Postgres work rather than serving as synchronous HTTP callees.</p>
 		</article>
 
 		<aside class="notice notice--caution">
 			<span class="notice__mark" aria-hidden="true">!</span>
 			<div>
 				<h2>Current access boundary</h2>
-				<p><code>supabase/config.toml</code> sets <code>verify_jwt = false</code> for <code>cad-agent</code>. The function creates a service-role Supabase client. Authentication hardening is an explicit production concern.</p>
+				<p>The Nest action endpoint currently has no authentication and its repository uses the Supabase service role. Bind it to a trusted network until API authentication is added.</p>
 			</div>
 		</aside>
 
 		<BoundaryMatrix
 			owns={[
-				'Edge Function: action validation, project/part operations, compatible durable submissions, status, deletion, initialization, and direct mesh generation.',
-				'Nest CAD Agent: direct edit submission, idempotency, OpenAI tool planning, durable orchestration, WebSocket replay, guarded commit, and downstream handoffs.',
+				'Nest CAD Agent: action validation, project/part operations, linked-mesh generation, direct edit submission, idempotency, OpenAI planning, durable orchestration, WebSocket replay, guarded commit, and downstream handoffs.',
 				'Python CAD tools: bounded context and transactional AST/source mutation against isolated candidates.',
 			]}
 			doesNotOwn={[
@@ -177,7 +176,7 @@ const failures = [
 			<header class="runbook__header">
 				<p class="section-eyebrow">Local operations</p>
 				<h2 id="local-runbook-title">Run the complete backend</h2>
-				<p>Run every command from the repository root. Start Supabase before the Edge Function or worker containers.</p>
+				<p>Run every command from the repository root. Start Supabase before the Nest service or worker containers.</p>
 			</header>
 
 			<section class="runbook__section">
@@ -203,16 +202,7 @@ const failures = [
 			</section>
 
 			<section class="runbook__section">
-				<h3>2. Serve the Edge Function</h3>
-				<p>Leave this running in its own terminal. Local Supabase supplies its URL and service-role context; <code>supabase/functions/.env</code> supplies the OpenAI secret used by linked-mesh chat.</p>
-				<CommandBlock label="Serve cad-agent" command="supabase functions serve cad-agent --env-file supabase/functions/.env" />
-				<CommandBlock label="supabase/functions/.env" command={`OPENAI_API_KEY=replace-with-openai-key
-# Optional
-OPENAI_MODEL=gpt-5.4-mini`} />
-			</section>
-
-			<section class="runbook__section">
-				<h3>3. Configure worker environments</h3>
+				<h3>2. Configure worker environments</h3>
 				<p>Copy the service-role key printed by <code>supabase status</code> into each worker&rsquo;s own <code>.env</code>. The Docker URL and timing controls shown below are optional defaults.</p>
 				<div class="runbook__env-grid">
 					<div>
@@ -255,7 +245,7 @@ CAD_TOOL_LEASE_SECONDS=300`} />
 			</section>
 
 			<section class="runbook__section">
-				<h3>4. Start the NestJS server directly</h3>
+				<h3>3. Start the NestJS server directly</h3>
 				<p>Use this development path when you want to run the NestJS CAD Agent from source. Create the environment file at <code>services/cad_agent/.env</code> (not inside <code>src/</code>), then run it in its own terminal after Supabase is running. Do not also start the Nest service through Docker Compose.</p>
 				<CommandBlock label="services/cad_agent/.env" command={`SUPABASE_URL=http://127.0.0.1:54321
 SUPABASE_SERVICE_ROLE_KEY=replace-with-local-service-role-key
@@ -267,11 +257,11 @@ CAD_AGENT_PORT=3010`} />
 				<CommandBlock label="Install locked dependencies" command="npm ci" />
 				<CommandBlock label="Start Nest in watch mode" command="npm run start:dev" />
 				<CommandBlock label="Build and start production mode" command={['npm run build', 'npm run start'].join('\n')} />
-				<p>The server listens on <code>http://127.0.0.1:3010</code> by default. CAD clients use <code>POST /v1/cad-edits</code>, status uses <code>GET /v1/cad-edits/:jobId</code>, and live progress uses <code>ws://127.0.0.1:3010/v1/cad-edits/ws</code>.</p>
+				<p>The server listens on <code>http://127.0.0.1:3010</code> by default. Compatibility actions use <code>POST /v1/cad-agent/actions</code>, CAD clients may submit directly to <code>POST /v1/cad-edits</code>, status uses <code>GET /v1/cad-edits/:jobId</code>, and live progress uses <code>ws://127.0.0.1:3010/v1/cad-edits/ws</code>.</p>
 			</section>
 
 			<section class="runbook__section">
-				<h3>5. Start all worker containers</h3>
+				<h3>4. Start all worker containers</h3>
 				<p>This detached sequence builds and starts all four microservices. Each Compose project remains independently restartable and inspectable.</p>
 				<CommandBlock label="Start every worker" command={`docker compose --env-file workers/indexer/.env -f workers/indexer/docker-compose.yml up --build -d &&
 docker compose --env-file workers/cad_validator/.env -f workers/cad_validator/docker-compose.yml up --build -d &&
@@ -308,10 +298,11 @@ docker compose -f workers/indexer/docker-compose.yml down`} />
 			</section>
 
 			<section class="runbook__section">
-				<h3>6. Optional terminal client</h3>
-				<p>The CLI submits action requests through the local Edge Function, then automatically follows CAD edit progress over the Nest WebSocket. Pressing Ctrl-C disconnects the live view without cancelling the durable job.</p>
-				<CommandBlock label="Repository .env" command={`SUPABASE_URL=http://127.0.0.1:54321
-SUPABASE_ANON_KEY=replace-with-local-anon-key
+				<h3>5. Optional terminal client</h3>
+				<p>The CLI calls Nest directly, automatically links the first alphabetically listed project, and follows CAD edit progress with bounded sequence-resuming reconnects. If no project exists, it starts in unlinked mode.</p>
+				<CommandBlock label="Repository .env" command={`CAD_AGENT_HTTP_URL=http://127.0.0.1:3010
+# Optional overrides
+CAD_AGENT_HTTP_TIMEOUT_SECONDS=120
 CAD_AGENT_WS_URL=ws://127.0.0.1:3010/v1/cad-edits/ws`} />
 				<CommandBlock label="Install CLI dependencies" command="python -m pip install -r requirements.txt" />
 				<CommandBlock label="Start CLI" command="python cad_agent_cli.py" />

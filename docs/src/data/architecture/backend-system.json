@@ -1,7 +1,7 @@
 {
   "id": "backend-system-overview",
   "title": "Backend System Design Overview",
-  "summary": "The top backend layer: a Supabase Edge Function manages action-based resources and compatibility submissions, while the NestJS CAD Agent owns CAD-edit orchestration and replayable live progress.",
+  "summary": "The NestJS CAD Agent is the sole backend API runtime for action-based resources, compatible submissions, CAD-edit orchestration, and replayable live progress.",
   "scope": "system",
   "direction": "RIGHT",
   "nodes": [
@@ -29,8 +29,8 @@
     },
     {
       "id": "cad-agent",
-      "label": "cad-agent",
-      "description": "The current Supabase Edge Function and top-level backend API for project, part, job, status, deletion, and chat actions.",
+      "label": "NestJS Action API",
+      "description": "The NestJS compatibility endpoint for project, part, job, status, deletion, and chat actions.",
       "type": "api",
       "icon": "api",
       "position": { "column": 1, "row": 1 },
@@ -38,12 +38,12 @@
       "details": {
         "responsibility": "Validate one action-based POST request, run its request-scoped orchestration, and return a JSON response.",
         "ownedBy": "Manifest backend",
-        "runsIn": "Supabase Deno Edge Runtime",
-        "trigger": ["An HTTP POST request reaches the cad-agent function."],
+        "runsIn": "services/cad_agent",
+        "trigger": ["An HTTP POST request reaches /v1/cad-agent/actions."],
         "preconditions": [
           "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be configured.",
           "OPENAI_API_KEY is required only for direct mesh chat generation.",
-          "Gateway JWT verification is currently disabled for this function."
+          "The endpoint is currently unauthenticated and must remain on a trusted network."
         ],
         "inputs": [
           { "name": "action request", "description": "One of 15 supported actions plus action-specific names, UUIDs, messages, or request text." }
@@ -54,18 +54,18 @@
         "decisionPoints": [
           "Project and part actions perform direct catalog CRUD and storage lifecycle work.",
           "CAD part creation initializes blank source and also queues build_index; explicit index, validation, export, and CAD chat actions create durable database jobs and return immediately.",
-          "Mesh chat is the only path that calls OpenAI and replaces model.py directly in this function."
+          "Mesh chat is the only action path that calls OpenAI synchronously and replaces model.py directly."
         ],
         "shortCircuit": "Non-POST requests return 405; invalid bodies, actions, names, UUIDs, or unsupported part operations return request errors before the handler completes.",
         "operations": {
-          "concurrency": "The Edge Runtime may execute independent requests concurrently; the function keeps no process-local workflow state.",
+          "concurrency": "Nest may execute independent requests concurrently; durable workflow state remains in Postgres and Storage.",
           "retry": "No request-level retry is implemented. Active build-index insertion can resolve and return an existing queued/running job after a uniqueness conflict.",
           "observability": ["HTTP status and JSON error message", "returned project/part/job IDs", "durable job state read through status actions"],
           "controls": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "OPENAI_API_KEY", "OPENAI_MODEL"]
         },
         "evidence": [
-          { "path": "supabase/functions/cad-agent/index.ts", "symbol": "Deno.serve / handlers", "kind": "source" },
-          { "path": "supabase/config.toml", "symbol": "functions.cad-agent", "kind": "configuration" }
+          { "path": "services/cad_agent/src/cad-actions.controller.ts", "symbol": "CadActionsController", "kind": "source" },
+          { "path": "services/cad_agent/src/cad-actions.service.ts", "symbol": "CadActionsService", "kind": "source" }
         ]
       }
     },
@@ -115,7 +115,7 @@
         "durableWrites": ["project insert/delete", "part insert/delete"],
         "evidence": [
           { "path": "supabase/migrations/20260712000000_create_generation_jobs.sql", "symbol": "projects / parts", "kind": "migration" },
-          { "path": "supabase/functions/cad-agent/index.ts", "symbol": "handleCreateProject / handleCreatePart / handleDeleteProject / handleDeletePart", "kind": "source" }
+          { "path": "services/cad_agent/src/cad-actions.service.ts", "symbol": "createProject / createPart / deleteProject / deletePart", "kind": "source" }
         ]
       }
     },
@@ -141,9 +141,9 @@
           { "name": "status record", "description": "Selected index or edit job fields safe for the API response." }
         ],
         "durableWrites": ["automatic build_index row during CAD part creation", "idempotent CAD edit submission", "bounded Python tool handoff", "ordered public progress", "explicitly queued worker rows", "queued-job cancellation during deletion preparation"],
-        "downstream": ["Independent workers claim these rows outside the Edge Function layer."],
+        "downstream": ["Independent workers claim these rows outside the Nest request lifecycle."],
         "evidence": [
-          { "path": "supabase/functions/cad-agent/index.ts", "symbol": "queueGenerationJob / queueIndexJob / queueEditJob", "kind": "source" },
+          { "path": "services/cad_agent/src/cad-agent.repository.ts", "symbol": "queueGenerationJob / queueStandaloneIndexJob / submitEditJob", "kind": "source" },
           { "path": "supabase/migrations/20260724000000_add_index_jobs.sql", "symbol": "index_jobs", "kind": "migration" },
           { "path": "supabase/migrations/20260725000000_add_cad_edit_workflow.sql", "symbol": "edit_jobs", "kind": "migration" },
           { "path": "supabase/migrations/20260726000000_add_initial_cad_design.sql", "symbol": "workflow_mode", "kind": "migration" },
@@ -172,7 +172,7 @@
           { "condition": "A later cross-resource step fails", "outcome": "Database and storage changes are not covered by one transaction." }
         ],
         "evidence": [
-          { "path": "supabase/functions/cad-agent/index.ts", "symbol": "createPartFiles / uploadText / deleteStoragePrefix", "kind": "source" }
+          { "path": "services/cad_agent/src/cad-actions.service.ts", "symbol": "createPart / deletePart / deleteProject", "kind": "source" }
         ]
       }
     },
@@ -189,18 +189,18 @@
         "responsibility": "Return either a strict generated_code mesh body or a strict versioned CAD ToolPlan, depending on the initiating service.",
         "ownedBy": "OpenAI",
         "inputs": [
-          { "name": "bounded generation context", "description": "Mesh source for the Edge path, or bounded CAD source targets and diagnostics for the Nest reasoner." }
+          { "name": "bounded generation context", "description": "Mesh source for the synchronous action path, or bounded CAD source targets and diagnostics for the Nest reasoner." }
         ],
         "outputs": [
           { "name": "structured output", "description": "A strict mesh generated_code response or registered CAD tool_plan_v1." }
         ],
         "shortCircuit": "Refusal or invalid structured output fails before mesh storage replacement or CAD candidate mutation.",
         "operations": {
-          "retry": "No Edge Function retry is implemented.",
+          "retry": "No synchronous mesh-generation retry is implemented.",
           "controls": ["OPENAI_MODEL defaults to gpt-5.4-mini."]
         },
         "evidence": [
-          { "path": "supabase/functions/cad-agent/index.ts", "symbol": "handleChat / RESPONSE_SCHEMA", "kind": "source" },
+          { "path": "services/cad_agent/src/mesh-generation.service.ts", "symbol": "MeshGenerationService / RESPONSE_SCHEMA", "kind": "source" },
           { "path": "services/cad_agent/src/reasoner.service.ts", "symbol": "ReasonerService", "kind": "source" }
         ]
       }
@@ -231,8 +231,8 @@
         "failureBehavior": "RequestError responses preserve their 400, 404, or 409 status; other errors return 500 with a JSON error field.",
         "trustBoundary": "Supabase gateway JWT verification is disabled in config; the function itself creates a service-role Supabase client for every accepted request.",
         "evidence": [
-          { "path": "supabase/functions/cad-agent/index.ts", "symbol": "Deno.serve / requestAction", "kind": "source" },
-          { "path": "supabase/config.toml", "symbol": "functions.cad-agent.verify_jwt", "kind": "configuration" }
+          { "path": "services/cad_agent/src/cad-actions.controller.ts", "symbol": "CadActionsController.execute", "kind": "source" },
+          { "path": "services/cad_agent/src/contracts.ts", "symbol": "CadAgentActionSchema", "kind": "source" }
         ]
       }
     },
@@ -255,7 +255,7 @@
         "exampleBody": "{\"event\":\"progress\",\"sequence\":5,\"type\":\"validating\",\"message\":\"Validating candidate attempt 1.\"}"
       },
       "details": {
-        "summary": "Clients may submit directly to Nest or keep using the Edge compatibility action; both create the same durable edit_jobs workflow.",
+        "summary": "Clients may submit through the Nest compatibility action or direct CAD-edit endpoint; both create the same durable edit_jobs workflow.",
         "durability": "The job and progress events remain queryable after a disconnect.",
         "evidence": [
           { "path": "services/cad_agent/src/cad-edits.controller.ts", "symbol": "CadEditsController", "kind": "source" },
@@ -282,10 +282,10 @@
         "exampleBody": "{\"id\":\"part-uuid\",\"project_id\":\"project-uuid\",\"part_name\":\"Bracket\",\"part_type\":\"cad\"}"
       },
       "details": {
-        "summary": "The Edge Function initiates every catalog read and write.",
+        "summary": "The Nest action service initiates every catalog read and write.",
         "failureBehavior": "Duplicate names return 409 and missing resources return 404; backend query errors become HTTP 500.",
         "evidence": [
-          { "path": "supabase/functions/cad-agent/index.ts", "symbol": "handleCreateProject / handleCreatePart / handleListProjects / handleListParts", "kind": "source" }
+          { "path": "services/cad_agent/src/cad-actions.service.ts", "symbol": "createProject / createPart / listProjects / listParts", "kind": "source" }
         ]
       }
     },
@@ -308,11 +308,11 @@
         "exampleBody": "{\"id\":\"job-uuid\",\"status\":\"queued\"}"
       },
       "details": {
-        "summary": "The Edge Function creates durable handoffs and reads their state; it does not synchronously invoke a worker.",
+        "summary": "The Nest action service creates durable handoffs and reads their state; it does not synchronously invoke a worker.",
         "durability": "Accepted index, validation, export, Getter-test, and CAD-edit actions remain represented by database rows after the HTTP response.",
         "failureBehavior": "Most failed inserts or lookups fail the request. If only automatic indexing fails after CAD creation, the part remains and the response reports index_status=not_queued with a manual /index warning. Deletion preparation cancels queued rows but blocks while applicable work is running.",
         "evidence": [
-          { "path": "supabase/functions/cad-agent/index.ts", "symbol": "queueGenerationJob / queueIndexJob / queueEditJob / prepareForDeletion", "kind": "source" }
+          { "path": "services/cad_agent/src/cad-actions.service.ts", "symbol": "exportPart / indexProject / chat / prepareForDeletion", "kind": "source" }
         ]
       }
     },
@@ -385,12 +385,12 @@
         "exampleBody": "{\"success\":true}"
       },
       "details": {
-        "summary": "The Edge Function initiates every storage operation; storage never initiates a request.",
+        "summary": "The Nest action service initiates every storage operation; storage never initiates a request.",
         "operation": "Create blank CAD or mesh starter files, detect an exact blank CAD source for initial design, hash accepted CAD source, read/replace mesh source, and recursively remove project or part prefixes.",
         "durability": "Mesh chat replaces model.py before its export job insert. Those two effects are not atomic.",
         "failureBehavior": "A storage error fails the request. Part creation attempts compensating storage and database cleanup.",
         "evidence": [
-          { "path": "supabase/functions/cad-agent/index.ts", "symbol": "uploadText / downloadModelSource / deleteStoragePrefix", "kind": "source" }
+          { "path": "services/cad_agent/src/cad-agent.repository.ts", "symbol": "uploadText / readText / deleteStoragePrefix", "kind": "source" }
         ]
       }
     },
@@ -417,17 +417,17 @@
         "trustBoundary": "Current mesh model.py and recent conversation cross to the external API.",
         "failureBehavior": "Any API or response-contract failure returns HTTP 500 and leaves model.py unchanged.",
         "evidence": [
-          { "path": "supabase/functions/cad-agent/index.ts", "symbol": "handleChat / buildResponseInput / generatedModelBody", "kind": "source" }
+          { "path": "services/cad_agent/src/mesh-generation.service.ts", "symbol": "generate / generatedMeshModelBody", "kind": "source" }
         ]
       }
     }
   ],
   "boundaries": [
     {
-      "id": "edge-function-layer",
-      "label": "Supabase Edge Functions",
+      "id": "action-api-layer",
+      "label": "NestJS Action API",
       "kind": "service",
-      "description": "The current top backend layer contains one deployed request-scoped function.",
+      "description": "The compatibility action controller and services run inside the CAD Agent process.",
       "nodeIds": ["cad-agent"]
     },
     {

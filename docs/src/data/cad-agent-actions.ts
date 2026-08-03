@@ -22,7 +22,7 @@ export const cadAgentActions: CadAgentAction[] = [
       project_name: "Desk Mount",
     }, null, 2),
     responseExample: JSON.stringify({
-      message: 'Created and linked project "Desk Mount".',
+      message: `Created and linked project "Desk Mount" (id=${projectId}).`,
       status: "created",
       project: { id: projectId, project_name: "Desk Mount" },
     }, null, 2),
@@ -30,13 +30,13 @@ export const cadAgentActions: CadAgentAction[] = [
   {
     action: "link_project",
     category: "Projects",
-    description: "Finds one existing project by name and returns the record for client-side linking.",
+    description: "Finds one existing project by durable ID and returns the record for client-side linking.",
     requestExample: JSON.stringify({
       action: "link_project",
-      project_name: "Desk Mount",
+      project_id: projectId,
     }, null, 2),
     responseExample: JSON.stringify({
-      message: 'Linked project "Desk Mount".',
+      message: `Linked project "Desk Mount" (id=${projectId}).`,
       status: "linked",
       project: { id: projectId, project_name: "Desk Mount" },
     }, null, 2),
@@ -47,7 +47,7 @@ export const cadAgentActions: CadAgentAction[] = [
     description: "Lists every project ordered by project name.",
     requestExample: JSON.stringify({ action: "list_projects" }, null, 2),
     responseExample: JSON.stringify({
-      message: "Projects:\n- Desk Mount",
+      message: `Projects:\n- Desk Mount id=${projectId}`,
       status: "listed",
       projects: [{ id: projectId, project_name: "Desk Mount" }],
     }, null, 2),
@@ -58,10 +58,10 @@ export const cadAgentActions: CadAgentAction[] = [
     description: "Cancels applicable queued work, blocks on running work, removes the project storage prefix, and deletes the project row.",
     requestExample: JSON.stringify({
       action: "delete_project",
-      project_name: "Desk Mount",
+      project_id: projectId,
     }, null, 2),
     responseExample: JSON.stringify({
-      message: 'Deleted project "Desk Mount" and all of its parts.',
+      message: `Deleted project "Desk Mount" (id=${projectId}) and all of its parts.`,
       status: "deleted",
       project: { id: projectId, project_name: "Desk Mount" },
     }, null, 2),
@@ -78,7 +78,7 @@ export const cadAgentActions: CadAgentAction[] = [
       part_type: "cad",
     }, null, 2),
     responseExample: JSON.stringify({
-      message: 'Created and linked cad part "Bracket".',
+      message: `Created and linked cad part "Bracket" (id=${partId}).`,
       status: "created",
       part: {
         id: partId,
@@ -96,14 +96,14 @@ export const cadAgentActions: CadAgentAction[] = [
   {
     action: "link_part",
     category: "Parts",
-    description: "Finds one named part inside the selected project and returns its record.",
+    description: "Finds one part by durable ID inside the selected project and returns its record.",
     requestExample: JSON.stringify({
       action: "link_part",
       project_id: projectId,
-      part_name: "Bracket",
+      part_id: partId,
     }, null, 2),
     responseExample: JSON.stringify({
-      message: 'Linked cad part "Bracket".',
+      message: `Linked cad part "Bracket" (id=${partId}).`,
       status: "linked",
       part: {
         id: partId,
@@ -140,10 +140,10 @@ export const cadAgentActions: CadAgentAction[] = [
     requestExample: JSON.stringify({
       action: "delete_part",
       project_id: projectId,
-      part_name: "Bracket",
+      part_id: partId,
     }, null, 2),
     responseExample: JSON.stringify({
-      message: 'Deleted cad part "Bracket".',
+      message: `Deleted cad part "Bracket" (id=${partId}).`,
       status: "deleted",
       part: {
         id: partId,
@@ -312,6 +312,6 @@ export const cadAgentActions: CadAgentAction[] = [
       job_id: jobId,
       client_request_id: clientRequestId,
     }, null, 2),
-    notes: "Repeating the same client_request_id and request returns the existing job; reusing it for different content returns 409. The Nest API also accepts direct POST /v1/cad-edits and WebSocket submit messages. Linked mesh chat keeps its existing synchronous generation/export path.",
+    notes: "The action is exposed at POST /v1/cad-agent/actions. Repeating the same client_request_id and request returns the existing job; reusing it for different content returns 409. Nest also accepts direct POST /v1/cad-edits and WebSocket submit messages. Linked mesh chat remains synchronous through the Nest action API.",
   },
 ];

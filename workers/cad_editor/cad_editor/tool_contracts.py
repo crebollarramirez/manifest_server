@@ -86,6 +86,18 @@ class DeleteCadFeature(TargetedTool):
     tool: Literal["delete_cad_feature"]
 
 
+class NoChangeEvidence(StrictModel):
+    semantic_id: str = Field(min_length=1)
+    target_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class ConfirmNoChange(StrictModel):
+    tool: Literal["confirm_no_change"]
+    reason: str = Field(min_length=1, max_length=500)
+    evidence: list[NoChangeEvidence] = Field(min_length=1, max_length=64)
+
+
 ToolOperation = Annotated[
     WriteInitialModel
     | ReplaceParameterField
@@ -98,7 +110,8 @@ ToolOperation = Annotated[
     | ReplaceBuildModelBody
     | DeleteModelParameter
     | DeletePrivateHelper
-    | DeleteCadFeature,
+    | DeleteCadFeature
+    | ConfirmNoChange,
     Field(discriminator="tool"),
 ]
 
@@ -125,4 +138,13 @@ class ToolPlan(StrictModel):
             raise ValueError("ToolPlan schema version 2 requires impact_review.")
         if self.schema_version == 1 and self.impact_review is not None:
             raise ValueError("ToolPlan schema version 1 cannot contain impact_review.")
+        confirmations = [
+            operation
+            for operation in self.operations
+            if isinstance(operation, ConfirmNoChange)
+        ]
+        if confirmations and len(self.operations) != 1:
+            raise ValueError("confirm_no_change must be the plan's only operation.")
+        if confirmations and self.impact_review:
+            raise ValueError("confirm_no_change requires an empty impact_review.")
         return self

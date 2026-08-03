@@ -181,6 +181,103 @@ class CadToolExecutorTests(unittest.TestCase):
             "PARAMETER_METADATA_MISMATCH",
         )
 
+    def test_confirm_no_change_verifies_feature_evidence_without_upload(self):
+        source = _annotate_initial_model(MODEL_BODY)
+        inventory = target_inventory(source, part_id=PART_ID, semantic_ids=["body"])
+        body = inventory[f"{PART_ID}:function_body:make_body"]
+        repository = FakeRepository(source)
+
+        result = CadToolExecutor(repository).execute(
+            tool_job(
+                source,
+                {
+                    "schema_version": 2,
+                    "summary": "Confirmed the requested body already exists.",
+                    "operations": [
+                        {
+                            "tool": "confirm_no_change",
+                            "reason": "The accepted body already has the requested dimensions.",
+                            "evidence": [
+                                {
+                                    "semantic_id": "body",
+                                    "target_fingerprint": body.fingerprint,
+                                    "reason": "make_body constructs the box from width and height.",
+                                }
+                            ],
+                        }
+                    ],
+                    "impact_review": [],
+                },
+            )
+        )
+
+        self.assertEqual(result["outcome"], "no_change")
+        self.assertEqual(result["base_source_sha256"], source_hash(source))
+        self.assertEqual(result["changed_symbols"], [])
+        self.assertEqual(result["evidence"][0]["semantic_id"], "body")
+        self.assertNotIn("candidate_path", result)
+        self.assertEqual(repository.writes, [])
+
+    def test_confirm_no_change_rejects_stale_or_mixed_evidence_without_upload(self):
+        source = _annotate_initial_model(MODEL_BODY)
+        repository = FakeRepository(source)
+
+        with self.assertRaises(WorkflowFailure) as stale:
+            CadToolExecutor(repository).execute(
+                tool_job(
+                    source,
+                    {
+                        "schema_version": 2,
+                        "operations": [
+                            {
+                                "tool": "confirm_no_change",
+                                "reason": "The body is already correct.",
+                                "evidence": [
+                                    {
+                                        "semantic_id": "body",
+                                        "target_fingerprint": "a" * 64,
+                                        "reason": "The body uses the requested dimensions.",
+                                    }
+                                ],
+                            }
+                        ],
+                        "impact_review": [],
+                    },
+                )
+            )
+        self.assertEqual(stale.exception.code, "NO_CHANGE_EVIDENCE_INVALID")
+
+        with self.assertRaises(WorkflowFailure) as mixed:
+            CadToolExecutor(repository).execute(
+                tool_job(
+                    source,
+                    {
+                        "schema_version": 2,
+                        "operations": [
+                            {
+                                "tool": "confirm_no_change",
+                                "reason": "The body is already correct.",
+                                "evidence": [
+                                    {
+                                        "semantic_id": "body",
+                                        "target_fingerprint": "a" * 64,
+                                        "reason": "The body uses the requested dimensions.",
+                                    }
+                                ],
+                            },
+                            {
+                                "tool": "add_model_parameter",
+                                "name": "depth",
+                                "field_source": "depth: float = 3.0",
+                            },
+                        ],
+                        "impact_review": [],
+                    },
+                )
+            )
+        self.assertEqual(mixed.exception.code, "INVALID_TOOL_PLAN")
+        self.assertEqual(repository.writes, [])
+
     def test_validation_repair_context_rejects_missing_previous_plan(self):
         source = _annotate_initial_model(MODEL_BODY)
         repository = FakeRepository(source)
