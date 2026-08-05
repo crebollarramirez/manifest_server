@@ -1,0 +1,189 @@
+/* =============================================================================
+   Tailwind v4 wiring for the Manifest token system.
+
+   The handoff (../../../design_handoff_manifest_tokens/manifest.tailwind.preset.js)
+   is written as a Tailwind v3 JS preset. Tailwind v4 replaced JS presets with
+   CSS-first @theme configuration as its primary mechanism, so this file is a
+   re-expression of that preset's mappings for v4 — not the preset consumed
+   directly. The v3 file is left untouched in the handoff folder as the record
+   of the design team's original intent; every mapping below traces back to it.
+
+   VERIFIED NAMING RULE — read before adding a key to @theme below:
+   Tailwind v4 compiles @theme into `@layer theme`. Per the CSS Cascade Layers
+   spec, an UNLAYERED rule always wins over a LAYERED one for the same custom
+   property on the same element, regardless of source order. tokens.css is
+   plain, unlayered CSS. Consequence, confirmed by inspecting the built output
+   (dist/assets/*.css) rather than assumed: if a key here reuses a property
+   name tokens.css already defines with a DIFFERENT intended meaning, this
+   file's redefinition is silently inert — tokens.css's original meaning wins
+   every time, with no error. That's exactly how Tailwind v3's preset could
+   keep `colors.primary` (purple accent) and `textColor.primary` (ink)
+   separate, but v4's unified --color-* namespace can't: the fix here isn't a
+   clever precedence trick (there isn't a safe one), it's simply giving the
+   two meanings two different names.
+
+   Where a key below only PASSES THROUGH tokens.css's existing value under the
+   identical name (radius, shadow, motion, type scale — same meaning, not a
+   different one), this "collision" is harmless by construction: Tailwind's
+   generated utility CSS is just `.foo { property: var(--x) }`, so the actual
+   value always resolves from tokens.css's single, already-theme-reactive
+   declaration regardless of which is written and which is inert. Genuinely
+   renamed below only where the intended MEANING actually differs:
+
+     tokens.css name (existing meaning)   v4 utility here (different meaning)
+     -----------------------------------   -----------------------------------
+     --color-primary   (purple accent)     bg-brand / bg-brand-hover / etc.
+     --color-secondary (mint accent)       bg-action-secondary
+     --color-accent    (peach accent)      bg-action-accent
+     --text-primary/secondary/tertiary/... text-ink / text-ink-secondary / ...
+     --color-success/warning/error/info    bg-status-success / etc.
+       (+ -soft/-text suffixes)              (+ -soft/-text suffixes)
+
+   Spacing: the token spacing scale (--space-1..20, 4px base) is numerically
+   identical to Tailwind v4's default spacing scale (--spacing: 0.25rem, i.e.
+   also 4px per step) — p-4, gap-6, etc. already match the design tokens with
+   no override needed, so it's intentionally omitted below.
+   ============================================================================= */
+
+@import "tailwindcss";
+@import "./tokens.css";
+
+@theme {
+  /* ---- Base ramps (bare ramp names never collide with tokens.css, which
+     stores them as --purple-500 etc, not --color-purple-500) ---- */
+  --color-purple-50: var(--purple-50);
+  --color-purple-100: var(--purple-100);
+  --color-purple-200: var(--purple-200);
+  --color-purple-300: var(--purple-300);
+  --color-purple-400: var(--purple-400);
+  --color-purple-500: var(--purple-500);
+  --color-purple-600: var(--purple-600);
+  --color-purple-700: var(--purple-700);
+  --color-purple-800: var(--purple-800);
+  --color-purple-900: var(--purple-900);
+  --color-mint-50: var(--mint-50);
+  --color-mint-100: var(--mint-100);
+  --color-mint-300: var(--mint-300);
+  --color-mint-500: var(--mint-500);
+  --color-mint-700: var(--mint-700);
+  --color-peach-50: var(--peach-50);
+  --color-peach-100: var(--peach-100);
+  --color-peach-300: var(--peach-300);
+  --color-peach-500: var(--peach-500);
+  --color-peach-700: var(--peach-700);
+  --color-coral-100: var(--coral-100);
+  --color-coral-300: var(--coral-300);
+  --color-coral-500: var(--coral-500);
+  --color-coral-700: var(--coral-700);
+
+  /* ---- Surfaces (new names — tokens.css calls these --bg-page-flat etc) ---- */
+  --color-page: var(--bg-page-flat);
+  --color-card: var(--surface-card);
+  --color-card-tint: var(--surface-card-tint);
+  --color-sunken: var(--surface-sunken);
+
+  /* ---- Brand accent (renamed from the preset's bare "primary"/"secondary"/
+     "accent" — genuinely different meaning than the text-ink ramp below, so
+     it needs a genuinely different name, not just a different-looking one).
+     Chained through tokens.css's semantic tokens (not hardcoded to a ramp
+     value) so these keep tracking tokens.css as the single source of truth,
+     including the per-theme hover/active/soft shades. ---- */
+  --color-brand: var(--color-primary);
+  --color-brand-hover: var(--color-primary-hover);
+  --color-brand-active: var(--color-primary-active);
+  --color-brand-soft: var(--color-primary-soft);
+  --color-action-secondary: var(--color-secondary);
+  --color-action-secondary-soft: var(--color-secondary-soft);
+  --color-action-accent: var(--color-accent);
+  --color-action-accent-soft: var(--color-accent-soft);
+
+  /* ---- Status (renamed from bare success/warning/error/info — tokens.css
+     already owns those exact names for its own semantic use, e.g. Badge's
+     CSS references var(--color-success-soft) directly; reusing the identical
+     name here would be silently inert per the note above). ---- */
+  --color-status-success: var(--color-success);
+  --color-status-success-soft: var(--color-success-soft);
+  --color-status-success-text: var(--color-success-text);
+  --color-status-warning: var(--color-warning);
+  --color-status-warning-soft: var(--color-warning-soft);
+  --color-status-warning-text: var(--color-warning-text);
+  --color-status-error: var(--color-error);
+  --color-status-error-soft: var(--color-error-soft);
+  --color-status-error-text: var(--color-error-text);
+  --color-status-info: var(--color-info);
+  --color-status-info-soft: var(--color-info-soft);
+  --color-status-info-text: var(--color-info-text);
+
+  /* ---- Text ramp (renamed to "ink" — bare "primary"/"secondary" would
+     collide with the brand accent's existing meaning above; kept as one
+     uniform namespace rather than renaming only the two that collide, so
+     text-ink/-secondary/-tertiary/... reads as one consistent group instead
+     of "some are renamed, some aren't"). ---- */
+  --color-ink: var(--text-primary);
+  --color-ink-secondary: var(--text-secondary);
+  --color-ink-tertiary: var(--text-tertiary);
+  --color-ink-inverted: var(--text-on-primary);
+  --color-ink-disabled: var(--text-disabled);
+  --color-ink-link: var(--text-link);
+
+  /* ---- Borders (bare names — none collide with a tokens.css property of
+     the identical name; tokens.css calls these --border-subtle etc). ---- */
+  --color-subtle: var(--border-subtle);
+  --color-default: var(--border-default);
+  --color-strong: var(--border-strong);
+  --color-focus: var(--border-focus);
+  --color-glass: var(--surface-glass-border);
+
+  /* ---- Type, radius, shadow, motion: intentional same-name pass-throughs.
+     These register the utility SHAPE (Tailwind needs the key present to
+     generate e.g. `.text-sm{font-size:var(--text-sm)}` at all); the actual
+     value always resolves from tokens.css's single declaration regardless,
+     including its per-theme variance (shadows darken in dark mode, etc). ---- */
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --text-xs: var(--text-xs);
+  --text-sm: var(--text-sm);
+  --text-base: var(--text-base);
+  --text-lg: var(--text-lg);
+  --text-xl: var(--text-xl);
+  --text-2xl: var(--text-2xl);
+  --text-3xl: var(--text-3xl);
+  --text-4xl: var(--text-4xl);
+  --font-weight-regular: var(--weight-regular);
+  --font-weight-medium: var(--weight-medium);
+  --font-weight-semibold: var(--weight-semibold);
+  --font-weight-bold: var(--weight-bold);
+  --font-weight-display: var(--weight-display);
+  --leading-tight: var(--leading-tight);
+  --leading-snug: var(--leading-snug);
+  --leading-normal: var(--leading-normal);
+  --leading-relaxed: var(--leading-relaxed);
+  --tracking-tight: var(--tracking-tight);
+  --tracking-normal: var(--tracking-normal);
+  --tracking-wide: var(--tracking-wide);
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
+  --radius-pill: var(--radius-pill);
+  --shadow-xs: var(--shadow-xs);
+  --shadow-sm: var(--shadow-sm);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+  --shadow-focus: var(--shadow-focus);
+  --ease-standard: var(--ease-standard);
+  --ease-out: var(--ease-out);
+  --ease-bounce: var(--ease-bounce);
+  --duration-fast: var(--duration-fast);
+  --duration-base: var(--duration-base);
+  --duration-slow: var(--duration-slow);
+
+  /* ---- Layout ---- */
+  --width-sidebar: var(--sidebar-width);
+  --max-width-content: var(--content-max-width);
+}
+
+/* Tailwind's dark: variant follows data-theme, not prefers-color-scheme or a
+   `dark` class — matching ThemeProvider, which is the only thing that ever
+   sets this attribute. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));

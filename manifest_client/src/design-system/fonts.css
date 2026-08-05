@@ -1,0 +1,17 @@
+/* =============================================================================
+   Font loading — the single place brand fonts are sourced from.
+
+   Self-hosted via Fontsource (npm packages, bundled by Vite — no external
+   CDN request, so this fits the existing CSP as-is with zero policy changes).
+   Variable-weight builds are used so one face covers the full weight range
+   tokens.css needs (400-800 for Nunito) instead of five separate static
+   files.
+
+   SCALABILITY: this is the only file that changes if the brand fonts change
+   later (a different Fontsource package, or self-hosted .woff2 files under
+   @font-face). tokens.css's --font-sans/--font-mono values reference the
+   family names registered below; nothing else in the design system or
+   components ever names a font directly.
+   ============================================================================= */
+@import "@fontsource-variable/nunito/wght.css";
+@import "@fontsource-variable/jetbrains-mono/wght.css";

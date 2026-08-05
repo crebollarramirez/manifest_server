@@ -5,6 +5,7 @@ three.js viewer that renders each part in a project on its own plate, driven by
 the `cad-agent` Edge Function contract.
 
 - Contract and confirmed deviations: [CONTRACT.md](CONTRACT.md)
+- Design system and confirmed deviations: [DESIGN_SYSTEM.md](DESIGN_SYSTEM.md)
 - Architecture: modular monolith — feature folders, one transport interface
   (`CadAgentClient`), Zod schemas as the only source of backend-derived types.
 

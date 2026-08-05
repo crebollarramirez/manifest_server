@@ -1,0 +1,6 @@
+/* Thin wrapper over the .glass / .glass--gloss primitives already defined in
+   tokens.css — this module only adds layout (padding), not surface styling,
+   so the token primitives stay the single source of truth for the look. */
+.panel {
+  padding: var(--space-5);
+}

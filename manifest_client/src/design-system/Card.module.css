@@ -1,0 +1,10 @@
+/* Solid surface — the handoff's explicit alternative to .glass for dense or
+   long-form content: "blur is for floating surfaces only". */
+.card {
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  padding: var(--space-5);
+}
+.tinted { background: var(--surface-card-tint); }
