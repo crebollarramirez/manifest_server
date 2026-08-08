@@ -10,9 +10,23 @@ import {
 } from './contracts';
 import { MeshGenerationService } from './mesh-generation.service';
 import { publicActionJob } from './public-job';
-import { SubmissionService } from './submission.service';
 
 const CAD_MODEL_RUNTIME_IMPORT = 'from cadquery_runtime import cad_part, cq, dataclass';
+
+// Kept in sync by hand with workers/agent_3d/tools/part/part_tools.py's
+// _skeleton_source() — a new part should look exactly like one CreateCadPartTool
+// would have created, so both paths produce the same indexable, feature-free
+// starting point (empty ModelParams, trivial build_model).
+const CAD_MODEL_SKELETON_SOURCE = `${CAD_MODEL_RUNTIME_IMPORT}
+
+@dataclass(frozen=True)
+class ModelParams:
+    pass
+
+
+def build_model(params: ModelParams):
+    return cq.Workplane("XY")
+`;
 
 function projectPath(projectId: string, ...parts: string[]): string {
   return [projectId, ...parts].join('/');
@@ -35,7 +49,6 @@ function partExportPath(projectId: string, partId: string): string {
 export class CadActionsService {
   constructor(
     @Inject(CadAgentRepository) private readonly repository: CadAgentRepository,
-    @Inject(SubmissionService) private readonly submissions: SubmissionService,
     @Inject(MeshGenerationService) private readonly mesh: MeshGenerationService,
   ) {}
 
@@ -60,7 +73,6 @@ export class CadActionsService {
       case 'get_edit_job': return this.getEditJob(action.job_id, action.after_sequence ?? 0);
       case 'delete_project': return this.deleteProject(action.project_id);
       case 'delete_part': return this.deletePart(action.project_id, action.part_id);
-      case 'chat': return this.chat(action);
     }
   }
 
@@ -104,7 +116,7 @@ export class CadActionsService {
     const prefix = partSourcePath(part.project_id, part.part_type, part.id);
     try {
       const initialSource = part.part_type === 'cad'
-        ? `${CAD_MODEL_RUNTIME_IMPORT}\n`
+        ? CAD_MODEL_SKELETON_SOURCE
         : this.mesh.starterSource();
       await this.repository.uploadText(
         `${prefix}/model.py`,
@@ -311,49 +323,4 @@ export class CadActionsService {
     };
   }
 
-  private async chat(
-    action: Extract<CadAgentAction, { action: 'chat' }>,
-  ): Promise<Record<string, unknown>> {
-    const latest = action.messages.at(-1);
-    if (!latest || latest.role !== 'user') {
-      throw new ActionError(400, 'Messages must end with a non-empty user message.');
-    }
-    let part: PartRecord | null = null;
-    if (action.part_id) {
-      part = await this.repository.part(action.project_id, action.part_id) as unknown as PartRecord;
-    }
-    if (part?.part_type === 'mesh') {
-      const jobId = await this.mesh.generate(part, action.messages);
-      return {
-        message: `Updated mesh part "${part.part_name}" and queued its export.`,
-        status: 'queued',
-        job_type: 'export_mesh',
-        project_id: action.project_id,
-        part_id: part.id,
-        job_id: jobId,
-      };
-    }
-    const project = part
-      ? await this.repository.project(action.project_id) as ProjectRecord
-      : await this.requireIndexableProject(action.project_id);
-    const result = await this.submissions.submit({
-      project_id: action.project_id,
-      ...(part ? { part_id: part.id } : {}),
-      request_text: latest.content,
-      messages: action.messages,
-      ...(action.client_request_id ? { client_request_id: action.client_request_id } : {}),
-    });
-    const initialDesign = result.job.workflow_mode === 'initial_design';
-    return {
-      message: initialDesign && part
-        ? `Queued an initial CAD design for "${part.part_name}". Job: ${result.job.id}`
-        : `Queued a project-scoped CAD edit for "${project.project_name}". Job: ${result.job.id}`,
-      status: result.job.status,
-      job_type: initialDesign ? 'initial_cad_design' : 'edit_cad',
-      project_id: action.project_id,
-      part_id: part?.id ?? null,
-      job_id: result.job.id,
-      client_request_id: result.client_request_id,
-    };
-  }
 }

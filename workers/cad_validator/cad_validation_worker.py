@@ -7,8 +7,10 @@ import traceback
 from supabase import create_client
 
 try:
+    from .geometry_check_job import geometry_check_job
     from .validate_cad_job import validate_cad_job
 except ImportError:
+    from geometry_check_job import geometry_check_job
     from validate_cad_job import validate_cad_job
 
 
@@ -22,7 +24,7 @@ supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 def claim_next_job():
     result = supabase.rpc(
         "claim_next_supported_generation_job",
-        {"p_job_types": ["validate_cad"]},
+        {"p_job_types": ["validate_cad", "geometry_check"]},
     ).execute()
     return result.data[0] if result.data else None
 
@@ -51,6 +53,17 @@ def complete_candidate(job: dict, report: dict):
         "complete_candidate_cad_validation",
         {
             "p_validation_job_id": job["id"],
+            "p_source_sha256": job["source_sha256"],
+            "p_result": report,
+        },
+    ).execute()
+
+
+def complete_geometry_check(job: dict, report: dict):
+    return supabase.rpc(
+        "complete_geometry_check",
+        {
+            "p_job_id": job["id"],
             "p_source_sha256": job["source_sha256"],
             "p_result": report,
         },
@@ -106,7 +119,29 @@ def print_report(job_id: str, report: dict) -> None:
     )
 
 
+def process_geometry_check_job(job: dict) -> None:
+    outcome = geometry_check_job(supabase, job)
+    report = outcome["report"]
+    print(
+        f"geometry-check[{job['id']}] report={json.dumps(report, sort_keys=True)}",
+        flush=True,
+    )
+    if outcome["status"] == "completed":
+        complete_geometry_check(job, report)
+    else:
+        update_job(
+            job["id"],
+            outcome["status"],
+            report,
+            outcome["error_message"],
+        )
+
+
 def process_job(job: dict) -> None:
+    if job.get("type") == "geometry_check":
+        process_geometry_check_job(job)
+        return
+
     outcome = validate_cad_job(supabase, job)
     report = outcome["report"]
     print_report(job["id"], report)

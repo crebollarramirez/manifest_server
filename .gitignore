@@ -1,5 +1,6 @@
 __pycache__/
 .env
+workers/cad_editor/cad_editor/tools/real_supabase_test.json
 supabase/.temp
 supabase/.branches
 deno.lock

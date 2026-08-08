@@ -15,7 +15,7 @@
       "position": { "column": 0, "row": 0 },
       "mobileOrder": 1,
       "details": {
-        "responsibility": "Submit HTTP or WebSocket requests and acknowledge the latest progress sequence received.",
+        "responsibility": "Submit agent requests over WebSocket and acknowledge the latest progress sequence received.",
         "evidence": [
           { "path": "cad_agent_cli.py", "symbol": "follow_edit_job", "kind": "source" }
         ]
@@ -23,8 +23,8 @@
     },
     {
       "id": "cad-agent-api",
-      "label": "CAD Agent API + WebSocket",
-      "description": "NestJS accepts idempotent submissions, exposes durable status, and replays or streams public progress events.",
+      "label": "CAD Agent WebSocket",
+      "description": "NestJS accepts agent submissions only over WebSocket and replays or streams public progress events.",
       "type": "api",
       "icon": "api",
       "foundation": true,
@@ -71,7 +71,7 @@
     {
       "id": "orchestrator",
       "label": "Nest CAD Orchestrator",
-      "description": "A leased background worker advances each workflow independently of its submitting HTTP or WebSocket connection.",
+      "description": "A leased background worker advances each workflow independently of its submitting WebSocket connection.",
       "type": "worker",
       "variant": "polling",
       "icon": "worker",
@@ -262,11 +262,11 @@
       "source": "clients",
       "target": "cad-agent-api",
       "label": "submit CAD edit",
-      "protocol": "http",
+      "protocol": "event",
       "flow": "synchronous",
       "direction": "two-way",
-      "request": { "label": "idempotent edit request", "type": "POST /v1/cad-edits", "exampleBody": "{\"client_request_id\":\"request-uuid\",\"project_id\":\"project-uuid\",\"part_id\":\"part-uuid\",\"request_text\":\"Add two mounting holes\"}" },
-      "response": { "label": "durable job reference", "type": "202 JSON response", "exampleBody": "{\"job_id\":\"edit-job-uuid\",\"status\":\"queued\",\"deduplicated\":false}" }
+      "request": { "label": "agent request", "type": "WebSocket cad.edit.submit", "exampleBody": "{\"event\":\"cad.edit.submit\",\"data\":{\"client_request_id\":\"request-uuid\",\"project_id\":\"project-uuid\",\"part_id\":\"part-uuid\",\"request_text\":\"Add two mounting holes\"}}" },
+      "response": { "label": "agent acknowledgement", "type": "WebSocket event", "exampleBody": "{\"event\":\"cad.plan.logged\",\"data\":{\"status\":\"plan_logged\"}}" }
     },
     {
       "id": "follow-progress",

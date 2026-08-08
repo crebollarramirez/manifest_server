@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from workers.cad_editor.cad_editor.resolver import resolve_edit_target
+from workers.agent_3d.planning.resolver import resolve_edit_target
 from workers.indexer.indexer import (
     IndexGetter,
     IndexingError,

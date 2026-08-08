@@ -1,0 +1,9 @@
+{
+  "tool_id": "delete_parameter",
+  "project_id": "cfa4cca8-572b-4e8a-86e0-2d99ad748839",
+  "part_id": "db1865d4-ab01-44b6-bedd-a6c436ef22ef",
+  "candidate_id": "test-1",
+  "args": {
+    "parameter_name": "test_parameter"
+  }
+}

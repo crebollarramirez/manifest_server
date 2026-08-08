@@ -18,7 +18,7 @@ runbook:
 
 Worker-specific implementation notes remain next to their code:
 
-- [CAD Editor README](workers/cad_editor/README.md)
+- [3D Agent README](workers/agent_3d/README.md)
 - [Indexer Worker README](workers/indexer/README.md)
 
 ## Run the documentation site locally
@@ -58,7 +58,7 @@ The backend implementation is organized as:
 - `services/cad_agent/` — NestJS action API, catalog and job operations, CAD
   edit submission, linked-mesh generation, OpenAI tool planning, durable
   orchestration, WebSocket progress replay, and guarded commit.
-- `workers/cad_editor/` — bounded Python CAD context and transactional
+- `workers/agent_3d/` — bounded Python CAD context and transactional
   AST/source tool execution against isolated candidates.
 - `workers/indexer/` — static CAD source indexing and Getter retrieval.
 - `workers/cad_validator/` — candidate source and geometry validation.

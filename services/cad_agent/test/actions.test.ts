@@ -59,7 +59,6 @@ function editJob(overrides: Partial<EditJob> = {}): EditJob {
 
 function actionService(options: {
   repository?: Record<string, unknown>;
-  submissions?: Record<string, unknown>;
   mesh?: Record<string, unknown>;
 } = {}): CadActionsService {
   const repository = {
@@ -70,20 +69,12 @@ function actionService(options: {
     hasCadParts: async () => true,
     ...options.repository,
   };
-  const submissions = {
-    submit: async () => ({
-      job: editJob(),
-      client_request_id: CLIENT_ID,
-      deduplicated: false,
-    }),
-    ...options.submissions,
-  };
   const mesh = {
     starterSource: () => 'mesh starter',
     generate: async () => JOB_ID,
     ...options.mesh,
   };
-  return new CadActionsService(repository as never, submissions as never, mesh as never);
+  return new CadActionsService(repository as never, mesh as never);
 }
 
 test('action contract links projects and parts by durable ID and rejects legacy names', async () => {
@@ -164,7 +155,18 @@ test('CAD part creation initializes both files and queues best-effort indexing',
   });
 
   assert.equal(uploads.length, 2);
-  assert.equal(uploads[0].content, 'from cadquery_runtime import cad_part, cq, dataclass\n');
+  assert.equal(
+    uploads[0].content,
+    'from cadquery_runtime import cad_part, cq, dataclass\n'
+      + '\n'
+      + '@dataclass(frozen=True)\n'
+      + 'class ModelParams:\n'
+      + '    pass\n'
+      + '\n'
+      + '\n'
+      + 'def build_model(params: ModelParams):\n'
+      + '    return cq.Workplane("XY")\n',
+  );
   assert.equal(uploads[0].upsert, false);
   assert.equal(uploads[1].content, '{}\n');
   assert.equal(result.index_job_id, JOB_ID);
@@ -300,53 +302,17 @@ test('deletion stops before cancellation when applicable work is running', async
   assert.equal(cancelled, false);
 });
 
-test('CAD chat adapts action history into the durable submission service', async () => {
-  const submitted: Array<Record<string, unknown>> = [];
-  const service = actionService({
-    submissions: {
-      submit: async (input: Record<string, unknown>) => {
-        submitted.push(input);
-        return { job: editJob(), client_request_id: CLIENT_ID, deduplicated: false };
-      },
-    },
-  });
-
-  const result = await service.execute({
-    action: 'chat',
-    project_id: PROJECT_ID,
-    client_request_id: CLIENT_ID,
-    messages: [{ role: 'user', content: 'Add a mounting hole' }],
-  });
-
-  assert.equal(submitted[0]?.request_text, 'Add a mounting hole');
-  assert.equal(submitted[0]?.client_request_id, CLIENT_ID);
-  assert.equal(result.job_type, 'edit_cad');
-  assert.equal(result.job_id, JOB_ID);
-});
-
-test('mesh chat remains synchronous and queues the mesh export', async () => {
-  const meshPart = { ...part, part_type: 'mesh' as const };
-  let generated = false;
-  const service = actionService({
-    repository: { part: async () => meshPart },
-    mesh: {
-      generate: async () => {
-        generated = true;
-        return JOB_ID;
-      },
-    },
-  });
-
-  const result = await service.execute({
-    action: 'chat',
-    project_id: PROJECT_ID,
-    part_id: PART_ID,
-    messages: [{ role: 'user', content: 'Make the horns longer' }],
-  });
-
-  assert.equal(generated, true);
-  assert.equal(result.job_type, 'export_mesh');
-  assert.equal(result.job_id, JOB_ID);
+test('HTTP action endpoint rejects agent conversations', async () => {
+  const service = actionService();
+  await assert.rejects(
+    service.execute({
+      action: 'chat',
+      project_id: PROJECT_ID,
+      client_request_id: CLIENT_ID,
+      messages: [{ role: 'user', content: 'Add a mounting hole' }],
+    }),
+    (error: unknown) => error instanceof ActionError && error.status === 400,
+  );
 });
 
 test('action controller preserves the compatibility error envelope and status', async () => {

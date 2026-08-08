@@ -1,20 +1,26 @@
 import { z } from 'zod';
 
 export const UuidSchema = z.string().uuid();
-const Sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
 const NonBlankSchema = z.string().trim().min(1);
+const RawRequestSchema = z
+  .string()
+  .max(20_000)
+  .refine(
+    (value) => value.trim().length > 0,
+    'Request must contain non-whitespace characters.',
+  );
 
 export const ConversationMessageSchema = z
   .object({
     role: z.enum(['user', 'assistant']),
-    content: NonBlankSchema.max(20_000),
+    content: RawRequestSchema,
   })
   .strict();
 
 export const CadEditSubmissionSchema = z
   .object({
     project_id: UuidSchema,
-    request_text: NonBlankSchema.max(20_000),
+    request_text: RawRequestSchema,
     part_id: UuidSchema.optional(),
     client_request_id: UuidSchema.optional(),
     messages: z.array(ConversationMessageSchema).max(8).optional(),
@@ -23,7 +29,7 @@ export const CadEditSubmissionSchema = z
   .superRefine((value, context) => {
     if (!value.messages?.length) return;
     const final = value.messages.at(-1);
-    if (final?.role !== 'user' || final.content.trim() !== value.request_text.trim()) {
+    if (final?.role !== 'user' || final.content !== value.request_text) {
       context.addIssue({
         code: 'custom',
         path: ['messages'],
@@ -95,196 +101,6 @@ export const CadAgentActionSchema = z.discriminatedUnion('action', [
     project_id: UuidSchema,
     part_id: UuidSchema,
   }).strict(),
-  ActionBase.extend({
-    action: z.literal('chat'),
-    project_id: UuidSchema,
-    part_id: UuidSchema.optional(),
-    client_request_id: UuidSchema.optional(),
-    messages: z.array(ConversationMessageSchema).min(1).max(8),
-  })
-    .strict()
-    .superRefine((value, context) => {
-      if (value.messages.at(-1)?.role !== 'user') {
-        context.addIssue({
-          code: 'custom',
-          path: ['messages'],
-          message: 'Messages must end with a non-empty user message.',
-        });
-      }
-    }),
-]);
-
-const TargetedOperationBase = z.object({
-  target_id: NonBlankSchema,
-  target_fingerprint: Sha256Schema,
-});
-
-export const WriteInitialModelSchema = z
-  .object({
-    tool: z.literal('write_initial_model'),
-    model_body: NonBlankSchema,
-  })
-  .strict();
-
-const ReplaceParameterField = TargetedOperationBase.extend({
-  tool: z.literal('replace_parameter_field'),
-  replacement_source: NonBlankSchema,
-}).strict();
-
-const UpdateCadPartMetadata = TargetedOperationBase.extend({
-  tool: z.literal('update_cad_part_metadata'),
-  role: NonBlankSchema,
-  parameters: z.array(NonBlankSchema),
-  depends_on: z.array(NonBlankSchema),
-  search_keys: z.array(NonBlankSchema).min(1),
-}).strict();
-
-const ReplaceFunctionBody = TargetedOperationBase.extend({
-  tool: z.literal('replace_function_body'),
-  replacement_source: NonBlankSchema,
-}).strict();
-
-const ReplaceCadFeatureBody = z
-  .object({
-    tool: z.literal('replace_cad_feature_body'),
-    semantic_id: NonBlankSchema,
-    target_fingerprint: Sha256Schema,
-    replacement_source: NonBlankSchema,
-  })
-  .strict();
-
-const AddModelParameter = z
-  .object({
-    tool: z.literal('add_model_parameter'),
-    name: NonBlankSchema,
-    field_source: NonBlankSchema,
-  })
-  .strict();
-
-const AddPrivateHelper = z
-  .object({
-    tool: z.literal('add_private_helper'),
-    function_name: NonBlankSchema,
-    function_source: NonBlankSchema,
-  })
-  .strict();
-
-const AddCadFeature = z
-  .object({
-    tool: z.literal('add_cad_feature'),
-    semantic_id: NonBlankSchema,
-    function_name: NonBlankSchema,
-    role: NonBlankSchema,
-    parameters: z.array(NonBlankSchema),
-    depends_on: z.array(NonBlankSchema),
-    search_keys: z.array(NonBlankSchema).min(1),
-    function_source: NonBlankSchema,
-  })
-  .strict();
-
-const ReplaceBuildModelBody = TargetedOperationBase.extend({
-  tool: z.literal('replace_build_model_body'),
-  replacement_source: NonBlankSchema,
-}).strict();
-
-const DeleteModelParameter = TargetedOperationBase.extend({
-  tool: z.literal('delete_model_parameter'),
-}).strict();
-
-const DeletePrivateHelper = TargetedOperationBase.extend({
-  tool: z.literal('delete_private_helper'),
-}).strict();
-
-const DeleteCadFeature = TargetedOperationBase.extend({
-  tool: z.literal('delete_cad_feature'),
-}).strict();
-
-const NoChangeEvidenceSchema = z
-  .object({
-    semantic_id: NonBlankSchema,
-    target_fingerprint: Sha256Schema,
-    reason: NonBlankSchema.max(500),
-  })
-  .strict();
-
-const ConfirmNoChange = z
-  .object({
-    tool: z.literal('confirm_no_change'),
-    reason: NonBlankSchema.max(500),
-    evidence: z.array(NoChangeEvidenceSchema).min(1).max(64),
-  })
-  .strict();
-
-export const ToolOperationSchema = z.discriminatedUnion('tool', [
-  WriteInitialModelSchema,
-  ReplaceParameterField,
-  UpdateCadPartMetadata,
-  ReplaceFunctionBody,
-  ReplaceCadFeatureBody,
-  AddModelParameter,
-  AddPrivateHelper,
-  AddCadFeature,
-  ReplaceBuildModelBody,
-  DeleteModelParameter,
-  DeletePrivateHelper,
-  DeleteCadFeature,
-  ConfirmNoChange,
-]);
-
-const ToolPlanBase = z
-  .object({
-    summary: NonBlankSchema.max(500),
-    target_part_id: UuidSchema,
-    base_source_sha256: Sha256Schema,
-    operations: z.array(ToolOperationSchema).min(1).max(12),
-  });
-
-export const ImpactReviewSchema = z
-  .object({
-    semantic_id: NonBlankSchema,
-    decision: z.enum(['modified', 'verified_compatible']),
-    reason: NonBlankSchema.max(500),
-  })
-  .strict();
-
-export const ToolPlanV1Schema = ToolPlanBase.extend({
-  schema_version: z.literal(1),
-}).strict();
-
-export const ToolPlanV2Schema = ToolPlanBase.extend({
-  schema_version: z.literal(2),
-  impact_review: z.array(ImpactReviewSchema).max(64),
-})
-  .strict()
-  .superRefine((value, context) => {
-    const confirmations = value.operations.filter(
-      (operation) => operation.tool === 'confirm_no_change',
-    );
-    if (confirmations.length && value.operations.length !== 1) {
-      context.addIssue({
-        code: 'custom',
-        path: ['operations'],
-        message: 'confirm_no_change must be the plan’s only operation.',
-      });
-    }
-    if (confirmations.length && value.impact_review.length) {
-      context.addIssue({
-        code: 'custom',
-        path: ['impact_review'],
-        message: 'confirm_no_change requires an empty impact_review.',
-      });
-    }
-  });
-
-export const InitialDesignToolPlanV2Schema = ToolPlanBase.extend({
-  schema_version: z.literal(2),
-  operations: z.array(WriteInitialModelSchema).length(1),
-  impact_review: z.array(ImpactReviewSchema).max(0),
-}).strict();
-
-export const ToolPlanSchema = z.discriminatedUnion('schema_version', [
-  ToolPlanV1Schema,
-  ToolPlanV2Schema,
 ]);
 
 export const SubscribeMessageSchema = z
@@ -307,9 +123,6 @@ export const AckMessageSchema = z
 
 export type CadEditSubmission = z.infer<typeof CadEditSubmissionSchema>;
 export type CadAgentAction = z.infer<typeof CadAgentActionSchema>;
-export type ToolPlan = z.infer<typeof ToolPlanSchema>;
-export type ToolPlanV2 = z.infer<typeof ToolPlanV2Schema>;
-export type ToolOperation = z.infer<typeof ToolOperationSchema>;
 
 export type EditJob = {
   id: string;

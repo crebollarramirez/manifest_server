@@ -6,6 +6,17 @@ import sys
 import time
 import traceback
 from datetime import datetime, timezone
+from pathlib import Path
+
+
+# Script execution adds only workers/indexer to sys.path. Add workers/ so
+# indexer itself is importable, and the workspace root so shared
+# workers.commons imports work outside Docker too.
+WORKERS_ROOT = str(Path(__file__).resolve().parents[1])
+WORKSPACE_ROOT = str(Path(__file__).resolve().parents[2])
+for _root in (WORKERS_ROOT, WORKSPACE_ROOT):
+    if _root not in sys.path:
+        sys.path.insert(0, _root)
 
 from supabase import create_client
 

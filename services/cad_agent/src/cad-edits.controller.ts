@@ -1,5 +1,4 @@
 import {
-  Body,
   Controller,
   Get,
   HttpException,
@@ -7,13 +6,9 @@ import {
   Inject,
   Param,
   ParseUUIDPipe,
-  Post,
   Query,
-  Res,
 } from '@nestjs/common';
-import type { Response } from 'express';
 import { CadAgentRepository } from './cad-agent.repository';
-import { SubmissionService } from './submission.service';
 import { WorkflowError } from './contracts';
 import { publicJob } from './public-job';
 
@@ -38,25 +33,8 @@ function httpError(error: unknown): HttpException {
 @Controller('v1/cad-edits')
 export class CadEditsController {
   constructor(
-    @Inject(SubmissionService) private readonly submissions: SubmissionService,
     @Inject(CadAgentRepository) private readonly repository: CadAgentRepository,
   ) {}
-
-  @Post()
-  async submit(@Body() body: unknown, @Res() response: Response) {
-    try {
-      const result = await this.submissions.submit(body);
-      return response.status(result.deduplicated ? 200 : 202).json({
-        job_id: result.job.id,
-        status: result.job.status,
-        state: result.job.state,
-        client_request_id: result.client_request_id,
-        deduplicated: result.deduplicated,
-      });
-    } catch (error) {
-      throw httpError(error);
-    }
-  }
 
   @Get(':jobId')
   async status(

@@ -290,28 +290,4 @@ export const cadAgentActions: CadAgentAction[] = [
     }, null, 2),
     notes: "The Nest GET endpoint exposes the same durable status/replay pattern at /v1/cad-edits/:jobId?after_sequence=3. WebSocket subscriptions use the last acknowledged sequence to recover missed events.",
   },
-  {
-    action: "chat",
-    category: "Chat",
-    description: "Submits CAD work through the idempotent durable edit-job contract. A linked blank part uses initial_design; established linked work remains bound to that part; unlinked work requires an unambiguous project-wide target.",
-    requestExample: JSON.stringify({
-      action: "chat",
-      client_request_id: clientRequestId,
-      project_id: projectId,
-      part_id: partId,
-      messages: [
-        { role: "user", content: "Make the mounting holes deeper" },
-      ],
-    }, null, 2),
-    responseExample: JSON.stringify({
-      message: 'Queued a project-scoped CAD edit for "Desk Mount". Job: ' + jobId,
-      status: "queued",
-      job_type: "edit_cad",
-      project_id: projectId,
-      part_id: partId,
-      job_id: jobId,
-      client_request_id: clientRequestId,
-    }, null, 2),
-    notes: "The action is exposed at POST /v1/cad-agent/actions. Repeating the same client_request_id and request returns the existing job; reusing it for different content returns 409. Nest also accepts direct POST /v1/cad-edits and WebSocket submit messages. Linked mesh chat remains synchronous through the Nest action API.",
-  },
 ];

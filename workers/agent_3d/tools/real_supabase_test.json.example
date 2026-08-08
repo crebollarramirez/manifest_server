@@ -1,0 +1,17 @@
+{
+  "_comment": "Copy this file to real_supabase_test.json (gitignored) and fill in real, already-existing IDs from your local Supabase instance. Run with: python3 workers/cad_editor/cad_editor/tools/tool_harness.py real. part_id/candidate_id are optional -- for a project-scoped tool like create_cad_part, delete both lines instead of filling them in (see TOOL_HARNESS.md for that example).",
+  "tool_id": "create_feature",
+  "project_id": "REPLACE_WITH_REAL_PROJECT_ID",
+  "part_id": "REPLACE_WITH_REAL_PART_ID",
+  "candidate_id": "REPLACE_WITH_REAL_CANDIDATE_ID",
+  "args": {
+    "semantic_id": "example_feature",
+    "function_name": "cut_example_feature",
+    "role": "example_role",
+    "parameters": [],
+    "dependencies": [],
+    "search_keys": ["example"],
+    "docstring": "Example feature for real-Supabase testing.",
+    "function_body": "return cq.Workplane(\"XY\")"
+  }
+}

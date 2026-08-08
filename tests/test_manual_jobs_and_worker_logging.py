@@ -17,6 +17,12 @@ ACTION_SOURCE = (
 ACTION_CONTROLLER = (
     ROOT / "services" / "cad_agent" / "src" / "cad-actions.controller.ts"
 ).read_text(encoding="utf-8")
+EDIT_CONTROLLER = (
+    ROOT / "services" / "cad_agent" / "src" / "cad-edits.controller.ts"
+).read_text(encoding="utf-8")
+EDIT_GATEWAY = (
+    ROOT / "services" / "cad_agent" / "src" / "cad-edits.gateway.ts"
+).read_text(encoding="utf-8")
 SUPABASE_CONFIG = (ROOT / "supabase" / "config.toml").read_text(encoding="utf-8")
 REQUESTED_PART_MIGRATION = (
     ROOT
@@ -26,20 +32,33 @@ REQUESTED_PART_MIGRATION = (
 ).read_text(encoding="utf-8")
 
 
-def load_worker_module(module_name: str, path: Path, dependency_name: str):
+def load_worker_module(
+    module_name: str, path: Path, dependency_name: str | tuple[str, ...]
+):
+    dependency_names = (
+        (dependency_name,) if isinstance(dependency_name, str) else dependency_name
+    )
     fake_supabase = types.ModuleType("supabase")
     fake_supabase.create_client = lambda *_args, **_kwargs: object()
-    fake_dependency = types.ModuleType(dependency_name)
-    fake_dependency.SupersededJob = type("SupersededJob", (Exception,), {})
-    fake_dependency.run_export_job = lambda *_args, **_kwargs: None
-    fake_dependency.validate_cad_job = lambda *_args, **_kwargs: None
+
+    fake_dependencies = {}
+    for name in dependency_names:
+        fake_dependency = types.ModuleType(name)
+        fake_dependency.SupersededJob = type("SupersededJob", (Exception,), {})
+        fake_dependency.run_export_job = lambda *_args, **_kwargs: None
+        fake_dependency.validate_cad_job = lambda *_args, **_kwargs: None
+        fake_dependency.geometry_check_job = lambda *_args, **_kwargs: None
+        fake_dependencies[name] = fake_dependency
 
     previous_supabase = sys.modules.get("supabase")
-    previous_dependency = sys.modules.get(dependency_name)
+    previous_dependencies = {
+        name: sys.modules.get(name) for name in dependency_names
+    }
     previous_url = os.environ.get("SUPABASE_URL")
     previous_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
     sys.modules["supabase"] = fake_supabase
-    sys.modules[dependency_name] = fake_dependency
+    for name, fake_dependency in fake_dependencies.items():
+        sys.modules[name] = fake_dependency
     os.environ["SUPABASE_URL"] = "http://localhost"
     os.environ["SUPABASE_SERVICE_ROLE_KEY"] = "test-key"
     try:
@@ -53,10 +72,11 @@ def load_worker_module(module_name: str, path: Path, dependency_name: str):
             sys.modules.pop("supabase", None)
         else:
             sys.modules["supabase"] = previous_supabase
-        if previous_dependency is None:
-            sys.modules.pop(dependency_name, None)
-        else:
-            sys.modules[dependency_name] = previous_dependency
+        for name, previous_dependency in previous_dependencies.items():
+            if previous_dependency is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous_dependency
         if previous_url is None:
             os.environ.pop("SUPABASE_URL", None)
         else:
@@ -79,13 +99,16 @@ class CadAgentCutoverContractTests(unittest.TestCase):
     def test_nest_actions_preserve_manual_jobs_initialization_and_status(self):
         self.assertIn("currentCadSourceSha256", ACTION_SOURCE)
         self.assertIn("queueGenerationJob(part, 'validate_cad'", ACTION_SOURCE)
-        self.assertIn("? `${CAD_MODEL_RUNTIME_IMPORT}\\n`", ACTION_SOURCE)
+        self.assertIn("? CAD_MODEL_SKELETON_SOURCE", ACTION_SOURCE)
         self.assertIn("queueStandaloneIndexJob(part.project_id, 'build_index')", ACTION_SOURCE)
         self.assertIn("publicActionJob(job)", ACTION_SOURCE)
-        self.assertIn("this.submissions.submit", ACTION_SOURCE)
+        self.assertNotIn("case 'chat'", ACTION_SOURCE)
+        self.assertNotIn("@Post()", EDIT_CONTROLLER)
 
     def test_linked_cad_target_remains_constrained_to_its_project(self):
-        self.assertIn("this.repository.part(action.project_id, action.part_id)", ACTION_SOURCE)
+        self.assertIn("this.repository.part(", EDIT_GATEWAY)
+        self.assertIn("parsed.data.project_id", EDIT_GATEWAY)
+        self.assertIn("parsed.data.part_id", EDIT_GATEWAY)
         self.assertIn("add column requested_part_id uuid", REQUESTED_PART_MIGRATION)
         self.assertIn(
             "foreign key (project_id, requested_part_id)",
@@ -96,9 +119,10 @@ class CadAgentCutoverContractTests(unittest.TestCase):
             REQUESTED_PART_MIGRATION,
         )
 
-    def test_mesh_chat_retains_direct_generation_and_export(self):
-        self.assertIn("this.mesh.generate(part, action.messages)", ACTION_SOURCE)
-        self.assertIn("Updated mesh part", ACTION_SOURCE)
+    def test_mesh_chat_uses_websocket_generation_and_export(self):
+        self.assertIn("this.mesh.generate(part, messages)", EDIT_GATEWAY)
+        self.assertIn("cad.mesh.accepted", EDIT_GATEWAY)
+        self.assertIn("Updated mesh part", EDIT_GATEWAY)
 
 
 class WorkerLoggingTests(unittest.TestCase):
@@ -120,7 +144,7 @@ class WorkerLoggingTests(unittest.TestCase):
         worker = load_worker_module(
             "test_cad_validation_worker",
             ROOT / "workers" / "cad_validator" / "cad_validation_worker.py",
-            "validate_cad_job",
+            ("validate_cad_job", "geometry_check_job"),
         )
         report = {
             "valid": False,

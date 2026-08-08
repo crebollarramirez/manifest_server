@@ -93,8 +93,6 @@ def _model_parameters(
                 "line_end": node.end_lineno or node.lineno,
             }
         )
-    if not parameters:
-        _error(source, "ModelParams must define at least one annotated field.", classes[0])
     return parameters
 
 
@@ -148,9 +146,6 @@ def _feature_records(
             if keyword.arg is not None
         }
         parsed.append((function, decorator, values))
-
-    if not parsed:
-        _error(source, "At least one @cad_part(...) function is required.")
 
     semantic_ids = {
         values["semantic_id"]

@@ -8,8 +8,6 @@ import {
   WorkflowError,
 } from './contracts';
 
-const BLANK_CAD_SOURCE = 'from cadquery_runtime import cad_part, cq, dataclass\n';
-
 function fingerprint(value: Record<string, unknown>): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
@@ -53,28 +51,10 @@ export class SubmissionService {
     }
 
     await this.repository.project(request.project_id);
-    let workflowMode: 'edit' | 'initial_design' = 'edit';
-    let resolvedTargets: unknown[] = [];
     if (request.part_id) {
       const part = await this.repository.part(request.project_id, request.part_id);
       if (part.part_type !== 'cad') {
         throw new WorkflowError('INVALID_PART_TYPE', 'CAD edit requests may target only CAD parts.');
-      }
-      const source = await this.repository.readText(
-        this.repository.canonicalPath(request.project_id, request.part_id),
-      );
-      if (source === BLANK_CAD_SOURCE) {
-        workflowMode = 'initial_design';
-        resolvedTargets = [
-          {
-            part_id: request.part_id,
-            part_name: String(part.part_name),
-            semantic_ids: [],
-            confidence: 1,
-            reason: 'Linked blank CAD part selected for initial design.',
-            candidates: [],
-          },
-        ];
       }
     }
 
@@ -83,10 +63,12 @@ export class SubmissionService {
       requestText: request.request_text,
       messages,
       requestedPartId: request.part_id ?? null,
-      workflowMode,
+      // The Python CAD editor inspects the claimed source and is authoritative
+      // for switching an exact blank marker to initial_design.
+      workflowMode: 'edit',
       clientRequestId,
       requestFingerprint,
-      resolvedTargets,
+      resolvedTargets: [],
     });
     return { job, client_request_id: clientRequestId, deduplicated: false };
   }

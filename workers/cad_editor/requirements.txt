@@ -1,2 +1,0 @@
-pydantic>=2.10,<3
-supabase==2.30.0

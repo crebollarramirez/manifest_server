@@ -4,6 +4,7 @@ import textwrap
 import unittest
 
 from workers.cad_validator.cad_ast_validator import validate_cad_source
+from tests.test_indexer_extractor import EMPTY_SKELETON_SOURCE
 from tests.test_indexer_smoke import DEPENDENT_SOURCE
 
 
@@ -119,6 +120,13 @@ class CadPartDecoratorTests(unittest.TestCase):
                 for diagnostic in report["diagnostics"]
             )
         )
+
+
+class EmptySkeletonTests(unittest.TestCase):
+    def test_zero_field_model_params_and_zero_features_are_valid(self):
+        report = validate_cad_source(EMPTY_SKELETON_SOURCE)
+
+        self.assertTrue(report["valid"], report)
 
 
 if __name__ == "__main__":

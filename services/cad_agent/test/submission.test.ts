@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { SubmissionService } from '../src/submission.service';
 import { WorkflowError } from '../src/contracts';
+import { CadAgentRepository } from '../src/cad-agent.repository';
 
 const PROJECT_ID = '22222222-2222-4222-8222-222222222222';
 const PART_ID = '11111111-1111-4111-8111-111111111111';
@@ -88,8 +89,7 @@ test('same client request ID with a different payload is rejected', async () => 
   );
 });
 
-test('a linked exact blank CAD part enters initial design while established source stays edit mode', async () => {
-  let source = 'from cadquery_runtime import cad_part, cq, dataclass\n';
+test('a linked CAD part is validated and queued without inspecting its source', async () => {
   const submitted: Array<Record<string, unknown>> = [];
   const repository = {
     editJobForClientRequest: async () => null,
@@ -100,8 +100,7 @@ test('a linked exact blank CAD part enters initial design while established sour
       part_name: 'Bracket',
       part_type: 'cad',
     }),
-    canonicalPath: () => 'model.py',
-    readText: async () => source,
+    readText: async () => assert.fail('Nest must not inspect CAD source during submission.'),
     submitEditJob: async (input: Record<string, unknown>) => {
       submitted.push(input);
       return queuedJob({
@@ -116,16 +115,60 @@ test('a linked exact blank CAD part enters initial design while established sour
     part_id: PART_ID,
     request_text: 'Create a soap holder',
   });
-  assert.equal(submitted[0].workflowMode, 'initial_design');
+  assert.equal(submitted[0].workflowMode, 'edit');
   assert.equal(submitted[0].requestedPartId, PART_ID);
-  assert.equal((submitted[0].resolvedTargets as unknown[]).length, 1);
+  assert.deepEqual(submitted[0].resolvedTargets, []);
+});
 
-  source += '\n@dataclass(frozen=True)\nclass ModelParams:\n    width: float = 2\n';
-  await service.submit({
-    project_id: PROJECT_ID,
-    part_id: PART_ID,
-    request_text: 'Make it wider',
+test('a linked mesh part cannot be queued as a CAD edit', async () => {
+  const repository = {
+    editJobForClientRequest: async () => null,
+    project: async () => ({ id: PROJECT_ID }),
+    part: async () => ({
+      id: PART_ID,
+      project_id: PROJECT_ID,
+      part_name: 'Dragon',
+      part_type: 'mesh',
+    }),
+  };
+  const service = new SubmissionService(repository as never);
+
+  await assert.rejects(
+    service.submit({
+      project_id: PROJECT_ID,
+      part_id: PART_ID,
+      request_text: 'Make it wider',
+    }),
+    (error: unknown) =>
+      error instanceof WorkflowError && error.code === 'INVALID_PART_TYPE',
+  );
+});
+
+test('part reservation conflicts retain their stable public error code', async () => {
+  const repository = Object.create(CadAgentRepository.prototype) as CadAgentRepository;
+  Object.assign(repository, {
+    client: {
+      rpc: async () => ({
+        data: null,
+        error: {
+          message: 'PART_EDIT_IN_PROGRESS: another edit reserves this part.',
+        },
+      }),
+    },
   });
-  assert.equal(submitted[1].workflowMode, 'edit');
-  assert.deepEqual(submitted[1].resolvedTargets, []);
+
+  await assert.rejects(
+    repository.submitEditJob({
+      projectId: PROJECT_ID,
+      requestText: 'Make it taller',
+      messages: [{ role: 'user', content: 'Make it taller' }],
+      requestedPartId: PART_ID,
+      workflowMode: 'edit',
+      clientRequestId: CLIENT_ID,
+      requestFingerprint: 'a'.repeat(64),
+      resolvedTargets: [],
+    }),
+    (error: unknown) =>
+      error instanceof WorkflowError && error.code === 'PART_EDIT_IN_PROGRESS',
+  );
 });

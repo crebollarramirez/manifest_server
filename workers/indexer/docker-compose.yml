@@ -4,8 +4,8 @@ services:
   indexer:
     image: manifest-indexer:local
     build:
-      context: ./
-      dockerfile: Dockerfile
+      context: ../..
+      dockerfile: workers/indexer/Dockerfile
     environment:
       SUPABASE_URL: ${SUPABASE_URL_DOCKER:-http://host.docker.internal:54321}
       SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?SUPABASE_SERVICE_ROLE_KEY is required}
@@ -13,6 +13,6 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - ./:/app
+      - ../..:/app
     init: true
     restart: unless-stopped

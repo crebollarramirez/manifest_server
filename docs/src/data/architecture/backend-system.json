@@ -30,7 +30,7 @@
     {
       "id": "cad-agent",
       "label": "NestJS Action API",
-      "description": "The NestJS compatibility endpoint for project, part, job, status, deletion, and chat actions.",
+      "description": "The NestJS compatibility endpoint for project, part, job, status, and deletion actions.",
       "type": "api",
       "icon": "api",
       "position": { "column": 1, "row": 1 },
@@ -42,19 +42,19 @@
         "trigger": ["An HTTP POST request reaches /v1/cad-agent/actions."],
         "preconditions": [
           "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be configured.",
-          "OPENAI_API_KEY is required only for direct mesh chat generation.",
+          "OPENAI_API_KEY is used by agent requests received through the WebSocket service.",
           "The endpoint is currently unauthenticated and must remain on a trusted network."
         ],
         "inputs": [
-          { "name": "action request", "description": "One of 15 supported actions plus action-specific names, UUIDs, messages, or request text." }
+          { "name": "action request", "description": "A supported administrative action plus action-specific names, UUIDs, or request text." }
         ],
         "outputs": [
           { "name": "JSON response", "description": "Synchronous resource data, a queued job ID, status details, or a typed HTTP error." }
         ],
         "decisionPoints": [
           "Project and part actions perform direct catalog CRUD and storage lifecycle work.",
-          "CAD part creation initializes blank source and also queues build_index; explicit index, validation, export, and CAD chat actions create durable database jobs and return immediately.",
-          "Mesh chat is the only action path that calls OpenAI synchronously and replaces model.py directly."
+          "CAD part creation initializes blank source and also queues build_index; explicit index, validation, and export actions create durable database jobs and return immediately.",
+          "Agent conversations are rejected by this HTTP action boundary and enter through WebSocket instead."
         ],
         "shortCircuit": "Non-POST requests return 405; invalid bodies, actions, names, UUIDs, or unsupported part operations return request errors before the handler completes.",
         "operations": {
@@ -246,26 +246,25 @@
       "flow": "asynchronous",
       "request": {
         "label": "idempotent request or progress subscription",
-        "type": "POST /v1/cad-edits or native WebSocket message",
+        "type": "native WebSocket message",
         "exampleBody": "{\"event\":\"subscribe\",\"job_id\":\"edit-job-uuid\",\"after_sequence\":4}"
       },
       "response": {
         "label": "job reference, snapshot, or ordered progress",
-        "type": "HTTP JSON or WebSocket event",
+        "type": "WebSocket event",
         "exampleBody": "{\"event\":\"progress\",\"sequence\":5,\"type\":\"validating\",\"message\":\"Validating candidate attempt 1.\"}"
       },
       "details": {
-        "summary": "Clients may submit through the Nest compatibility action or direct CAD-edit endpoint; both create the same durable edit_jobs workflow.",
+        "summary": "Clients submit agent requests only through the native WebSocket event; HTTP remains available for administrative actions and durable status reads.",
         "durability": "The job and progress events remain queryable after a disconnect.",
         "evidence": [
-          { "path": "services/cad_agent/src/cad-edits.controller.ts", "symbol": "CadEditsController", "kind": "source" },
           { "path": "services/cad_agent/src/cad-edits.gateway.ts", "symbol": "CadEditsGateway", "kind": "source" }
         ]
       }
     },
     {
       "id": "catalog-operations",
-      "source": "cad-agent",
+      "source": "cad-agent-service",
       "target": "project-catalog",
       "label": "project and part CRUD",
       "protocol": "database",
@@ -309,10 +308,10 @@
       },
       "details": {
         "summary": "The Nest action service creates durable handoffs and reads their state; it does not synchronously invoke a worker.",
-        "durability": "Accepted index, validation, export, Getter-test, and CAD-edit actions remain represented by database rows after the HTTP response.",
+        "durability": "Accepted index, validation, export, and Getter-test actions remain represented by database rows after the HTTP response.",
         "failureBehavior": "Most failed inserts or lookups fail the request. If only automatic indexing fails after CAD creation, the part remains and the response reports index_status=not_queued with a manual /index warning. Deletion preparation cancels queued rows but blocks while applicable work is running.",
         "evidence": [
-          { "path": "services/cad_agent/src/cad-actions.service.ts", "symbol": "exportPart / indexProject / chat / prepareForDeletion", "kind": "source" }
+          { "path": "services/cad_agent/src/cad-actions.service.ts", "symbol": "exportPart / indexProject / prepareForDeletion", "kind": "source" }
         ]
       }
     },
@@ -413,9 +412,9 @@
         "exampleBody": "{\"generated_code\":\"def build_model(params):\\n    ...\"}"
       },
       "details": {
-        "summary": "Only linked mesh chat takes this direct synchronous AI path. CAD chat queues edit_jobs instead.",
+        "summary": "A WebSocket request targeting a linked mesh part takes this direct synchronous AI path; CAD requests enter the CAD goal/workflow path.",
         "trustBoundary": "Current mesh model.py and recent conversation cross to the external API.",
-        "failureBehavior": "Any API or response-contract failure returns HTTP 500 and leaves model.py unchanged.",
+        "failureBehavior": "Any API or response-contract failure emits a WebSocket error and leaves model.py unchanged.",
         "evidence": [
           { "path": "services/cad_agent/src/mesh-generation.service.ts", "symbol": "generate / generatedMeshModelBody", "kind": "source" }
         ]

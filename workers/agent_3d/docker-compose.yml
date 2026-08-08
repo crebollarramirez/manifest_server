@@ -1,0 +1,25 @@
+name: manifest-agent-3d
+
+services:
+  agent-3d:
+    image: manifest-agent-3d:local
+    build:
+      context: ../..
+      dockerfile: workers/agent_3d/Dockerfile
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL_DOCKER:-http://host.docker.internal:54321}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?SUPABASE_SERVICE_ROLE_KEY is required}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY is required}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4-mini}
+      OPENAI_GOAL_MODEL: ${OPENAI_GOAL_MODEL:-gpt-5.4-mini}
+      OPENAI_PLANNING_MODEL: ${OPENAI_PLANNING_MODEL:-gpt-5.4-mini}
+      CAD_EDITOR_JOB_POLL_INTERVAL_SECONDS: ${CAD_EDITOR_JOB_POLL_INTERVAL_SECONDS:-2}
+      CAD_EDITOR_DEPENDENCY_POLL_INTERVAL_SECONDS: ${CAD_EDITOR_DEPENDENCY_POLL_INTERVAL_SECONDS:-0.5}
+      CAD_EDITOR_DEPENDENCY_TIMEOUT_SECONDS: ${CAD_EDITOR_DEPENDENCY_TIMEOUT_SECONDS:-300}
+      CAD_EDITOR_LEASE_SECONDS: ${CAD_EDITOR_LEASE_SECONDS:-300}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ../..:/app
+    init: true
+    restart: unless-stopped

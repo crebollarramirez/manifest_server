@@ -12,12 +12,12 @@ import { cadAgentActions } from '../data/cad-agent-actions';
 import '../styles/service-docs.css';
 
 const glance = [
-	{ label: 'Top API layer', value: 'NestJS CAD Agent actions plus CAD edit HTTP/WebSocket endpoints' },
-	{ label: 'Interfaces', value: 'POST JSON actions, direct CAD-edit REST, durable status, and replayable WebSocket progress' },
+	{ label: 'Top API layer', value: 'NestJS administrative HTTP actions plus a WebSocket-only agent boundary' },
+	{ label: 'Interfaces', value: 'POST JSON administration, HTTP durable status, and WebSocket conversations/progress' },
 	{ label: 'Durable work', value: 'Postgres index, generation, edit, CAD-tool, and edit-progress records' },
 	{ label: 'Microservices', value: 'Nest CAD Agent, Python CAD tools, Indexer, CAD Validator, and CAD Exporter' },
 	{ label: 'File owner', value: 'Private 3dProjects Supabase Storage bucket' },
-	{ label: 'AI paths', value: 'Linked blank CAD initial design, scoped CAD edits, and linked mesh generation' },
+	{ label: 'AI paths', value: 'In-memory goal planning, durable CAD tool planning, and linked mesh generation' },
 ];
 
 const modes = [
@@ -29,9 +29,15 @@ const modes = [
 	},
 	{
 		name: 'Durable work',
-		source: 'index_project, test_index, validate_part, export_part, and CAD chat.',
-		success: 'Creates an index_jobs, generation_jobs, or idempotent edit_jobs row and returns its UUID.',
+		source: 'index_project, test_index, validate_part, and export_part actions.',
+		success: 'Creates an index_jobs or generation_jobs row and returns its UUID.',
 		downstream: 'An independent worker later claims the database row.',
+	},
+	{
+		name: 'CAD planning MVP',
+		source: 'WebSocket request for a CAD project or linked CAD part.',
+		success: 'Logs a server-identified goal and version-1 plan after bounded read-only semantic retrieval.',
+		downstream: 'Stops without executing a step or persisting a goal, plan, edit job, candidate, or validation.',
 	},
 	{
 		name: 'CAD progress',
@@ -41,7 +47,7 @@ const modes = [
 	},
 	{
 		name: 'Mesh chat',
-		source: 'chat with a linked mesh part.',
+		source: 'WebSocket request with a linked mesh part.',
 		success: 'Calls OpenAI, replaces mesh model.py, then inserts an export_mesh job.',
 		downstream: 'The storage write and job insert are sequential, not transactional.',
 	},
@@ -50,13 +56,13 @@ const modes = [
 const guarantees = [
 	{
 		title: 'Worker work is durable before response',
-		description: 'Indexing, Getter tests, validation, export, and CAD editing are represented by Postgres job rows before the HTTP response returns.',
-		evidence: 'services/cad_agent/src/cad-actions.service.ts — exportPart / indexProject / chat',
+		description: 'Indexing, Getter tests, validation, and export are represented by Postgres job rows before the administrative HTTP response returns.',
+		evidence: 'services/cad_agent/src/cad-actions.service.ts — exportPart / indexProject',
 	},
 	{
 		title: 'CAD and mesh chat use different paths',
-		description: 'CAD chat enters the durable Nest-orchestrated tool workflow through an idempotent database contract. Linked mesh chat calls OpenAI synchronously inside the Nest service.',
-		evidence: 'services/cad_agent/src/cad-actions.service.ts and mesh-generation.service.ts',
+		description: 'Both request types enter through WebSocket. CAD requests create and log an in-memory goal and read-only plan, while linked mesh requests call mesh generation inside Nest.',
+		evidence: 'services/cad_agent/src/cad-edits.gateway.ts and mesh-generation.service.ts',
 	},
 	{
 		title: 'Manual CAD work is source-bound',
@@ -137,7 +143,7 @@ const failures = [
 
 		<article class="doc-prose">
 			<h2>Backend boundary</h2>
-			<p><code>services/cad_agent/</code> is the sole CAD Agent API runtime. Its action endpoint owns projects, parts, explicit job creation, status, deletion, blank CAD initialization, and linked-mesh generation, while its CAD-edit REST and WebSocket endpoints provide durable submissions and replayable progress.</p>
+			<p><code>services/cad_agent/</code> is the sole CAD Agent API runtime. Its HTTP action endpoint owns projects, parts, explicit job creation, status, deletion, and blank CAD initialization. Agent requests—including linked-mesh generation—are WebSocket-only, and the same channel provides replayable progress.</p>
 			<p>The same Nest process owns OpenAI planning and durable CAD orchestration. Python CAD tools, Indexer, CAD Validator, and CAD Exporter consume durable Postgres work rather than serving as synchronous HTTP callees.</p>
 		</article>
 
@@ -151,7 +157,7 @@ const failures = [
 
 		<BoundaryMatrix
 			owns={[
-				'Nest CAD Agent: action validation, project/part operations, linked-mesh generation, direct edit submission, idempotency, OpenAI planning, durable orchestration, WebSocket replay, guarded commit, and downstream handoffs.',
+				'Nest CAD Agent: administrative action validation, project/part operations, WebSocket-only agent requests, OpenAI planning, durable orchestration, replay, guarded commit, and downstream handoffs.',
 				'Python CAD tools: bounded context and transactional AST/source mutation against isolated candidates.',
 			]}
 			doesNotOwn={[
@@ -227,19 +233,21 @@ SUPABASE_URL_DOCKER=http://host.docker.internal:54321
 BLENDER_JOB_TIMEOUT_SECONDS=300`} />
 					</div>
 					<div>
-						<h4>CAD Agent + tools — <code>workers/cad_editor/.env</code></h4>
-						<CommandBlock label="CAD Agent environment" command={`SUPABASE_SERVICE_ROLE_KEY=replace-with-local-service-role-key
+						<h4>Agent3D (Python CAD worker) — <code>workers/agent_3d/.env</code></h4>
+						<CommandBlock label="Agent3D environment" command={`SUPABASE_SERVICE_ROLE_KEY=replace-with-local-service-role-key
 OPENAI_API_KEY=replace-with-openai-key
 # Optional
 SUPABASE_URL_DOCKER=http://host.docker.internal:54321
 OPENAI_MODEL=gpt-5.4-mini
-CAD_AGENT_PORT=3010
-CAD_AGENT_POLL_INTERVAL_MS=2000
-CAD_AGENT_DEPENDENCY_POLL_INTERVAL_MS=500
-CAD_AGENT_DEPENDENCY_TIMEOUT_SECONDS=300
-CAD_AGENT_LEASE_SECONDS=300
-CAD_TOOL_JOB_POLL_INTERVAL_SECONDS=2
-CAD_TOOL_LEASE_SECONDS=300`} />
+OPENAI_GOAL_MODEL=gpt-5.4-mini
+OPENAI_PLANNING_MODEL=gpt-5.4-mini
+OPENAI_AGENT_MODEL=gpt-5.4-mini
+CAD_EDITOR_PLANNING_ONLY=true
+CAD_EDITOR_LOG_DIRECTORY=workers/agent_3d/logs
+CAD_EDITOR_JOB_POLL_INTERVAL_SECONDS=2
+CAD_EDITOR_DEPENDENCY_POLL_INTERVAL_SECONDS=0.5
+CAD_EDITOR_DEPENDENCY_TIMEOUT_SECONDS=300
+CAD_EDITOR_LEASE_SECONDS=300`} />
 					</div>
 				</div>
 			</section>
@@ -257,7 +265,7 @@ CAD_AGENT_PORT=3010`} />
 				<CommandBlock label="Install locked dependencies" command="npm ci" />
 				<CommandBlock label="Start Nest in watch mode" command="npm run start:dev" />
 				<CommandBlock label="Build and start production mode" command={['npm run build', 'npm run start'].join('\n')} />
-				<p>The server listens on <code>http://127.0.0.1:3010</code> by default. Compatibility actions use <code>POST /v1/cad-agent/actions</code>, CAD clients may submit directly to <code>POST /v1/cad-edits</code>, status uses <code>GET /v1/cad-edits/:jobId</code>, and live progress uses <code>ws://127.0.0.1:3010/v1/cad-edits/ws</code>.</p>
+				<p>The server listens on <code>http://127.0.0.1:3010</code> by default. Administrative actions use <code>POST /v1/cad-agent/actions</code>, status uses <code>GET /v1/cad-edits/:jobId</code>, and agent requests plus live progress use <code>ws://127.0.0.1:3010/v1/cad-edits/ws</code>. There is no HTTP agent-submission route.</p>
 			</section>
 
 			<section class="runbook__section">
@@ -266,7 +274,7 @@ CAD_AGENT_PORT=3010`} />
 				<CommandBlock label="Start every worker" command={`docker compose --env-file workers/indexer/.env -f workers/indexer/docker-compose.yml up --build -d &&
 docker compose --env-file workers/cad_validator/.env -f workers/cad_validator/docker-compose.yml up --build -d &&
 docker compose --env-file workers/cad_exporter/.env -f workers/cad_exporter/docker-compose.yml up --build -d &&
-docker compose --env-file workers/cad_editor/.env -f workers/cad_editor/docker-compose.yml up --build -d`} />
+docker compose --env-file workers/agent_3d/.env -f workers/agent_3d/docker-compose.yml up --build -d`} />
 
 				<div class="runbook__commands">
 					<div>
@@ -285,13 +293,14 @@ docker compose --env-file workers/cad_editor/.env -f workers/cad_editor/docker-c
 						<CommandBlock label="Stop" command="docker compose -f workers/cad_exporter/docker-compose.yml down" />
 					</div>
 					<div>
-						<h4>CAD Agent + Python tools</h4>
-						<CommandBlock label="Start Nest and tool worker" command="docker compose --env-file workers/cad_editor/.env -f workers/cad_editor/docker-compose.yml up --build" />
-						<CommandBlock label="Stop" command="docker compose -f workers/cad_editor/docker-compose.yml down" />
+						<h4>Agent3D (Python CAD worker)</h4>
+						<CommandBlock label="Start" command="docker compose --env-file workers/agent_3d/.env -f workers/agent_3d/docker-compose.yml up --build" />
+						<CommandBlock label="Stop" command="docker compose -f workers/agent_3d/docker-compose.yml down" />
+						<CommandBlock label="Scale to 4 replicas" command="docker compose --env-file workers/agent_3d/.env -f workers/agent_3d/docker-compose.yml up --build --scale agent-3d=4" />
 					</div>
 				</div>
 
-				<CommandBlock label="Stop every worker" command={`docker compose -f workers/cad_editor/docker-compose.yml down &&
+				<CommandBlock label="Stop every worker" command={`docker compose -f workers/agent_3d/docker-compose.yml down &&
 docker compose -f workers/cad_exporter/docker-compose.yml down &&
 docker compose -f workers/cad_validator/docker-compose.yml down &&
 docker compose -f workers/indexer/docker-compose.yml down`} />

@@ -23,8 +23,9 @@ MAX_HISTORY_MESSAGES = 8
 INDEX_TEST_TIMEOUT_SECONDS = 60.0
 INDEX_TEST_POLL_INTERVAL_SECONDS = 0.5
 DEFAULT_CAD_AGENT_HTTP_URL = "http://127.0.0.1:3000"
-DEFAULT_CAD_AGENT_WS_URL = "ws://localhost:3010/v1/cad-edits/ws"
+DEFAULT_CAD_AGENT_WS_URL = "ws://localhost:3000/v1/cad-edits/ws"
 DEFAULT_HTTP_TIMEOUT_SECONDS = 120.0
+DEFAULT_WS_TIMEOUT_SECONDS = 120.0
 PROGRESS_RECONNECT_ATTEMPTS = 3
 PROGRESS_RECONNECT_BACKOFF_SECONDS = 0.5
 
@@ -130,6 +131,85 @@ class CadAgentHttpClient:
         self.session.close()
 
 
+class CadAgentWebSocketClient:
+    """Submit user conversations over the CAD Agent WebSocket boundary."""
+
+    def __init__(
+        self,
+        websocket_url: str,
+        *,
+        timeout_seconds: float = DEFAULT_WS_TIMEOUT_SECONDS,
+        connection_factory: Callable[..., Any] | None = None,
+    ) -> None:
+        normalized = websocket_url.strip()
+        if not normalized:
+            raise RuntimeError("CAD_AGENT_WS_URL must not be empty.")
+        if timeout_seconds <= 0:
+            raise RuntimeError("CAD_AGENT_WS_TIMEOUT_SECONDS must be greater than zero.")
+        if connection_factory is None:
+            try:
+                import websocket
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Install CLI dependencies first: python -m pip install -r requirements.txt"
+                ) from exc
+            connection_factory = websocket.create_connection
+        self.websocket_url = normalized
+        self.timeout_seconds = timeout_seconds
+        self.connection_factory = connection_factory
+
+    def submit(self, body: dict[str, Any]) -> dict[str, Any]:
+        connection = None
+        try:
+            connection = self.connection_factory(
+                self.websocket_url,
+                timeout=self.timeout_seconds,
+            )
+            connection.send(json.dumps({"event": "cad.edit.submit", "data": body}))
+            while True:
+                raw = connection.recv()
+                if not isinstance(raw, str) or not raw:
+                    raise RuntimeError("The CAD Agent WebSocket disconnected before replying.")
+                envelope = json.loads(raw)
+                if not isinstance(envelope, dict):
+                    raise RuntimeError("CAD Agent WebSocket response must be a JSON object.")
+                event_name = envelope.get("event")
+                data = envelope.get("data")
+                if event_name == "cad.edit.error":
+                    detail = data if isinstance(data, dict) else {}
+                    message = detail.get("message")
+                    raise RuntimeError(
+                        message if isinstance(message, str) and message
+                        else "The CAD Agent rejected the WebSocket request."
+                    )
+                if event_name not in {
+                    "cad.edit.accepted",
+                    "cad.mesh.accepted",
+                }:
+                    continue
+                if not isinstance(data, dict):
+                    raise RuntimeError("CAD Agent WebSocket response data must be an object.")
+                payload = dict(data)
+                payload["event"] = event_name
+                if not isinstance(payload.get("message"), str):
+                    payload["message"] = (
+                        "CAD edit request accepted."
+                        if event_name == "cad.edit.accepted"
+                        else "CAD Agent request accepted."
+                    )
+                return payload
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"CAD Agent WebSocket request failed: {exc}") from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def close(self) -> None:
+        pass
+
+
 def parse_command(value: str) -> CliCommand:
     try:
         tokens = shlex.split(value)
@@ -210,6 +290,21 @@ def create_http_client() -> CadAgentHttpClient:
     if timeout_seconds <= 0:
         raise RuntimeError("CAD_AGENT_HTTP_TIMEOUT_SECONDS must be greater than zero.")
     return CadAgentHttpClient(base_url, timeout_seconds=timeout_seconds)
+
+
+def create_websocket_client() -> CadAgentWebSocketClient:
+    raw_timeout = os.environ.get(
+        "CAD_AGENT_WS_TIMEOUT_SECONDS",
+        str(DEFAULT_WS_TIMEOUT_SECONDS),
+    )
+    try:
+        timeout_seconds = float(raw_timeout)
+    except ValueError as exc:
+        raise RuntimeError("CAD_AGENT_WS_TIMEOUT_SECONDS must be a number.") from exc
+    return CadAgentWebSocketClient(
+        resolve_websocket_url(),
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def invoke_action(client: Any, body: dict[str, Any]) -> dict[str, Any]:
@@ -506,7 +601,11 @@ def handle_command(
     raise CommandError("Unsupported command.")
 
 
-def send_chat(client: Any, state: CliState, user_message: str) -> tuple[str, str]:
+def send_chat(
+    client: Any,
+    state: CliState,
+    user_message: str,
+) -> tuple[str, str | None]:
     if not state.project:
         raise CommandError("Link a project before sending AI messages.")
 
@@ -515,19 +614,19 @@ def send_chat(client: Any, state: CliState, user_message: str) -> tuple[str, str
         {"role": "user", "content": user_message},
     ]
     body: dict[str, Any] = {
-        "action": "chat",
         "project_id": state.project["id"],
+        "request_text": user_message,
         "messages": request_messages,
         "client_request_id": str(uuid.uuid4()),
     }
     if state.part:
         body["part_id"] = state.part["id"]
-    payload = invoke_action(
-        client,
-        body,
-    )
+    payload = client.submit(body)
+    if not isinstance(payload, dict):
+        raise RuntimeError("CAD Agent WebSocket response must be a JSON object.")
     message = response_message(payload)
-    job_id = response_job_id(payload)
+    raw_job_id = payload.get("job_id")
+    job_id = raw_job_id if isinstance(raw_job_id, str) else None
 
     state.history = [
         *request_messages,
@@ -662,7 +761,10 @@ def resolve_websocket_url(http_url: str | None = None) -> str:
     configured = os.environ.get("CAD_AGENT_WS_URL", "").strip()
     if configured:
         return configured
-    base = (http_url or os.environ.get("CAD_AGENT_HTTP_URL", DEFAULT_CAD_AGENT_HTTP_URL)).strip()
+    configured_http = os.environ.get("CAD_AGENT_HTTP_URL", "").strip()
+    if http_url is None and not configured_http:
+        return DEFAULT_CAD_AGENT_WS_URL
+    base = (http_url or configured_http).strip()
     parsed = urlsplit(base)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return DEFAULT_CAD_AGENT_WS_URL
@@ -673,22 +775,27 @@ def resolve_websocket_url(http_url: str | None = None) -> str:
 def main() -> int:
     load_dotenv(ENV_PATH)
     parse_args()
+    action_client = None
     try:
-        client = create_http_client()
+        action_client = create_http_client()
+        conversation_client = create_websocket_client()
     except Exception as exc:
+        if action_client is not None:
+            action_client.close()
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
     state = CliState()
     try:
         try:
-            startup_message = auto_link_first_project(client, state)
+            startup_message = auto_link_first_project(action_client, state)
         except Exception as exc:
             print(f"error: could not initialize the CLI: {exc}", file=sys.stderr)
             return 1
 
         print("3D Model Agent")
-        print(f"Nest action API: {client.action_url}")
+        print(f"Nest action API: {action_client.action_url}")
+        print(f"Agent WebSocket: {conversation_client.websocket_url}")
         print(startup_message)
         print("Use /create or /link to select a project and CAD or mesh part.")
         print("Use /list -projects or /list -parts to see available IDs.")
@@ -713,18 +820,20 @@ def main() -> int:
 
             try:
                 if value.startswith("/"):
-                    print(f"agent> {handle_command(client, state, parse_command(value))}\n")
+                    print(f"agent> {handle_command(action_client, state, parse_command(value))}\n")
                 else:
-                    message, job_id = send_chat(client, state, value)
+                    message, job_id = send_chat(conversation_client, state, value)
                     print(f"agent> {message}")
-                    print(f"job> {job_id}")
-                    if not state.part or state.part.get("part_type") == "cad":
+                    if job_id:
+                        print(f"job> {job_id}")
+                    if job_id and (not state.part or state.part.get("part_type") == "cad"):
                         follow_edit_job(job_id)
                     print()
             except Exception as exc:
                 print(f"error: {exc}", file=sys.stderr)
     finally:
-        client.close()
+        action_client.close()
+        conversation_client.close()
 
 
 if __name__ == "__main__":

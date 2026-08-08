@@ -4,7 +4,6 @@ import hashlib
 import unittest
 from unittest.mock import patch
 
-from tests.test_cad_editor_core import MODEL_SOURCE
 from workers.cad_validator.cad_ast_validator import validate_cad_source
 from workers.cad_validator.validate_cad_job import (
     validate_cad_job,
@@ -13,6 +12,28 @@ from workers.cad_validator.validate_cad_job import (
 
 
 PROJECT_ID = "11111111-1111-4111-8111-111111111111"
+
+MODEL_SOURCE = """from cadquery_runtime import cad_part, cq, dataclass
+
+@dataclass(frozen=True)
+class ModelParams:
+    hole_diameter: float = 4.0
+    plate_width: float = 20.0
+
+@cad_part(
+    semantic_id="mount_holes",
+    role="fastener_features",
+    library="cadquery",
+    parameters=("hole_diameter",),
+    depends_on=(),
+    search_keys=("mounting holes", "screw holes"),
+)
+def cut_mounting_holes(params: ModelParams):
+    return cq.Workplane("XY").circle(params.hole_diameter / 2).extrude(2)
+
+def build_model(params: ModelParams):
+    return cut_mounting_holes(params)
+"""
 PART_ID = "22222222-2222-4222-8222-222222222222"
 EDIT_JOB_ID = "33333333-3333-4333-8333-333333333333"
 CANDIDATE_PATH = (

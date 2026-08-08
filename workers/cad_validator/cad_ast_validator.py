@@ -194,14 +194,6 @@ def model_params_check(tree: ast.Module) -> tuple[dict, set[str]]:
         for node in model_params.body
         if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
     }
-    if not fields:
-        errors.append(
-            validation_error(
-                "model_params_fields",
-                "ModelParams must define at least one annotated field.",
-                model_params,
-            )
-        )
     return check_result(errors), fields
 
 
@@ -273,13 +265,6 @@ def decorator_presence_check(tree: ast.Module) -> tuple[dict, list[tuple[ast.AST
     errors: list[dict] = []
     decorators: list[tuple[ast.AST, ast.Call]] = []
     features = public_features(tree)
-    if not features:
-        errors.append(
-            validation_error(
-                "cad_feature_missing",
-                "At least one public CAD feature function is required.",
-            )
-        )
 
     for function in features:
         matches = cad_part_decorators(function)

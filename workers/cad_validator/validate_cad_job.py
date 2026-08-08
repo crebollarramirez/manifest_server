@@ -1,24 +1,30 @@
 from __future__ import annotations
 
 import hashlib
-import json
-import os
 import shutil
-import subprocess
-import sys
 from pathlib import Path
 
 try:
     from .cad_ast_validator import symbol_at_line, validate_cad_source
+    from .subprocess_sandbox import (
+        bounded_output,
+        run_sandboxed_runner,
+        sanitized_validation_environment,
+        validation_timeout_seconds,
+    )
 except ImportError:
     from cad_ast_validator import symbol_at_line, validate_cad_source
+    from subprocess_sandbox import (
+        bounded_output,
+        run_sandboxed_runner,
+        sanitized_validation_environment,
+        validation_timeout_seconds,
+    )
 
 
 BUCKET = "3dProjects"
 WORKER_DIR = Path(__file__).resolve().parent
 VALIDATION_RUNNER = WORKER_DIR / "cad_validation_runner.py"
-DEFAULT_VALIDATION_TIMEOUT_SECONDS = 60
-MAX_CAPTURED_OUTPUT = 16_000
 
 
 def cad_part_storage_path(project_id: str, part_id: str, filename: str) -> str:
@@ -50,78 +56,19 @@ def download_file(supabase, storage_path: str, local_path: Path) -> None:
     local_path.write_bytes(data)
 
 
-def validation_timeout_seconds() -> int:
-    value = os.environ.get(
-        "CAD_VALIDATION_TIMEOUT_SECONDS",
-        str(DEFAULT_VALIDATION_TIMEOUT_SECONDS),
-    )
-    try:
-        timeout = int(value)
-    except ValueError as exc:
-        raise ValueError("CAD_VALIDATION_TIMEOUT_SECONDS must be an integer.") from exc
-    if timeout <= 0:
-        raise ValueError("CAD_VALIDATION_TIMEOUT_SECONDS must be greater than zero.")
-    return timeout
-
-
-def sanitized_validation_environment(workdir: Path) -> dict[str, str]:
-    environment = os.environ.copy()
-    sensitive_names = {
-        "OPENAI_API_KEY",
-        "SUPABASE_ANON_KEY",
-        "SUPABASE_KEY",
-        "SUPABASE_SERVICE_ROLE_KEY",
-        "SUPABASE_URL",
-    }
-    for name in tuple(environment):
-        if name in sensitive_names or name.endswith(("_TOKEN", "_SECRET")):
-            environment.pop(name, None)
-
-    home_dir = workdir / "home"
-    temp_dir = workdir / "tmp"
-    home_dir.mkdir(parents=True, exist_ok=True)
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    environment["HOME"] = str(home_dir)
-    environment["TMPDIR"] = str(temp_dir)
-    environment["PYTHONNOUSERSITE"] = "1"
-    return environment
-
-
-def bounded_output(value: str | bytes | None) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        value = value.decode("utf-8", errors="replace")
-    return value[-MAX_CAPTURED_OUTPUT:]
-
-
 def run_model(model_path: Path, params_path: Path, workdir: Path) -> dict:
     timeout = validation_timeout_seconds()
     result_path = workdir / "runtime-result.json"
-    command = [
-        sys.executable,
-        "-I",
-        str(VALIDATION_RUNNER),
-        "--model",
-        str(model_path),
-        "--params",
-        str(params_path),
-        "--result",
-        str(result_path),
-    ]
-    try:
-        result = subprocess.run(
-            command,
-            cwd=workdir,
-            env=sanitized_validation_environment(workdir),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        stdout = bounded_output(exc.stdout)
-        stderr = bounded_output(exc.stderr)
+    outcome = run_sandboxed_runner(
+        VALIDATION_RUNNER,
+        ["--model", str(model_path), "--params", str(params_path)],
+        result_path=result_path,
+        workdir=workdir,
+        timeout_seconds=timeout,
+    )
+
+    if outcome.timed_out:
+        stderr = outcome.stderr
         message = f"CAD model execution timed out after {timeout} seconds."
         if stderr:
             stderr = f"{stderr}\n{message}"
@@ -132,7 +79,7 @@ def run_model(model_path: Path, params_path: Path, workdir: Path) -> dict:
             "skipped": False,
             "exit_code": None,
             "timed_out": True,
-            "stdout": stdout,
+            "stdout": outcome.stdout,
             "stderr": bounded_output(stderr),
             "errors": [{"code": "runtime_timeout", "message": message}],
             "validation_result": {
@@ -152,28 +99,9 @@ def run_model(model_path: Path, params_path: Path, workdir: Path) -> dict:
             },
         }
 
-    stdout = bounded_output(result.stdout)
-    stderr = bounded_output(result.stderr)
-    if result_path.exists():
-        try:
-            validation_result = json.loads(result_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            validation_result = {
-                "status": "failed",
-                "stage": "cadquery_runtime",
-                "repairable_hint": False,
-                "diagnostics": [
-                    {
-                        "error_code": "VALIDATION_WORKER_ERROR",
-                        "message": f"Runtime result could not be read: {exc}",
-                        "stage": "cadquery_runtime",
-                        "file_path": "model.py",
-                        "related_symbols": [],
-                    }
-                ],
-                "build_artifacts": None,
-            }
-    else:
+    if outcome.result_json is not None:
+        validation_result = outcome.result_json
+    elif outcome.result_read_error == "missing":
         validation_result = {
             "status": "failed",
             "stage": "cadquery_runtime",
@@ -183,6 +111,24 @@ def run_model(model_path: Path, params_path: Path, workdir: Path) -> dict:
                     "error_code": "VALIDATION_WORKER_ERROR",
                     "message": (
                         "CAD runtime exited without writing a structured result."
+                    ),
+                    "stage": "cadquery_runtime",
+                    "file_path": "model.py",
+                    "related_symbols": [],
+                }
+            ],
+            "build_artifacts": None,
+        }
+    else:
+        validation_result = {
+            "status": "failed",
+            "stage": "cadquery_runtime",
+            "repairable_hint": False,
+            "diagnostics": [
+                {
+                    "error_code": "VALIDATION_WORKER_ERROR",
+                    "message": (
+                        f"Runtime result could not be read: {outcome.result_read_error}"
                     ),
                     "stage": "cadquery_runtime",
                     "file_path": "model.py",
@@ -201,10 +147,10 @@ def run_model(model_path: Path, params_path: Path, workdir: Path) -> dict:
     return {
         "passed": validation_result.get("status") == "passed",
         "skipped": False,
-        "exit_code": result.returncode,
+        "exit_code": outcome.exit_code,
         "timed_out": False,
-        "stdout": stdout,
-        "stderr": stderr,
+        "stdout": outcome.stdout,
+        "stderr": outcome.stderr,
         "errors": errors,
         "validation_result": validation_result,
     }

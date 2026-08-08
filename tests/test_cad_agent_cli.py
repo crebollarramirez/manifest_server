@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import sys
 import types
 import unittest
@@ -45,6 +46,18 @@ class FakeClient:
         self.calls.append(body)
         if not self.responses:
             raise AssertionError("No fake response remains for this invocation")
+        return self.responses.pop(0)
+
+
+class FakeConversationClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def submit(self, body):
+        self.calls.append(body)
+        if not self.responses:
+            raise AssertionError("No fake response remains for this submission")
         return self.responses.pop(0)
 
 
@@ -407,25 +420,37 @@ class LinkedStateTests(unittest.TestCase):
 class ChatTests(unittest.TestCase):
     def test_chat_requires_linked_project(self):
         with self.assertRaisesRegex(cad_agent_cli.CommandError, "Link a project"):
-            cad_agent_cli.send_chat(FakeClient([]), cad_agent_cli.CliState(), "add a hole")
+            cad_agent_cli.send_chat(
+                FakeConversationClient([]),
+                cad_agent_cli.CliState(),
+                "add a hole",
+            )
 
     def test_cad_chat_requires_only_project(self):
-        client = FakeClient([
-            {"message": "queued", "job_id": "33333333-3333-4333-8333-333333333333"},
+        client = FakeConversationClient([
+            {
+                "message": "CAD edit request queued.",
+                "event": "cad.edit.accepted",
+                "job_id": EDIT_JOB_ID,
+            },
         ])
         state = cad_agent_cli.CliState(project=PROJECT.copy())
         message, job_id = cad_agent_cli.send_chat(client, state, "add a hole")
 
-        self.assertEqual(message, "queued")
-        self.assertTrue(job_id.startswith("33333333"))
+        self.assertEqual(message, "CAD edit request queued.")
+        self.assertEqual(job_id, EDIT_JOB_ID)
         body = client.calls[0]
-        self.assertEqual(body["action"], "chat")
         self.assertEqual(body["project_id"], PROJECT["id"])
+        self.assertEqual(body["request_text"], "add a hole")
+        self.assertNotIn("action", body)
         self.assertNotIn("part_id", body)
-        self.assertEqual(state.history[-1], {"role": "assistant", "content": "queued"})
+        self.assertEqual(
+            state.history[-1],
+            {"role": "assistant", "content": "CAD edit request queued."},
+        )
 
     def test_linked_cad_part_is_sent_as_the_authoritative_edit_target(self):
-        client = FakeClient([
+        client = FakeConversationClient([
             {"message": "queued", "job_id": "33333333-3333-4333-8333-333333333333"},
         ])
         state = cad_agent_cli.CliState(project=PROJECT.copy(), part=PART.copy())
@@ -437,7 +462,7 @@ class ChatTests(unittest.TestCase):
         self.assertIn("client_request_id", body)
 
     def test_mesh_chat_uses_the_same_part_scoped_action(self):
-        client = FakeClient([
+        client = FakeConversationClient([
             {"message": "updated mesh", "job_id": "55555555-5555-4555-8555-555555555555"},
         ])
         state = cad_agent_cli.CliState(project=PROJECT.copy(), part=MESH_PART.copy())
@@ -453,8 +478,81 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(body["part_id"], MESH_PART["id"])
         self.assertEqual(state.history[-1]["role"], "assistant")
 
+    def test_websocket_client_submits_event_envelope_and_reads_job_ack(self):
+        class Connection:
+            def __init__(self):
+                self.sent = []
+                self.closed = False
+
+            def send(self, value):
+                self.sent.append(json.loads(value))
+
+            def recv(self):
+                return json.dumps({
+                    "event": "cad.edit.accepted",
+                    "data": {
+                        "status": "queued",
+                        "state": "received",
+                        "job_id": EDIT_JOB_ID,
+                    },
+                })
+
+            def close(self):
+                self.closed = True
+
+        connection = Connection()
+        client = cad_agent_cli.CadAgentWebSocketClient(
+            "ws://cad-agent.test/v1/cad-edits/ws",
+            timeout_seconds=42,
+            connection_factory=lambda *_args, **_kwargs: connection,
+        )
+
+        payload = client.submit({"project_id": PROJECT["id"], "request_text": "add a hole"})
+
+        self.assertEqual(connection.sent[0]["event"], "cad.edit.submit")
+        self.assertEqual(connection.sent[0]["data"]["request_text"], "add a hole")
+        self.assertEqual(payload["event"], "cad.edit.accepted")
+        self.assertEqual(payload["job_id"], EDIT_JOB_ID)
+        self.assertEqual(payload["message"], "CAD edit request accepted.")
+        self.assertTrue(connection.closed)
+
+    def test_websocket_client_surfaces_agent_errors(self):
+        class Connection:
+            def send(self, _value):
+                pass
+
+            def recv(self):
+                return json.dumps({
+                    "event": "cad.edit.error",
+                    "data": {"code": "INVALID_REQUEST", "message": "request rejected"},
+                })
+
+            def close(self):
+                pass
+
+        client = cad_agent_cli.CadAgentWebSocketClient(
+            "ws://cad-agent.test/v1/cad-edits/ws",
+            connection_factory=lambda *_args, **_kwargs: Connection(),
+        )
+        with self.assertRaisesRegex(RuntimeError, "request rejected"):
+            client.submit({"project_id": PROJECT["id"], "request_text": "bad"})
+
 
 class LiveProgressTests(unittest.TestCase):
+    def test_uses_websocket_default_without_an_http_override(self):
+        previous_ws = os.environ.pop("CAD_AGENT_WS_URL", None)
+        previous_http = os.environ.pop("CAD_AGENT_HTTP_URL", None)
+        try:
+            self.assertEqual(
+                cad_agent_cli.resolve_websocket_url(),
+                cad_agent_cli.DEFAULT_CAD_AGENT_WS_URL,
+            )
+        finally:
+            if previous_ws is not None:
+                os.environ["CAD_AGENT_WS_URL"] = previous_ws
+            if previous_http is not None:
+                os.environ["CAD_AGENT_HTTP_URL"] = previous_http
+
     def test_derives_websocket_url_from_http_url(self):
         self.assertEqual(
             cad_agent_cli.resolve_websocket_url("https://cad.example.test/base"),

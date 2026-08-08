@@ -33,17 +33,26 @@ class WorkerComposeContractTests(unittest.TestCase):
         self.assertNotIn("getter:", indexer)
 
         editor = (
-            ROOT / "workers" / "cad_editor" / "docker-compose.yml"
+            ROOT / "workers" / "agent_3d" / "docker-compose.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("name: manifest-cad-agent", editor)
         self.assertEqual(editor.count("\n  cad-agent:\n"), 1)
-        self.assertEqual(editor.count("\n  cad-tool-worker:\n"), 1)
+        self.assertEqual(editor.count("\n  cad-editor:\n"), 1)
+        self.assertNotIn("cad-tool-worker:", editor)
         self.assertIn("services/cad_agent/Dockerfile", editor)
+        self.assertIn("OPENAI_API_KEY", editor)
+        self.assertIn("CAD_EDITOR_LEASE_SECONDS", editor)
+        self.assertIn("CAD_EDITOR_PLANNING_ONLY", editor)
+        self.assertIn("CAD_AGENT_PORT: 3000", editor)
+        self.assertIn('"${CAD_AGENT_PORT:-3000}:3000"', editor)
+        self.assertIn("CAD_AGENT_EVENT_POLL_INTERVAL_MS", editor)
+        self.assertNotIn("CAD_AGENT_LEASE_SECONDS", editor)
         self.assertNotIn("cad-editor-repair:", editor)
         editor_dockerfile = (
-            ROOT / "workers" / "cad_editor" / "Dockerfile"
+            ROOT / "workers" / "agent_3d" / "Dockerfile"
         ).read_text(encoding="utf-8")
-        self.assertIn('CMD ["python", "workers/cad_editor/tool_worker.py"]', editor_dockerfile)
+        self.assertIn('CMD ["python", "workers/agent_3d/edit_worker.py"]', editor_dockerfile)
+        self.assertIn("workers/agent_3d/planning/prompts", editor_dockerfile)
 
 
 if __name__ == "__main__":
