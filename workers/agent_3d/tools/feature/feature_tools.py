@@ -116,6 +116,8 @@ class CreateFeatureTool(AgentTool[CreateFeatureInput, CreateFeatureOutput]):
     )
     input_model = CreateFeatureInput
     output_model = CreateFeatureOutput
+    batchable = False
+    parallel_safe = False
 
     async def normalize_input(self, tool_input: CreateFeatureInput) -> CreateFeatureInput:
         search_keys = _dedupe_preserve_order([key.strip() for key in tool_input.search_keys])
@@ -432,6 +434,8 @@ class EditFeatureTool(AgentTool[EditFeatureInput, EditFeatureOutput]):
     )
     input_model = EditFeatureInput
     output_model = EditFeatureOutput
+    batchable = False
+    parallel_safe = False
 
     async def normalize_input(self, tool_input: EditFeatureInput) -> EditFeatureInput:
         updates: dict[str, object] = {}
@@ -803,6 +807,8 @@ class DeleteFeatureTool(AgentTool[DeleteFeatureInput, DeleteFeatureOutput]):
     )
     input_model = DeleteFeatureInput
     output_model = DeleteFeatureOutput
+    batchable = False
+    parallel_safe = False
 
     async def normalize_input(self, tool_input: DeleteFeatureInput) -> DeleteFeatureInput:
         return tool_input.model_copy(

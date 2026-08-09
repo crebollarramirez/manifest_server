@@ -154,7 +154,9 @@ between turns -- all loop state lives in the orchestrator:
 - only the currently active step is included -- `Agent3D` is not asked to
   reason about the whole plan at once;
 - at most 8 recent conversation messages are included, chronologically
-  ordered; fewer than 4 available messages are passed through unpadded;
+  ordered -- a plain trailing slice (`messages[-8:]`), not a summary; fewer
+  than 8 available messages are passed through as-is, since there is no
+  padding logic;
 - tool observations are scoped to the active step: they accumulate across
   that step's turns and are cleared the moment the active step changes, so a
   later step never inherits an earlier step's tool transcript;

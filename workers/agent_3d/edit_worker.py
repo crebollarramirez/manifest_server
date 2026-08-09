@@ -42,13 +42,13 @@ def build_runtime() -> tuple[Any, Any]:
     from openai import OpenAI
     from supabase import create_client
 
-    from agent_3d.agent_3d import Agent3D
-    from agent_3d.orchestrator import EditWorkflowOrchestrator
-    from agent_3d.planning.agent_trace import AgentTraceWriter
-    from agent_3d.planning.goal_creator import GoalCreator
-    from agent_3d.planning.planning_agent import PLANNING_TOOL_IDS, PlanningAgent
-    from agent_3d.repository import SupabaseEditRepository
-    from agent_3d.tools import (
+    from workers.agent_3d.agent_3d import Agent3D
+    from workers.agent_3d.orchestrator import EditWorkflowOrchestrator
+    from workers.agent_3d.planning.agent_trace import AgentTraceWriter
+    from workers.agent_3d.planning.goal_creator import GoalCreator
+    from workers.agent_3d.planning.planning_agent import PLANNING_TOOL_IDS, PlanningAgent
+    from workers.agent_3d.repository import SupabaseEditRepository
+    from workers.agent_3d.tools import (
         CheckGeometryTool,
         CreateCadPartTool,
         CreateFeatureTool,

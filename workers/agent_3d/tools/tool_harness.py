@@ -59,8 +59,8 @@ for _root in (WORKERS_ROOT, WORKSPACE_ROOT):
     if _root not in sys.path:
         sys.path.insert(0, _root)
 
-from agent_3d.failures import WorkflowFailure  # noqa: E402
-from agent_3d.tools import (  # noqa: E402
+from workers.agent_3d.failures import WorkflowFailure  # noqa: E402
+from workers.agent_3d.tools import (  # noqa: E402
     CreateCadPartTool,
     CreateFeatureTool,
     CreateParameterTool,
@@ -198,7 +198,7 @@ def build_supabase_repository():
         )
     from supabase import create_client
 
-    from agent_3d.repository import SupabaseEditRepository
+    from workers.agent_3d.repository import SupabaseEditRepository
 
     return SupabaseEditRepository(create_client(url, key))
 

@@ -3,86 +3,132 @@ import ArchitecturePage from '../../components/ArchitecturePage.astro';
 import cadThinking from '../../data/architecture/cad-agent-thinking.json';
 
 const visibleSignals = [
-	'The user request and linked part identity',
-	'Selected workflow mode and planning attempt',
-	'Bounded feature, parameter, dependency, and fingerprint context',
-	'The strict ToolPlan summary, registered operations, and impact review',
-	'Typed preflight or validation diagnostics used for repair',
-	'Public milestone events and the final changed or no-change outcome',
+	'The claimed job, its structured goal, and its high-level plan (checkpointed before the loop starts)',
+	'The active step, the tool calls requested for it, and their results (that step\'s observations)',
+	'Every model turn\'s raw request and response, correlated by agent_turn and step_turn',
+	'Step transitions (pending → in_progress → completed) and the loop\'s terminal outcome',
+	'Validation, commit, reindex, and export results, and any non-fatal warnings',
 ];
 
 const protectedSignals = [
-	'Hidden token-by-token model deliberation or private chain of thought',
-	'Prompt text, complete source bodies, credentials, or storage access',
-	'Unvalidated intermediate source or partial operation results',
+	'Hidden token-by-token model deliberation or private chain of thought (the Responses API does not expose it)',
+	'Prompt text and complete source bodies are never sent to clients — only milestone events are',
+	'Credentials, storage paths, or database access — the model never receives them',
 ];
 
-const planningTools = [
-	{ name: 'confirm_no_change', mode: 'Established edit', purpose: 'Prove with semantic IDs and current function-body fingerprints that accepted source already satisfies the request.' },
-	{ name: 'write_initial_model', mode: 'Initial design only', purpose: 'Supply the complete AI-owned model body behind the system-owned runtime import.' },
-	{ name: 'replace_parameter_field', mode: 'Established edit', purpose: 'Replace one existing annotated ModelParams field using its exact editable target and fingerprint.' },
-	{ name: 'add_model_parameter', mode: 'Established edit', purpose: 'Add one new annotated ModelParams field with a default.' },
-	{ name: 'delete_model_parameter', mode: 'Established edit', purpose: 'Delete one explicitly provenance-owned, unreferenced model parameter.' },
-	{ name: 'update_cad_part_metadata', mode: 'Established edit', purpose: 'Replace the bounded role, parameters, dependencies, and search keys of an existing semantic feature.' },
-	{ name: 'replace_cad_feature_body', mode: 'Established edit', purpose: 'Replace statements inside an existing public CAD feature selected by semantic ID.' },
-	{ name: 'add_cad_feature', mode: 'Established edit', purpose: 'Add one new server-decorated public semantic CAD feature.' },
-	{ name: 'delete_cad_feature', mode: 'Established edit', purpose: 'Delete one eligible existing semantic PART region.' },
-	{ name: 'replace_function_body', mode: 'Established edit', purpose: 'Replace statements inside an existing private helper.' },
-	{ name: 'add_private_helper', mode: 'Established edit', purpose: 'Add one new private synchronous helper function.' },
-	{ name: 'delete_private_helper', mode: 'Established edit', purpose: 'Delete one explicitly provenance-owned, unreferenced private helper.' },
-	{ name: 'replace_build_model_body', mode: 'Established edit', purpose: 'Replace only the statements inside build_model to update final assembly.' },
+const toolGroups = [
+	{
+		domain: 'index (read-only)',
+		note: 'Also the only two tools PlanningAgent may call while building the high-level plan.',
+		tools: [
+			{ name: 'index_search', mutating: false, params: 'query: str (1–1000, required) · limit: int (1–10, required)', summary: 'Search semantic CAD features in the selected part by free-text query; returns ranked matches with semantic IDs and scores.' },
+			{ name: 'index_get_feature', mutating: false, params: 'semantic_id: str (required)', summary: 'Retrieve one feature\'s exact role, parameters, dependencies, and dependents by exact semantic ID.' },
+		],
+	},
+	{
+		domain: 'feature',
+		tools: [
+			{ name: 'create_feature', mutating: true, params: 'semantic_id, function_name, role, docstring, function_body: str (required) · parameters, dependencies, search_keys: list (optional)', summary: 'Create one new, isolated semantic CadQuery feature function in the candidate. Does not wire it into build_model.' },
+			{ name: 'edit_feature', mutating: true, params: 'semantic_id?, function_name?: str (≥1 required to identify target) · role?, parameters?, dependencies?, search_keys?, docstring?, function_body?: optional replacements', summary: 'Change one or more properties of an existing feature; only fields you pass are changed. Does not rename or touch build_model.' },
+			{ name: 'delete_feature', mutating: true, params: 'semantic_id?, function_name?: str (≥1 required)', summary: 'Delete an existing agent-created feature. Refuses if still referenced by another feature\'s dependencies or by build_model.' },
+		],
+	},
+	{
+		domain: 'parameter',
+		tools: [
+			{ name: 'create_parameter', mutating: true, params: 'parameter_name: str (required) · value: float (> 0, required)', summary: 'Add one new agent-owned ModelParams field with a numeric default.' },
+			{ name: 'edit_parameter', mutating: true, params: 'parameter_name: str (required) · value: float (> 0, required)', summary: 'Change an existing ModelParams field\'s default value (any field, agent-created or hand-authored). Never renames.' },
+			{ name: 'delete_parameter', mutating: true, params: 'parameter_name: str (required)', summary: 'Delete an existing agent-created ModelParams field. Refuses if still referenced by any feature.' },
+		],
+	},
+	{
+		domain: 'build_model',
+		tools: [
+			{ name: 'edit_cad_build_model', mutating: true, params: 'function_body: str (1–8000 chars, required)', summary: 'Replace the entire body of build_model, the final assembly-wiring step. Rejects wiring in a function that doesn\'t exist yet in the candidate.' },
+		],
+	},
+	{
+		domain: 'part',
+		tools: [
+			{ name: 'create_cad_part', mutating: true, params: 'part_name: str (required, must be unique in the project)', summary: 'Create one new CAD part with a minimal, valid, empty model.py skeleton. Does not create parameters or features.' },
+		],
+	},
+	{
+		domain: 'geometry',
+		tools: [
+			{ name: 'check_geometry', mutating: false, params: 'none — all identity comes from the run\'s ToolExecutionContext', summary: 'Inspect the candidate\'s actual executed geometry (volume, bounding box, center of mass, solid/face/edge counts) against the immediately preceding candidate. Deterministic evidence only — never modifies source, never gates anything.' },
+		],
+	},
+	{
+		domain: 'step',
+		tools: [
+			{ name: 'request_step_completion', mutating: false, params: 'summary: str (1–2000, required)', summary: 'Signal that the active plan step is complete. The orchestrator gates this — see the Completion Gate stage — it is not honored blindly.' },
+		],
+	},
 ];
 ---
 
 <ArchitecturePage
-	title="CAD Agent Thinking Flow"
-	summary="An auditable view of what the CAD agent considers and in what order: bounded context, structured planning, deterministic preflight, no-change or candidate branching, validation feedback, and proof-gated completion."
+	title="Agent 3D Reasoning Loop"
+	summary="An auditable view of the actual Agent3D loop: one model call per turn, a bounded tool catalog, an orchestrator that executes and gates every decision, and a commit pipeline that only starts once the plan is done."
 	section="Reasoning view"
 	active="cad-thinking"
 	document={cadThinking}
-	fallback="Loading the CAD Agent thinking diagram…"
+	fallback="Loading the Agent 3D reasoning diagram…"
 	showExampleNotice={false}
 	diagramFirst={true}
-	sidebarNote="Production reasoning view: observable inputs, decisions, registered tool plans, deterministic checks, repair feedback, and terminal outcomes."
+	sidebarNote="Production reasoning view: the plan-driven turn loop, its completion gate and turn caps, and the full registered tool catalog."
 >
-	<h2>What “thinking” means here</h2>
-	<p>This page visualizes the system’s inspectable decision process, not a private chain-of-thought transcript. Each numbered card is an implementation-backed stage. Select a card or connector to inspect its inputs, decisions, guarantees, failure behavior, and source evidence.</p>
+	<h2>What "thinking" means here</h2>
+	<p>This page visualizes the system's inspectable decision loop, not a private chain-of-thought transcript. Each numbered card is an implementation-backed stage in <code>workers/agent_3d/agent_3d.py</code> and <code>orchestrator.py</code>. Select a card or connector to inspect its inputs, decisions, guarantees, failure behavior, and source evidence. The loop is genuinely a loop — follow the "another turn" and "step completed, advance" edges back from stage 9 to stages 6 and 5.</p>
+
+	<h2>The shape of one turn</h2>
+	<p><code>Agent3D.decide()</code> holds no state between calls. Every turn it rebuilds the same bounded context from scratch — goal and plan in full, the one active step, that step's accumulated observations, and at most 8 recent conversation messages — makes exactly one model call, and returns the raw response unchanged. It never executes what it decides. The orchestrator does: it runs every requested tool call against the edit-scoped candidate, appends the results as observations, and decides whether the loop continues, advances, or ends.</p>
 
 	<h2>What operators can observe</h2>
 	<ul>
 		{visibleSignals.map((signal) => <li>{signal}</li>)}
 	</ul>
 
-	<h2>What the progress stream intentionally excludes</h2>
+	<h2>What the trace intentionally excludes</h2>
 	<ul>
 		{protectedSignals.map((signal) => <li>{signal}</li>)}
 	</ul>
 
-	<h2>Registered tools available to the planning model</h2>
-	<p>OpenAI does not receive general Python, shell, database, or storage tools. It can only propose the following structured CAD operations inside a <code>ToolPlan</code>. The Python CAD Tool Worker treats every proposed operation as untrusted input and independently validates its mode, arguments, scope, ownership, source hash, and target fingerprints before execution.</p>
-	<table>
-		<thead>
-			<tr>
-				<th scope="col">Tool</th>
-				<th scope="col">Available in</th>
-				<th scope="col">Purpose</th>
-			</tr>
-		</thead>
-		<tbody>
-			{planningTools.map((tool) => (
-				<tr>
-					<th scope="row"><code>{tool.name}</code></th>
-					<td>{tool.mode}</td>
-					<td>{tool.purpose}</td>
-				</tr>
-			))}
-		</tbody>
-	</table>
+	<h2>Registered tools available to Agent3D</h2>
+	<p>All 12 tools below share one <code>ToolRegistry</code> and are available in Agent3D's full mutation-loop catalog. <code>PlanningAgent</code> — the earlier, separate stage that builds the high-level plan — can call only the two read-only <code>index</code> tools; every mutating tool exists only inside the loop this page visualizes. Every tool inherits the same strict contract (<code>base.py</code>): no extra input fields, no type coercion, immutable validated input, and a shared <code>{'{ok, data}'}</code> / <code>{'{ok, error}'}</code> result envelope.</p>
+	{toolGroups.map((group) => (
+		<div class="tool-group">
+			<h3><code>{group.domain}</code>{group.note ? <span class="tool-group__note"> — {group.note}</span> : null}</h3>
+			<table>
+				<thead>
+					<tr>
+						<th scope="col">Tool</th>
+						<th scope="col">Kind</th>
+						<th scope="col">Parameters</th>
+						<th scope="col">Summary</th>
+					</tr>
+				</thead>
+				<tbody>
+					{group.tools.map((tool) => (
+						<tr>
+							<th scope="row"><code>{tool.name}</code></th>
+							<td>{tool.mutating ? 'Mutates candidate' : 'Read-only'}</td>
+							<td><code>{tool.params}</code></td>
+							<td>{tool.summary}</td>
+						</tr>
+					))}
+				</tbody>
+			</table>
+		</div>
+	))}
 
 	<h3>System actions that are not model tools</h3>
-	<p>Context preparation, repair-context preparation, candidate validation, canonical commit, rollback, semantic reindexing, export queueing, storage access, database access, and public progress publication remain server- or worker-owned actions. The model can neither invoke them directly nor bypass their checks.</p>
+	<p>Goal creation, plan creation, step selection and status transitions, the completion gate, candidate bootstrap, validation queuing, canonical commit, rollback, reindexing, export queueing, and trace logging all remain orchestrator- or worker-owned actions. Agent3D can neither invoke them directly nor bypass their checks — it can only request tool calls from the 12-tool catalog above.</p>
 
-	<h2>Reading the two terminal paths</h2>
-	<p><strong>No change:</strong> when current source definitely satisfies the request, the plan uses one fingerprint-backed <code>confirm_no_change</code> operation. Python verifies that evidence and Nest completes without a candidate, validation, commit, post-edit reindex, or export.</p>
-	<p><strong>Source change:</strong> registered operations pass both plan gates, execute transactionally in memory, produce one isolated candidate, and enter independent validation. A repairable failure loops back with typed diagnostics; only exact validation proof can reach canonical commit.</p>
+	<h2>Reading the completion gate</h2>
+	<p>When the active step addresses a <code>required</code> goal criterion, <code>request_step_completion</code> is checked against one concrete signal: does the candidate have at least one <code>@cad_part</code> feature yet? If not, the call is rejected with <code>STEP_REQUIRES_A_FEATURE</code> and fed back as an observation — not silently honored. The check only looks at feature presence, not full model-parameter wiring, and it is self-limiting: once any feature exists anywhere in the candidate, later steps are never blocked by it, including the step that created that first feature. A step addressing only <code>preserve</code> criteria is never gated at all.</p>
+
+	<h2>Reading the turn caps</h2>
+	<p>Two bounds keep a stuck loop from running forever: at most <strong>10 turns</strong> on a single step (<code>AGENT_STEP_TURN_LIMIT</code>) and <strong>24 turns</strong> total (<code>AGENT_TURN_LIMIT</code>). A decision containing no tool call at all fails immediately with <code>AGENT_NO_ACTION</code> rather than silently burning the remaining budget or assuming the step finished. Any of these three outcomes ends the job before the commit pipeline (stages 10–14) is ever reached — nothing partial gets committed.</p>
 </ArchitecturePage>

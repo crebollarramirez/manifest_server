@@ -14,10 +14,10 @@ import '../styles/service-docs.css';
 const glance = [
 	{ label: 'Top API layer', value: 'NestJS administrative HTTP actions plus a WebSocket-only agent boundary' },
 	{ label: 'Interfaces', value: 'POST JSON administration, HTTP durable status, and WebSocket conversations/progress' },
-	{ label: 'Durable work', value: 'Postgres index, generation, edit, CAD-tool, and edit-progress records' },
-	{ label: 'Microservices', value: 'Nest CAD Agent, Python CAD tools, Indexer, CAD Validator, and CAD Exporter' },
+	{ label: 'Durable work', value: 'Postgres index, generation, edit, and edit-progress records' },
+	{ label: 'Microservices', value: 'Nest CAD Agent, Agent 3D (Python), Indexer, CAD Validator, and CAD Exporter' },
 	{ label: 'File owner', value: 'Private 3dProjects Supabase Storage bucket' },
-	{ label: 'AI paths', value: 'In-memory goal planning, durable CAD tool planning, and linked mesh generation' },
+	{ label: 'AI paths', value: "Agent 3D's goal/plan/reasoning loop (Python, owns CAD source) and linked mesh generation (Nest)" },
 ];
 
 const modes = [
@@ -34,10 +34,10 @@ const modes = [
 		downstream: 'An independent worker later claims the database row.',
 	},
 	{
-		name: 'CAD planning MVP',
+		name: 'CAD editing',
 		source: 'WebSocket request for a CAD project or linked CAD part.',
-		success: 'Logs a server-identified goal and version-1 plan after bounded read-only semantic retrieval.',
-		downstream: 'Stops without executing a step or persisting a goal, plan, edit job, candidate, or validation.',
+		success: 'Nest creates a durable edit_jobs row and stops; Agent 3D (Python) claims it, creates a goal and plan, then runs its reasoning loop against an isolated candidate.',
+		downstream: 'Only once every plan step completes does Agent 3D validate, commit, reindex, and queue export — see the reasoning loop.',
 	},
 	{
 		name: 'CAD progress',
@@ -61,7 +61,7 @@ const guarantees = [
 	},
 	{
 		title: 'CAD and mesh chat use different paths',
-		description: 'Both request types enter through WebSocket. CAD requests create and log an in-memory goal and read-only plan, while linked mesh requests call mesh generation inside Nest.',
+		description: 'Both request types enter through the same WebSocket. A CAD request creates a durable edit_jobs row for the separate Agent 3D worker; a linked mesh request calls mesh generation directly inside Nest.',
 		evidence: 'services/cad_agent/src/cad-edits.gateway.ts and mesh-generation.service.ts',
 	},
 	{
@@ -144,7 +144,7 @@ const failures = [
 		<article class="doc-prose">
 			<h2>Backend boundary</h2>
 			<p><code>services/cad_agent/</code> is the sole CAD Agent API runtime. Its HTTP action endpoint owns projects, parts, explicit job creation, status, deletion, and blank CAD initialization. Agent requests—including linked-mesh generation—are WebSocket-only, and the same channel provides replayable progress.</p>
-			<p>The same Nest process owns OpenAI planning and durable CAD orchestration. Python CAD tools, Indexer, CAD Validator, and CAD Exporter consume durable Postgres work rather than serving as synchronous HTTP callees.</p>
+			<p>Nest itself owns no CAD reasoning: a CAD request only creates one durable <code>edit_jobs</code> row and stops. The separate <a href="/services/cad-editor/">Agent 3D (Python)</a> worker claims it and owns goal creation, planning, the Agent3D reasoning loop, validation, commit, reindex, and export — see its <a href="/workflows/cad-thinking/">reasoning loop</a>. The Indexer, CAD Validator, and CAD Exporter likewise consume durable Postgres work rather than serving as synchronous HTTP callees.</p>
 		</article>
 
 		<aside class="notice notice--caution">
@@ -157,18 +157,18 @@ const failures = [
 
 		<BoundaryMatrix
 			owns={[
-				'Nest CAD Agent: administrative action validation, project/part operations, WebSocket-only agent requests, OpenAI planning, durable orchestration, replay, guarded commit, and downstream handoffs.',
-				'Python CAD tools: bounded context and transactional AST/source mutation against isolated candidates.',
+				'Nest CAD Agent: administrative action validation, project/part operations, WebSocket-only agent requests, idempotent job creation, linked-mesh generation, progress replay, and downstream handoffs.',
+				'Agent 3D (Python): goal creation, planning, the full Agent3D reasoning loop, validation coordination, hash-guarded commit, reindex, and export queueing.',
 			]}
 			doesNotOwn={[
-				'Independent index construction, CAD validation, or export execution.',
-				'Worker job claiming, terminal transitions, artifact construction, or service-level retries.',
+				'Nest does not own CAD reasoning, source mutation, or commit — Agent 3D does.',
+				'Independent index construction, CAD validation, or export execution — the Indexer, CAD Validator, and CAD Exporter own those.',
 				'Durable catalog, job, source, candidate, index, or export state outside Supabase stores.',
 			]}
 			dependsOn={[
-				'Postgres projects, parts, index_jobs, generation_jobs, edit_jobs, cad_tool_jobs, and edit_job_events.',
+				'Postgres projects, parts, index_jobs, generation_jobs, edit_jobs, and edit_job_events.',
 				'Private 3dProjects object storage.',
-				'OpenAI Responses API for linked-mesh generation and bounded CAD tool plans.',
+				'OpenAI Responses API — used independently by Nest (mesh generation) and by Agent 3D (CAD reasoning).',
 			]}
 		/>
 

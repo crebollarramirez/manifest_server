@@ -52,6 +52,8 @@ class RequestStepCompletionTool(
     )
     input_model = RequestStepCompletionInput
     output_model = RequestStepCompletionOutput
+    batchable = False
+    parallel_safe = False
 
     async def execute(
         self,

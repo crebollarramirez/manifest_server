@@ -10,9 +10,15 @@ from workers.agent_3d.failures import WorkflowFailure
 from workers.agent_3d.orchestrator import (
     MAX_AGENT_TURNS,
     MAX_STEP_TURNS,
+    MAX_TOOL_CALLS_PER_BATCH,
     EditWorkflowOrchestrator,
+    ToolCallBatch,
+    ToolCallRequest,
     _active_step,
     _count_cad_features,
+    _extract_cad_features,
+    _extract_model_params,
+    _parse_call,
     _recent_messages,
     _step_needs_new_geometry,
     _with_step_status,
@@ -25,6 +31,7 @@ from workers.agent_3d.planning.agent_contracts import (
 from workers.agent_3d.tools import (
     CreateFeatureTool,
     EditCadBuildModelTool,
+    IndexGetFeatureTool,
     RequestStepCompletionTool,
     ToolExecutionContext,
     ToolExecutor,
@@ -500,10 +507,10 @@ def create_feature_turn(call_id: str = "call-1"):
 
 
 class FakeAgent3D:
-    """Agent stand-in returning scripted decisions, one per loop turn.
+    """Agent stand-in returning scripted decisions, one per reasoning round.
 
     Without a script it completes whichever step is active on that step's
-    first turn, so the plan always runs to completion.
+    first round, so the plan always runs to completion.
     """
 
     def __init__(self, trace: list[str] | None = None, script: list[list] | None = None):
@@ -511,18 +518,24 @@ class FakeAgent3D:
         self.invoked = False
         self.calls = 0
         self.requests: list[dict] = []
+        self.start_step_requests: list[dict] = []
+        self.continue_step_requests: list[dict] = []
         self.script = list(script) if script is not None else None
         self.tool_catalog = (
             {"type": "function", "name": "request_step_completion"},
             {"type": "function", "name": "index_search"},
+            {"type": "function", "name": "index_get_feature"},
             {"type": "function", "name": "create_feature"},
             {"type": "function", "name": "edit_cad_build_model"},
         )
 
-    def decide(self, **kwargs):
+    def _respond(self, kind: str, kwargs: dict) -> SimpleNamespace:
         self.invoked = True
         self.calls += 1
-        self.requests.append(kwargs)
+        self.requests.append({"kind": kind, **kwargs})
+        (self.start_step_requests if kind == "start_step" else self.continue_step_requests).append(
+            kwargs
+        )
         if self.trace is not None:
             self.trace.append("agent-decision")
         if self.script is None:
@@ -533,6 +546,12 @@ class FakeAgent3D:
             output = []
         return SimpleNamespace(id=f"decision-{self.calls}", output=list(output))
 
+    def start_step(self, **kwargs):
+        return self._respond("start_step", kwargs)
+
+    def continue_step(self, **kwargs):
+        return self._respond("continue_step", kwargs)
+
 
 class RecordingToolExecutor:
     """Real tool dispatch through a registry, with per-call recording."""
@@ -542,6 +561,7 @@ class RecordingToolExecutor:
         registry.register(RequestStepCompletionTool())
         registry.register(CreateFeatureTool())
         registry.register(EditCadBuildModelTool())
+        registry.register(IndexGetFeatureTool())
         self._executor = ToolExecutor(registry)
         self.invoked = False
         self.calls: list[dict] = []
@@ -550,6 +570,9 @@ class RecordingToolExecutor:
         self.invoked = True
         self.calls.append(kwargs)
         return self._executor.execute_sync(**kwargs)
+
+    def is_batchable(self, tool_id: str) -> bool:
+        return self._executor.is_batchable(tool_id)
 
 
 def runtime(repository: FakeRepository, *, agent_script: list[list] | None = None):
@@ -629,6 +652,156 @@ class CountCadFeaturesTests(unittest.TestCase):
 
     def test_fails_open_to_zero_on_a_syntax_error(self):
         self.assertEqual(_count_cad_features("def build_model(:\n"), 0)
+
+    def test_stays_in_lockstep_with_extract_cad_features(self):
+        for source in (EMPTY_SKELETON_SOURCE, ACCEPTED_SOURCE, "def build_model(:\n"):
+            with self.subTest(source=source):
+                self.assertEqual(
+                    _count_cad_features(source), len(_extract_cad_features(source))
+                )
+
+
+class ExtractCadFeaturesTests(unittest.TestCase):
+    def test_empty_skeleton_extracts_nothing(self):
+        self.assertEqual(_extract_cad_features(EMPTY_SKELETON_SOURCE), [])
+
+    def test_extracts_semantic_id_function_name_and_role(self):
+        self.assertEqual(
+            _extract_cad_features(ACCEPTED_SOURCE),
+            [
+                {
+                    "semantic_id": "bracket_body",
+                    "function_name": "build_bracket_body",
+                    "role": "primary_body",
+                }
+            ],
+        )
+
+    def test_extracts_multiple_features_in_order(self):
+        source = (
+            "from cadquery_runtime import cad_part, cq, dataclass\n"
+            "\n"
+            "@dataclass(frozen=True)\n"
+            "class ModelParams:\n"
+            "    pass\n"
+            "\n"
+            "\n"
+            '@cad_part(semantic_id="a", role="first", library="cadquery", '
+            "parameters=(), depends_on=(), search_keys=(\"a\",))\n"
+            "def build_a(params: ModelParams):\n"
+            '    return cq.Workplane("XY")\n'
+            "\n"
+            "\n"
+            '@cad_part(semantic_id="b", role="second", library="cadquery", '
+            "parameters=(), depends_on=(), search_keys=(\"b\",))\n"
+            "def build_b(params: ModelParams):\n"
+            '    return cq.Workplane("XY")\n'
+            "\n"
+            "\n"
+            "def build_model(params: ModelParams):\n"
+            "    return build_a(params)\n"
+        )
+
+        self.assertEqual(
+            _extract_cad_features(source),
+            [
+                {"semantic_id": "a", "function_name": "build_a", "role": "first"},
+                {"semantic_id": "b", "function_name": "build_b", "role": "second"},
+            ],
+        )
+
+    def test_fails_open_to_an_empty_list_on_a_syntax_error(self):
+        self.assertEqual(_extract_cad_features("def build_model(:\n"), [])
+
+    def test_a_non_literal_decorator_keyword_defaults_to_an_empty_string(self):
+        source = (
+            "from cadquery_runtime import cad_part, cq, dataclass\n"
+            "\n"
+            "ROLE = \"computed_role\"\n"
+            "\n"
+            "@dataclass(frozen=True)\n"
+            "class ModelParams:\n"
+            "    pass\n"
+            "\n"
+            "\n"
+            '@cad_part(semantic_id="a", role=ROLE, library="cadquery", '
+            "parameters=(), depends_on=(), search_keys=(\"a\",))\n"
+            "def build_a(params: ModelParams):\n"
+            '    return cq.Workplane("XY")\n'
+            "\n"
+            "\n"
+            "def build_model(params: ModelParams):\n"
+            "    return build_a(params)\n"
+        )
+
+        self.assertEqual(
+            _extract_cad_features(source),
+            [{"semantic_id": "a", "function_name": "build_a", "role": ""}],
+        )
+
+
+class ExtractModelParamsTests(unittest.TestCase):
+    def test_empty_skeleton_has_no_parameters(self):
+        self.assertEqual(_extract_model_params(EMPTY_SKELETON_SOURCE), [])
+
+    def test_extracts_name_type_and_default(self):
+        self.assertEqual(
+            _extract_model_params(ACCEPTED_SOURCE),
+            [{"name": "bracket_length_mm", "type_name": "float", "default": "100.0"}],
+        )
+
+    def test_extracts_multiple_parameters_in_order(self):
+        source = (
+            "from cadquery_runtime import cad_part, cq, dataclass\n"
+            "\n"
+            "@dataclass(frozen=True)\n"
+            "class ModelParams:\n"
+            "    plate_size_mm: float = 80\n"
+            "    plate_thickness_mm: float = 6\n"
+            "\n"
+            "\n"
+            "def build_model(params: ModelParams):\n"
+            '    return cq.Workplane("XY")\n'
+        )
+
+        self.assertEqual(
+            _extract_model_params(source),
+            [
+                {"name": "plate_size_mm", "type_name": "float", "default": "80"},
+                {"name": "plate_thickness_mm", "type_name": "float", "default": "6"},
+            ],
+        )
+
+    def test_extracts_a_negative_default(self):
+        source = (
+            "from cadquery_runtime import cad_part, cq, dataclass\n"
+            "\n"
+            "@dataclass(frozen=True)\n"
+            "class ModelParams:\n"
+            "    offset_mm: float = -5.0\n"
+            "\n"
+            "\n"
+            "def build_model(params: ModelParams):\n"
+            '    return cq.Workplane("XY")\n'
+        )
+
+        self.assertEqual(
+            _extract_model_params(source),
+            [{"name": "offset_mm", "type_name": "float", "default": "-5.0"}],
+        )
+
+    def test_fails_open_to_an_empty_list_on_a_syntax_error(self):
+        self.assertEqual(_extract_model_params("def build_model(:\n"), [])
+
+    def test_a_source_without_a_model_params_class_has_no_parameters(self):
+        source = (
+            "from cadquery_runtime import cq\n"
+            "\n"
+            "def build_model(params):\n"
+            '    return cq.Workplane("XY")\n'
+        )
+
+        self.assertEqual(_extract_model_params(source), [])
 
 
 class StepNeedsNewGeometryTests(unittest.TestCase):
@@ -816,10 +989,10 @@ class ExecuteCallRedundancyIntegrationTests(unittest.TestCase):
                 "result": {"ok": True, "data": {}},
             }
         ]
-        call = tool_call("index_search", "call-1", query="bracket", limit=5)
+        call = _parse_call(tool_call("index_search", "call-1", query="bracket", limit=5))
 
-        tool_id, _arguments, result = orchestrator._execute_call(
-            call, tool_context, {"index_search"}, observations
+        tool_id, _arguments, result = orchestrator._dispatch_call(
+            call, tool_context, observations
         )
 
         self.assertEqual(tool_id, "index_search")
@@ -830,6 +1003,293 @@ class ExecuteCallRedundancyIntegrationTests(unittest.TestCase):
         # and failed with TOOL_NOT_FOUND instead -- proving this rejection
         # came from the pre-dispatch check, not the tool itself.
         self.assertFalse(tool_executor.invoked)
+
+
+class BatchValidationTests(unittest.TestCase):
+    ALLOWED = {"index_search", "index_get_feature", "create_feature"}
+
+    @staticmethod
+    def _batch(*items) -> ToolCallBatch:
+        return ToolCallBatch(calls=tuple(_parse_call(item) for item in items))
+
+    def test_two_batchable_tools_together_are_accepted(self):
+        # Two calls to the same batchable tool (RecordingToolExecutor only
+        # registers index_get_feature among the read-only tools) still
+        # exercises "every call in a multi-call batch is batchable" --
+        # batchability is a per-tool-ID property, not per-call-argument.
+        orchestrator, *_rest = runtime(FakeRepository())
+        batch = self._batch(
+            tool_call("index_get_feature", "call-1", semantic_id="a"),
+            tool_call("index_get_feature", "call-2", semantic_id="b"),
+        )
+
+        self.assertIsNone(orchestrator._validate_batch(batch, self.ALLOWED))
+
+    def test_a_solo_non_batchable_tool_is_accepted(self):
+        orchestrator, *_rest = runtime(FakeRepository())
+        batch = self._batch(tool_call("create_feature", "call-1"))
+
+        self.assertIsNone(orchestrator._validate_batch(batch, self.ALLOWED))
+
+    def test_a_non_batchable_tool_mixed_with_a_batchable_one_is_rejected(self):
+        orchestrator, *_rest = runtime(FakeRepository())
+        batch = self._batch(
+            tool_call("index_get_feature", "call-1", semantic_id="a"),
+            tool_call("create_feature", "call-2"),
+        )
+
+        rejection = orchestrator._validate_batch(batch, self.ALLOWED)
+
+        self.assertIsNotNone(rejection)
+        self.assertEqual(len(rejection), 2)
+        for output in rejection:
+            failure = json.loads(output["output"])
+            self.assertFalse(failure["ok"])
+            self.assertEqual(failure["error"]["code"], "TOOL_BATCH_REJECTED")
+            self.assertEqual(failure["error"]["details"]["reason"], "not_batchable")
+            self.assertEqual(failure["error"]["details"]["tool_ids"], ["create_feature"])
+        self.assertEqual({o["call_id"] for o in rejection}, {"call-1", "call-2"})
+
+    def test_an_unknown_tool_is_rejected_via_tool_not_found_even_alone(self):
+        orchestrator, *_rest = runtime(FakeRepository())
+        batch = self._batch(tool_call("not_a_real_tool", "call-1"))
+
+        rejection = orchestrator._validate_batch(batch, self.ALLOWED)
+
+        self.assertIsNotNone(rejection)
+        self.assertEqual(len(rejection), 1)
+        failure = json.loads(rejection[0]["output"])
+        self.assertEqual(failure["error"]["code"], "TOOL_NOT_FOUND")
+
+    def test_an_unknown_tool_rejects_the_whole_multi_call_batch(self):
+        orchestrator, *_rest = runtime(FakeRepository())
+        batch = self._batch(
+            tool_call("index_search", "call-1", query="a", limit=3),
+            tool_call("not_a_real_tool", "call-2"),
+        )
+
+        rejection = orchestrator._validate_batch(batch, self.ALLOWED)
+
+        self.assertIsNotNone(rejection)
+        self.assertEqual(len(rejection), 2)
+        for output in rejection:
+            self.assertEqual(json.loads(output["output"])["error"]["code"], "TOOL_NOT_FOUND")
+
+    def test_a_duplicate_call_id_is_rejected(self):
+        orchestrator, *_rest = runtime(FakeRepository())
+        batch = self._batch(
+            tool_call("index_search", "call-1", query="a", limit=3),
+            tool_call("index_get_feature", "call-1", semantic_id="a"),
+        )
+
+        rejection = orchestrator._validate_batch(batch, self.ALLOWED)
+
+        self.assertIsNotNone(rejection)
+        failure = json.loads(rejection[0]["output"])
+        self.assertEqual(failure["error"]["code"], "TOOL_BATCH_REJECTED")
+        self.assertEqual(failure["error"]["details"]["reason"], "invalid_call_id")
+
+    def test_an_empty_call_id_is_rejected(self):
+        orchestrator, *_rest = runtime(FakeRepository())
+        batch = self._batch(tool_call("index_search", "", query="a", limit=3))
+
+        rejection = orchestrator._validate_batch(batch, self.ALLOWED)
+
+        self.assertIsNotNone(rejection)
+        failure = json.loads(rejection[0]["output"])
+        self.assertEqual(failure["error"]["details"]["reason"], "invalid_call_id")
+
+    def test_a_batch_over_the_size_limit_is_rejected(self):
+        orchestrator, *_rest = runtime(FakeRepository())
+        batch = self._batch(
+            *[
+                tool_call("index_search", f"call-{i}", query="a", limit=3)
+                for i in range(MAX_TOOL_CALLS_PER_BATCH + 1)
+            ]
+        )
+
+        rejection = orchestrator._validate_batch(batch, self.ALLOWED)
+
+        self.assertIsNotNone(rejection)
+        self.assertEqual(len(rejection), MAX_TOOL_CALLS_PER_BATCH + 1)
+        failure = json.loads(rejection[0]["output"])
+        self.assertEqual(failure["error"]["details"]["reason"], "batch_too_large")
+
+    def test_a_batch_at_exactly_the_size_limit_is_accepted(self):
+        orchestrator, *_rest = runtime(FakeRepository())
+        batch = self._batch(
+            *[
+                tool_call("index_get_feature", f"call-{i}", semantic_id=f"id-{i}")
+                for i in range(MAX_TOOL_CALLS_PER_BATCH)
+            ]
+        )
+
+        self.assertIsNone(orchestrator._validate_batch(batch, self.ALLOWED))
+
+
+class ProjectInventoryTests(unittest.TestCase):
+    @staticmethod
+    def _tool_context(repository: FakeRepository) -> ToolExecutionContext:
+        return ToolExecutionContext(
+            run_id="run-1",
+            project_id=PROJECT_ID,
+            part_id=PART_ID,
+            candidate_id=EDIT_JOB_ID,
+            services=ToolServices(repository=repository),
+        )
+
+    def test_other_parts_inventory_excludes_the_current_part(self):
+        repository = FakeRepository()
+        repository.files[f"{PROJECT_ID}/index/semantic_index.json"] = json.dumps(
+            {
+                "schema_version": 1,
+                "project_id": PROJECT_ID,
+                "parts": [
+                    {
+                        "part_id": PART_ID,
+                        "part_name": "Bracket",
+                        "cad_parts": [
+                            {
+                                "semantic_id": "bracket_body",
+                                "function_name": "build_bracket_body",
+                                "role": "primary_body",
+                            }
+                        ],
+                        "model_params": [],
+                    },
+                    {
+                        "part_id": "part-2",
+                        "part_name": "Soap Holder",
+                        "cad_parts": [
+                            {
+                                "semantic_id": "holder_floor",
+                                "function_name": "build_holder_floor",
+                                "role": "supporting floor",
+                            }
+                        ],
+                        "model_params": [
+                            {"name": "holder_diameter_mm", "type_name": "float"}
+                        ],
+                    },
+                ],
+            }
+        )
+        orchestrator, *_rest = runtime(repository)
+
+        inventory = orchestrator._other_parts_inventory(self._tool_context(repository))
+
+        self.assertEqual(
+            inventory,
+            [
+                {
+                    "part_id": "part-2",
+                    "part_name": "Soap Holder",
+                    "features": [
+                        {
+                            "semantic_id": "holder_floor",
+                            "function_name": "build_holder_floor",
+                            "role": "supporting floor",
+                        }
+                    ],
+                    "parameters": [
+                        {"name": "holder_diameter_mm", "type_name": "float"}
+                    ],
+                }
+            ],
+        )
+
+    def test_other_parts_inventory_degrades_to_empty_when_the_index_is_missing(self):
+        repository = FakeRepository()
+        orchestrator, *_rest = runtime(repository)
+
+        self.assertEqual(
+            orchestrator._other_parts_inventory(self._tool_context(repository)), []
+        )
+
+    def test_other_parts_inventory_degrades_to_empty_on_invalid_json(self):
+        repository = FakeRepository()
+        repository.files[f"{PROJECT_ID}/index/semantic_index.json"] = "{not json"
+        orchestrator, *_rest = runtime(repository)
+
+        self.assertEqual(
+            orchestrator._other_parts_inventory(self._tool_context(repository)), []
+        )
+
+    def test_current_part_inventory_reflects_the_live_candidate(self):
+        repository = FakeRepository()
+        repository.files[CANDIDATE_PATH] = ACCEPTED_SOURCE
+        orchestrator, *_rest = runtime(repository)
+
+        inventory = orchestrator._current_part_inventory(repository.jobs[EDIT_JOB_ID])
+
+        self.assertEqual(
+            inventory,
+            {
+                "part_id": PART_ID,
+                "part_name": "Bracket",
+                "features": [
+                    {
+                        "semantic_id": "bracket_body",
+                        "function_name": "build_bracket_body",
+                        "role": "primary_body",
+                    }
+                ],
+                "parameters": [
+                    {
+                        "name": "bracket_length_mm",
+                        "type_name": "float",
+                        "default": "100.0",
+                    }
+                ],
+            },
+        )
+
+    def test_current_part_inventory_fails_open_when_the_candidate_is_not_bootstrapped_yet(
+        self,
+    ):
+        repository = FakeRepository()
+        orchestrator, *_rest = runtime(repository)
+
+        inventory = orchestrator._current_part_inventory(repository.jobs[EDIT_JOB_ID])
+
+        self.assertEqual(
+            inventory,
+            {"part_id": PART_ID, "part_name": "Bracket", "features": [], "parameters": []},
+        )
+
+
+class ProjectInventoryAcrossStepsTests(unittest.TestCase):
+    def test_a_later_step_sees_what_an_earlier_step_in_the_same_job_just_created(self):
+        repository = FakeRepository()
+        repository.files[ACCEPTED_SOURCE_PATH] = EMPTY_SKELETON_SOURCE
+        AgentLoopTests._seed_two_step_plan(repository)
+        orchestrator, _creator, _planner, _trace, agent_3d, _executor = runtime(
+            repository,
+            agent_script=[create_feature_turn(), completion_turn(), completion_turn()],
+        )
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(len(agent_3d.start_step_requests), 2)
+        # PS-1 starts with nothing built yet.
+        self.assertEqual(
+            agent_3d.start_step_requests[0]["project_inventory"]["current_part"]["features"],
+            [],
+        )
+        # PS-2's chain starts fresh, but its roster reflects what PS-1 just
+        # built in this same job -- read live from the candidate, not from
+        # the (unreindexed) semantic index.
+        self.assertEqual(
+            agent_3d.start_step_requests[1]["project_inventory"]["current_part"]["features"],
+            [
+                {
+                    "semantic_id": "base_plate",
+                    "function_name": "build_base_plate",
+                    "role": "primary_body",
+                }
+            ],
+        )
 
 
 class CadEditorOrchestrationTests(unittest.TestCase):
@@ -1131,13 +1591,15 @@ class AgentLoopTests(unittest.TestCase):
         orchestrator.run(repository.edit_job(EDIT_JOB_ID))
 
         self.assertEqual(agent_3d.calls, 2)
-        self.assertEqual(agent_3d.requests[0]["observations"], [])
-        carried = agent_3d.requests[1]["observations"]
+        self.assertEqual(len(agent_3d.start_step_requests), 1)
+        self.assertEqual(agent_3d.start_step_requests[0]["observations"], [])
+        self.assertEqual(len(agent_3d.continue_step_requests), 1)
+        carried = agent_3d.continue_step_requests[0]["tool_outputs"]
         self.assertEqual(len(carried), 1)
-        self.assertEqual(carried[0]["tool_id"], "index_search")
-        self.assertEqual(carried[0]["arguments"], {"query": "bracket", "limit": 3})
+        self.assertEqual(carried[0]["call_id"], "call-1")
+        carried_result = json.loads(carried[0]["output"])
         # index_search is outside this agent's catalog stand-in registry.
-        self.assertFalse(carried[0]["result"]["ok"])
+        self.assertFalse(carried_result["ok"])
 
     def test_observations_reset_when_the_active_step_changes(self):
         repository = FakeRepository()
@@ -1154,11 +1616,13 @@ class AgentLoopTests(unittest.TestCase):
         orchestrator.run(repository.edit_job(EDIT_JOB_ID))
 
         self.assertEqual(agent_3d.calls, 3)
-        self.assertEqual(agent_3d.requests[0]["active_step"].step_id, "PS-1")
-        self.assertEqual(len(agent_3d.requests[1]["observations"]), 1)
-        # PS-2 becomes active and must not inherit PS-1's tool transcript.
-        self.assertEqual(agent_3d.requests[2]["active_step"].step_id, "PS-2")
-        self.assertEqual(agent_3d.requests[2]["observations"], [])
+        self.assertEqual(len(agent_3d.start_step_requests), 2)
+        self.assertEqual(len(agent_3d.continue_step_requests), 1)
+        self.assertEqual(agent_3d.start_step_requests[0]["active_step"].step_id, "PS-1")
+        self.assertEqual(len(agent_3d.continue_step_requests[0]["tool_outputs"]), 1)
+        # PS-2 becomes active and must not inherit PS-1's tool transcript or chain.
+        self.assertEqual(agent_3d.start_step_requests[1]["active_step"].step_id, "PS-2")
+        self.assertEqual(agent_3d.start_step_requests[1]["observations"], [])
 
     @staticmethod
     def _seed_two_step_plan(repository: FakeRepository) -> None:
@@ -1277,6 +1741,230 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(goal_events[0]["goal"], goal().model_dump(mode="json"))
 
 
+class AgentBatchExecutionTests(unittest.TestCase):
+    """A validated multi-call batch dispatches strictly in the model-returned
+    order, one call at a time -- never concurrently -- and every call's
+    result, success or failure, is returned to the same reasoning chain.
+    """
+
+    def test_calls_dispatch_in_model_returned_order(self):
+        repository = FakeRepository()
+        orchestrator, _creator, _planner, _trace, agent_3d, tool_executor = runtime(
+            repository,
+            agent_script=[
+                [
+                    tool_call("index_get_feature", "call-1", semantic_id="a"),
+                    tool_call("index_get_feature", "call-2", semantic_id="b"),
+                ],
+                completion_turn("Done.", "call-3"),
+            ],
+        )
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        # The first two dispatches are the batch, strictly in the order the
+        # model returned them; sequential execute_sync calls (no
+        # asyncio.gather/threads) is what makes this order guaranteed.
+        semantic_ids = [call["raw_arguments"]["semantic_id"] for call in tool_executor.calls[:2]]
+        self.assertEqual(semantic_ids, ["a", "b"])
+
+    def test_a_partial_failure_within_a_valid_batch_returns_all_results_and_continues(self):
+        # Two calls to the same tool with identical arguments in one batch:
+        # the first dispatches and succeeds; because observations accumulate
+        # within the batch before the next call is checked, the second is
+        # caught by the existing intra-step redundancy dedup -- an ordinary
+        # per-call failure, not a batch-validation rejection.
+        repository = FakeRepository()
+        orchestrator, _creator, _planner, _trace, agent_3d, tool_executor = runtime(
+            repository,
+            agent_script=[
+                [
+                    tool_call("index_get_feature", "call-1", semantic_id="a"),
+                    tool_call("index_get_feature", "call-2", semantic_id="a"),
+                ],
+                completion_turn("Done.", "call-3"),
+            ],
+        )
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        # The first call reaches the tool executor; the second is caught by
+        # _redundant_call_rejection inside _dispatch_call before ever
+        # reaching execute_sync -- only the first batch call plus the
+        # completion call from round 2 actually dispatch.
+        self.assertEqual(len(tool_executor.calls), 2)
+        tool_outputs = agent_3d.continue_step_requests[0]["tool_outputs"]
+        self.assertEqual([o["call_id"] for o in tool_outputs], ["call-1", "call-2"])
+        first, second = (json.loads(o["output"]) for o in tool_outputs)
+        self.assertTrue(first["ok"])
+        self.assertFalse(second["ok"])
+        self.assertEqual(second["error"]["code"], "TOOL_CALL_REDUNDANT")
+
+
+class AgentChainContinuationTests(unittest.TestCase):
+    """One active plan step drives one continuous reasoning chain: a single
+    start_step call opens it, and every further round of that same step
+    continues it via continue_step -- never a fresh start_step -- until the
+    step completes or a new step begins.
+    """
+
+    def test_a_step_completed_on_its_first_round_calls_start_step_only(self):
+        repository = FakeRepository()
+        orchestrator, _creator, _planner, _trace, agent_3d, _executor = runtime(
+            repository
+        )
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(len(agent_3d.start_step_requests), 1)
+        self.assertEqual(len(agent_3d.continue_step_requests), 0)
+
+    def test_a_multi_round_step_uses_one_start_step_then_continue_step_per_further_round(
+        self,
+    ):
+        repository = FakeRepository()
+        orchestrator, _creator, _planner, _trace, agent_3d, _executor = runtime(
+            repository,
+            agent_script=[
+                [tool_call("index_search", "call-1", query="bracket", limit=3)],
+                [tool_call("index_search", "call-2", query="drainage", limit=3)],
+                create_feature_turn("call-3"),
+                completion_turn("Done.", "call-4"),
+            ],
+        )
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(agent_3d.calls, 4)
+        self.assertEqual(len(agent_3d.start_step_requests), 1)
+        self.assertEqual(len(agent_3d.continue_step_requests), 3)
+        # Each round continues from the immediately preceding response --
+        # one strictly linked chain, not independent decisions.
+        self.assertEqual(agent_3d.continue_step_requests[0]["previous_response_id"], "decision-1")
+        self.assertEqual(agent_3d.continue_step_requests[1]["previous_response_id"], "decision-2")
+        self.assertEqual(agent_3d.continue_step_requests[2]["previous_response_id"], "decision-3")
+
+    def test_continue_step_receives_the_prior_rounds_tool_output_as_a_function_call_output_item(
+        self,
+    ):
+        repository = FakeRepository()
+        orchestrator, _creator, _planner, _trace, agent_3d, _executor = runtime(
+            repository,
+            agent_script=[create_feature_turn("call-1"), completion_turn("Done.", "call-2")],
+        )
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(len(agent_3d.continue_step_requests), 1)
+        tool_outputs = agent_3d.continue_step_requests[0]["tool_outputs"]
+        self.assertEqual(len(tool_outputs), 1)
+        self.assertEqual(tool_outputs[0]["type"], "function_call_output")
+        self.assertEqual(tool_outputs[0]["call_id"], "call-1")
+        output = json.loads(tool_outputs[0]["output"])
+        self.assertTrue(output["ok"])
+        self.assertEqual(output["data"]["status"], "created")
+
+    def test_a_failed_tool_call_keeps_the_same_chain_alive_for_the_next_round(self):
+        repository = FakeRepository()
+        orchestrator, _creator, _planner, _trace, agent_3d, _executor = runtime(
+            repository,
+            agent_script=[
+                [tool_call("not_a_real_tool", "call-1")],
+                completion_turn("Done.", "call-2"),
+            ],
+        )
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(len(agent_3d.start_step_requests), 1)
+        self.assertEqual(len(agent_3d.continue_step_requests), 1)
+        continued = agent_3d.continue_step_requests[0]
+        self.assertEqual(continued["previous_response_id"], "decision-1")
+        failure = json.loads(continued["tool_outputs"][0]["output"])
+        self.assertFalse(failure["ok"])
+        self.assertEqual(failure["error"]["code"], "TOOL_NOT_FOUND")
+
+    def test_a_new_step_always_starts_a_new_chain(self):
+        repository = FakeRepository()
+        orchestrator, _creator, _planner, _trace, agent_3d, _executor = runtime(
+            repository,
+            agent_script=[
+                completion_turn("First step done.", "call-1"),
+                completion_turn("Second step done.", "call-2"),
+            ],
+        )
+        AgentLoopTests._seed_two_step_plan(repository)
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(len(agent_3d.start_step_requests), 2)
+        self.assertEqual(len(agent_3d.continue_step_requests), 0)
+        self.assertEqual(agent_3d.start_step_requests[0]["active_step"].step_id, "PS-1")
+        self.assertEqual(agent_3d.start_step_requests[1]["active_step"].step_id, "PS-2")
+
+    def test_a_batched_round_returns_all_results_together_in_one_continuation(self):
+        repository = FakeRepository()
+        orchestrator, _creator, _planner, _trace, agent_3d, tool_executor = runtime(
+            repository,
+            agent_script=[
+                [
+                    tool_call("index_get_feature", "call-1", semantic_id="a"),
+                    tool_call("index_get_feature", "call-2", semantic_id="b"),
+                ],
+                completion_turn("Done.", "call-3"),
+            ],
+        )
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(agent_3d.calls, 2)
+        self.assertEqual(len(agent_3d.start_step_requests), 1)
+        self.assertEqual(len(agent_3d.continue_step_requests), 1)
+        # 2 dispatched batch calls + the completion call from round 2.
+        self.assertEqual(len(tool_executor.calls), 3)
+        continued = agent_3d.continue_step_requests[0]
+        self.assertEqual(continued["previous_response_id"], "decision-1")
+        tool_outputs = continued["tool_outputs"]
+        self.assertEqual([o["call_id"] for o in tool_outputs], ["call-1", "call-2"])
+        for output in tool_outputs:
+            self.assertEqual(output["type"], "function_call_output")
+
+    def test_a_rejected_batch_dispatches_nothing_but_keeps_the_chain_alive(self):
+        repository = FakeRepository()
+        orchestrator, _creator, _planner, _trace, agent_3d, tool_executor = runtime(
+            repository,
+            agent_script=[
+                [
+                    tool_call("index_get_feature", "call-1", semantic_id="a"),
+                    tool_call("create_feature", "call-2"),
+                ],
+                completion_turn("Done.", "call-3"),
+            ],
+        )
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(len(agent_3d.start_step_requests), 1)
+        self.assertEqual(len(agent_3d.continue_step_requests), 1)
+        # Nothing from the rejected batch reached the tool executor -- only
+        # the completion call from round 2 (which receives the rejection) did.
+        self.assertEqual(len(tool_executor.calls), 1)
+        self.assertEqual(tool_executor.calls[0]["tool_id"], "request_step_completion")
+        rejected = agent_3d.continue_step_requests[0]["tool_outputs"]
+        self.assertEqual([o["call_id"] for o in rejected], ["call-1", "call-2"])
+        for output in rejected:
+            failure = json.loads(output["output"])
+            self.assertFalse(failure["ok"])
+            self.assertEqual(failure["error"]["code"], "TOOL_BATCH_REJECTED")
+
+
 class CandidateBootstrapTests(unittest.TestCase):
     def test_accepted_source_is_copied_to_an_edit_scoped_candidate(self):
         repository = FakeRepository()
@@ -1331,9 +2019,12 @@ class PlanResumeTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "completed")
         self.assertEqual(planner.calls, 0)
-        # PS-1 was already completed, so only PS-2 is worked.
+        # PS-1 was already completed, so only PS-2 is worked -- and, since
+        # the resumed process holds no prior chain state, it starts a new
+        # reasoning chain (start_step) for PS-2 rather than continuing one.
         self.assertEqual(agent_3d.calls, 1)
-        self.assertEqual(agent_3d.requests[0]["active_step"].step_id, "PS-2")
+        self.assertEqual(len(agent_3d.start_step_requests), 1)
+        self.assertEqual(agent_3d.start_step_requests[0]["active_step"].step_id, "PS-2")
         self.assertEqual(
             [step["status"] for step in result["high_level_plan"]["steps"]],
             ["completed", "completed"],
@@ -1382,14 +2073,19 @@ class EmptyPartCompletionGateTests(unittest.TestCase):
 
         result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
 
-        # The scripted turn was rejected; the next turn had nothing left in
+        # The scripted turn was rejected; the next round had nothing left in
         # the script, so the loop fails on AGENT_NO_ACTION -- proof the step
-        # was never marked completed off the rejected call.
+        # was never marked completed off the rejected call. The rejection
+        # flows to the next round of the SAME reasoning chain (continue_step),
+        # not a fresh one.
         self.assertEqual(agent_3d.calls, 2)
-        rejected = agent_3d.requests[1]["observations"][0]
-        self.assertEqual(rejected["tool_id"], "request_step_completion")
-        self.assertFalse(rejected["result"]["ok"])
-        self.assertEqual(rejected["result"]["error"]["code"], "STEP_REQUIRES_A_FEATURE")
+        self.assertEqual(len(agent_3d.continue_step_requests), 1)
+        continued = agent_3d.continue_step_requests[0]
+        self.assertEqual(continued["previous_response_id"], "decision-1")
+        rejected_output = json.loads(continued["tool_outputs"][0]["output"])
+        self.assertEqual(continued["tool_outputs"][0]["call_id"], "call-1")
+        self.assertFalse(rejected_output["ok"])
+        self.assertEqual(rejected_output["error"]["code"], "STEP_REQUIRES_A_FEATURE")
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["error_code"], "AGENT_NO_ACTION")
         self.assertEqual(
@@ -1473,29 +2169,30 @@ class EmptyPartCompletionGateTests(unittest.TestCase):
 
         result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
 
-        # Turn 1: the wiring attempt is rejected at the tool itself.
-        wiring_rejected = agent_3d.requests[1]["observations"][0]
-        self.assertEqual(wiring_rejected["tool_id"], "edit_cad_build_model")
-        self.assertFalse(wiring_rejected["result"]["ok"])
+        self.assertEqual(len(agent_3d.continue_step_requests), 2)
+
+        # Round 1 (start_step): the wiring attempt is rejected at the tool
+        # itself, and round 2's continuation of the same chain receives it.
+        wiring_rejected_output = agent_3d.continue_step_requests[0]["tool_outputs"][0]
+        self.assertEqual(wiring_rejected_output["call_id"], "call-1")
+        wiring_rejected = json.loads(wiring_rejected_output["output"])
+        self.assertFalse(wiring_rejected["ok"])
+        self.assertEqual(wiring_rejected["error"]["code"], "TOOL_VALIDATION_FAILED")
         self.assertEqual(
-            wiring_rejected["result"]["error"]["code"], "TOOL_VALIDATION_FAILED"
-        )
-        self.assertEqual(
-            wiring_rejected["result"]["error"]["details"]["reason"],
-            "undefined_function_call",
+            wiring_rejected["error"]["details"]["reason"], "undefined_function_call"
         )
         # build_model was never actually rewritten to call the missing name.
         self.assertNotIn(
             "build_soap_holder_body", repository.files[CANDIDATE_PATH]
         )
 
-        # Turn 2: completion is still correctly blocked -- zero features
-        # exist either way, so the completion gate also fires.
-        completion_rejected = agent_3d.requests[2]["observations"][1]
-        self.assertEqual(completion_rejected["tool_id"], "request_step_completion")
-        self.assertEqual(
-            completion_rejected["result"]["error"]["code"], "STEP_REQUIRES_A_FEATURE"
-        )
+        # Round 2 (still the same chain): completion is still correctly
+        # blocked -- zero features exist either way, so the completion gate
+        # also fires, and round 3's continuation receives that rejection.
+        completion_rejected_output = agent_3d.continue_step_requests[1]["tool_outputs"][0]
+        self.assertEqual(completion_rejected_output["call_id"], "call-1")
+        completion_rejected = json.loads(completion_rejected_output["output"])
+        self.assertEqual(completion_rejected["error"]["code"], "STEP_REQUIRES_A_FEATURE")
 
         # The script ran out after that -- the job fails on the next empty
         # decision rather than ever completing on nothing.
@@ -1655,13 +2352,39 @@ class AgentTraceEventTests(unittest.TestCase):
         self.assertEqual(started[0]["tool_id"], "request_step_completion")
         self.assertEqual(started[0]["step_id"], "PS-1")
         self.assertEqual(started[0]["agent_turn"], 1)
-        self.assertEqual(started[0]["step_turn"], 1)
+        self.assertEqual(started[0]["step_attempt"], 1)
+        self.assertEqual(started[0]["reasoning_round"], 1)
         self.assertEqual(started[0]["response_id"], "decision-1")
         self.assertEqual(started[0]["tool_call_id"], "call-1")
         self.assertEqual(completed[0]["tool_call_id"], started[0]["tool_call_id"])
         self.assertTrue(completed[0]["ok"])
         self.assertIn("result", completed[0])
         self.assertIsInstance(completed[0]["duration_seconds"], float)
+
+    def test_a_batched_round_traces_one_pair_per_call_sharing_one_response_id(self):
+        repository = FakeRepository()
+        orchestrator, *_rest = runtime(
+            repository,
+            agent_script=[
+                [
+                    tool_call("index_get_feature", "call-1", semantic_id="a"),
+                    tool_call("index_get_feature", "call-2", semantic_id="b"),
+                ],
+                completion_turn("Done.", "call-3"),
+            ],
+        )
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        started = self._events(orchestrator, "tool.started")
+        completed = self._events(orchestrator, "tool.completed")
+        self.assertEqual(len(started), 3)
+        self.assertEqual(len(completed), 3)
+        first_round = [event for event in started if event["reasoning_round"] == 1]
+        self.assertEqual(len(first_round), 2)
+        self.assertEqual([event["tool_call_id"] for event in first_round], ["call-1", "call-2"])
+        self.assertEqual({event["response_id"] for event in first_round}, {"decision-1"})
+        self.assertEqual({event["agent_turn"] for event in first_round}, {1})
 
     def test_tool_completed_reflects_a_gate_blocked_result_not_the_original(self):
         repository = FakeRepository()
@@ -1696,7 +2419,7 @@ class AgentTraceEventTests(unittest.TestCase):
 
         completed = self._events(orchestrator, "agent_loop.completed")
         self.assertEqual(len(completed), 1)
-        self.assertEqual(completed[0]["total_turns"], 1)
+        self.assertEqual(completed[0]["agent_turn"], 1)
 
     def test_agent_loop_failed_is_traced_on_agent_no_action(self):
         repository = FakeRepository()

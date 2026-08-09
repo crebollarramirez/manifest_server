@@ -1,28 +1,262 @@
 {
-  "id": "cad-tool-worker",
-  "title": "CAD Tool Worker system design",
-  "summary": "The Python CAD Tool Worker claims bounded tool jobs, derives trusted source context, applies registered operations in memory, and uploads only a complete isolated candidate.",
+  "id": "agent-3d",
+  "title": "Agent 3D (Python) system design",
+  "summary": "The standalone Python worker claims one durable edit job at a time and owns everything CAD-specific: goal creation, semantic planning, the Agent3D tool-calling loop against an isolated candidate, validation, hash-guarded commit, mandatory reindex, and best-effort export.",
   "scope": "service",
   "direction": "RIGHT",
   "nodes": [
-    {"id":"tool-jobs","label":"CAD Tool Jobs","description":"Postgres rows are the durable Nest-to-Python handoff for prepare_context and apply_plan work.","type":"database","icon":"database","foundation":true,"position":{"column":0,"row":1},"mobileOrder":1,"details":{"responsibility":"Own queued, leased, completed, and failed bounded CAD tool jobs.","durableReads":["next queued job and request payload"],"durableWrites":["lease heartbeat, structured result, or bounded failure"],"evidence":[{"path":"supabase/migrations/20260727000000_add_cad_agent_progress_and_tools.sql","symbol":"cad_tool_jobs","kind":"migration"}]}},
-    {"id":"tool-worker","label":"Python CAD Tool Worker","description":"A polling Python process with no OpenAI dependency and no canonical-source commit authority.","type":"worker","variant":"polling","icon":"worker","position":{"column":1,"row":1},"mobileOrder":2,"details":{"responsibility":"Claim one tool job, maintain its lease, and complete or fail it with bounded workflow errors.","runsIn":"workers/cad_editor/tool_worker.py","guarantees":["The worker has no prompt or model-reasoning dependency.","It never writes canonical model.py or marks edit_jobs complete."],"operations":{"concurrency":"One claimed job is executed at a time per process.","retry":"No process-local retry; failed rows record a terminal tool outcome.","controls":["CAD_TOOL_JOB_POLL_INTERVAL_SECONDS","CAD_TOOL_LEASE_SECONDS","CAD_TOOL_WORKER_ID"]},"evidence":[{"path":"workers/cad_editor/tool_worker.py","symbol":"main / execute_with_heartbeat","kind":"source"}]}},
-    {"id":"context-builder","label":"Bounded Context Builder","description":"Resolves the authoritative requested part or one unambiguous project match and builds editable source context.","type":"function","variant":"transform","icon":"search","position":{"column":2,"row":0},"mobileOrder":3,"details":{"responsibility":"Prepare source, targets, fingerprints, dependency paths, parameter consumers, and metadata warnings for planning.","guarantees":["A linked requested_part_id is authoritative and cannot be redirected to another better-ranked part.","Ambiguous or stale context fails before planning."],"evidence":[{"path":"workers/cad_editor/cad_editor/context_builder.py","symbol":"ContextBuilder","kind":"source"},{"path":"workers/cad_editor/cad_editor/resolver.py","symbol":"PartResolver","kind":"source"}]}},
-    {"id":"tool-executor","label":"Transactional Tool Executor","description":"Validates the complete versioned plan and applies registered AST/source operations only in memory.","type":"function","variant":"gate","icon":"ast","position":{"column":2,"row":2},"mobileOrder":4,"details":{"responsibility":"Enforce scope, source hashes, target fingerprints, ownership policy, dependency impact review, and final source contract.","successCondition":"Every operation and the final source contract pass before one candidate upload.","failureConditions":[{"condition":"Any operation, policy, fingerprint, or contract check fails","outcome":"No partial candidate is uploaded."}],"evidence":[{"path":"workers/cad_editor/cad_editor/tool_executor.py","symbol":"CadToolExecutor.apply_plan","kind":"source"}]}},
-    {"id":"canonical-source","label":"Canonical CAD Source","description":"3dProjects owns accepted model.py and params.json used for context preparation and base-hash verification.","type":"storage","icon":"object-storage","contents":["model.py","params.json"],"foundation":true,"position":{"column":3,"row":0},"mobileOrder":5,"details":{"responsibility":"Durably own accepted source; this worker reads it but never promotes a candidate to it.","evidence":[{"path":"workers/cad_editor/cad_editor/repository.py","symbol":"SupabaseEditRepository","kind":"source"}]}},
-    {"id":"candidate-storage","label":"Candidate Storage","description":"3dProjects edit-scoped candidate paths hold only a fully applied proposed model.py.","type":"storage","icon":"object-storage","contents":["edits/<edit-job-id>/model.py"],"foundation":true,"position":{"column":3,"row":2},"mobileOrder":6,"details":{"responsibility":"Durably hold an isolated candidate for independent validation; it is not canonical source.","evidence":[{"path":"workers/cad_editor/cad_editor/repository.py","symbol":"upload_candidate","kind":"source"}]}},
-    {"id":"cad-agent","label":"NestJS CAD Agent","description":"The separate control plane queues bounded work and later consumes the structured result.","type":"service","icon":"service","href":"/services/cad-agent/","position":{"column":0,"row":3},"mobileOrder":7,"details":{"responsibility":"Own planning, durable orchestration, proof-gated commit, and public progress outside this worker.","evidence":[{"path":"services/cad_agent/src/orchestrator.service.ts","symbol":"OrchestratorService","kind":"source"}]}}
+    {
+      "id": "edit-jobs",
+      "label": "Edit Jobs",
+      "description": "Postgres edit_jobs is the only durable handoff; there is no nested tool-call queue between Nest and this worker.",
+      "type": "database",
+      "icon": "database",
+      "foundation": true,
+      "position": { "column": 0, "row": 1 },
+      "mobileOrder": 1,
+      "details": {
+        "responsibility": "Own queued/running/completed/failed edit jobs, worker lease, private history checkpoints, and ordered public events.",
+        "evidence": [{ "path": "supabase/migrations/20260727000000_add_cad_agent_progress_and_tools.sql", "symbol": "edit_jobs / edit_job_events", "kind": "migration" }]
+      }
+    },
+    {
+      "id": "agent-3d",
+      "label": "Agent 3D Worker",
+      "description": "A polling Python process; every replica has a unique CAD_EDITOR_WORKER_ID and claims one job at a time with a heartbeat-renewed lease.",
+      "type": "worker",
+      "variant": "polling",
+      "icon": "worker",
+      "position": { "column": 1, "row": 1 },
+      "mobileOrder": 2,
+      "details": {
+        "responsibility": "Coordinate goal creation, planning, the Agent3D loop, and the post-loop commit pipeline for exactly one claimed job.",
+        "ownedBy": "Manifest Agent 3D",
+        "runsIn": "workers/agent_3d/edit_worker.py",
+        "operations": {
+          "concurrency": "One claimed job per replica; horizontal scale adds parallelism across parts/projects, not within one job.",
+          "controls": ["CAD_EDITOR_WORKER_ID", "CAD_EDITOR_LEASE_SECONDS", "CAD_EDITOR_JOB_POLL_INTERVAL_SECONDS"]
+        },
+        "guarantees": ["A linked part_id is reserved on the queued row before any model call, so a second overlapping request fails fast with PART_EDIT_IN_PROGRESS."],
+        "evidence": [{ "path": "workers/agent_3d/edit_worker.py", "symbol": "main", "kind": "source" }]
+      }
+    },
+    {
+      "id": "goal-plan",
+      "label": "Goal + High-level Plan",
+      "description": "A strict CadGoalDefinition is created from the request, then PlanningAgent produces a version-1 CadPlan using two read-only semantic-index tools.",
+      "type": "function",
+      "variant": "transform",
+      "icon": "search",
+      "position": { "column": 2, "row": 0 },
+      "mobileOrder": 3,
+      "details": {
+        "responsibility": "Turn a free-text request into an authoritative goal and a step-sequenced plan before any source is touched.",
+        "ownedBy": "Agent 3D",
+        "runsIn": "workers/agent_3d/planning/goal_creator.py and planning/planning_agent.py",
+        "steps": [
+          "goal_creator.py returns required-vs-preserve criteria; an ambiguous request ends the job with CLARIFICATION_REQUIRED.",
+          "PlanningAgent may use at most 8 read-tool rounds against index_search / index_get_feature.",
+          "The resulting CadPlan's steps must collectively address every goal criterion."
+        ],
+        "guarantees": ["Both the goal and the plan are checkpointed to edit_jobs.history before planning ends, so a reclaimed worker skips duplicate LLM calls."],
+        "evidence": [
+          { "path": "workers/agent_3d/planning/goal_creator.py", "symbol": "create_goal", "kind": "source" },
+          { "path": "workers/agent_3d/planning/planning_agent.py", "symbol": "PlanningAgent", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "candidate-storage",
+      "label": "Candidate Storage",
+      "description": "3dProjects candidate prefixes hold an edit-scoped copy of source plus a pre-edit original backup, fully isolated from canonical source.",
+      "type": "storage",
+      "icon": "object-storage",
+      "contents": ["original/model.py", "candidates/.../model.py"],
+      "foundation": true,
+      "position": { "column": 3, "row": 0 },
+      "mobileOrder": 4,
+      "details": {
+        "responsibility": "Give the reasoning loop a mutation target that canonical source is never exposed to while the loop runs.",
+        "evidence": [{ "path": "workers/agent_3d/orchestrator.py", "symbol": "EditWorkflowOrchestrator._prepare_candidate", "kind": "source" }]
+      }
+    },
+    {
+      "id": "agent-loop",
+      "label": "Agent3D Reasoning Loop",
+      "description": "The plan-driven loop: one Agent3D.decide() call per turn, its tool calls executed against the candidate, bounded by per-step and overall turn caps.",
+      "type": "function",
+      "variant": "gate",
+      "icon": "ast",
+      "href": "/workflows/cad-thinking/",
+      "position": { "column": 3, "row": 2 },
+      "mobileOrder": 5,
+      "details": {
+        "responsibility": "Advance the plan one step at a time until every step is completed, or fail fast on a turn-limit or no-action decision.",
+        "ownedBy": "Agent 3D",
+        "runsIn": "workers/agent_3d/agent_3d.py and orchestrator.py — EditWorkflowOrchestrator._run_agent_loop",
+        "operations": { "controls": ["MAX_STEP_TURNS = 10", "MAX_AGENT_TURNS = 24"] },
+        "failureConditions": [
+          { "condition": "A decision requests no tool call", "outcome": "AGENT_NO_ACTION — fails fast rather than assuming completion." },
+          { "condition": "A single step exceeds 10 turns, or the job exceeds 24 turns total", "outcome": "AGENT_STEP_TURN_LIMIT / AGENT_TURN_LIMIT." }
+        ],
+        "evidence": [
+          { "path": "workers/agent_3d/agent_3d.py", "symbol": "Agent3D.decide", "kind": "source" },
+          { "path": "workers/agent_3d/orchestrator.py", "symbol": "EditWorkflowOrchestrator._run_agent_loop", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "cad-validator",
+      "label": "CAD Validator",
+      "description": "The independent validator executes the exact final candidate, identified by path and SHA-256, and returns structured pass/fail proof.",
+      "type": "worker",
+      "variant": "sandbox",
+      "icon": "worker",
+      "href": "/services/cad-validator/",
+      "position": { "column": 4, "row": 1 },
+      "mobileOrder": 6,
+      "details": {
+        "responsibility": "Prove the candidate is syntactically and semantically valid before canonical source can ever be touched.",
+        "guarantees": ["A validation failure fails the job outright (VALIDATION_FAILED) — there is no repair loop that feeds diagnostics back to Agent3D."],
+        "evidence": [{ "path": "workers/agent_3d/orchestrator.py", "symbol": "EditWorkflowOrchestrator._commit_candidate", "kind": "source" }]
+      }
+    },
+    {
+      "id": "canonical-storage",
+      "label": "Canonical CAD Source",
+      "description": "Accepted model.py and params.json — written only after passed validation and a hash-guarded read-verify-write-reverify.",
+      "type": "storage",
+      "icon": "object-storage",
+      "contents": ["model.py", "params.json"],
+      "foundation": true,
+      "position": { "column": 5, "row": 0 },
+      "mobileOrder": 7,
+      "details": {
+        "responsibility": "Own accepted CAD source; commit is rejected as SOURCE_CHANGED if canonical no longer matches the accepted base hash.",
+        "evidence": [{ "path": "workers/agent_3d/orchestrator.py", "symbol": "EditWorkflowOrchestrator._commit_candidate", "kind": "source" }]
+      }
+    },
+    {
+      "id": "indexer",
+      "label": "Indexer Worker",
+      "description": "A mandatory post-commit reindex proves the just-committed source still produces a fresh semantic index.",
+      "type": "worker",
+      "variant": "polling",
+      "icon": "worker",
+      "href": "/services/indexer-worker/",
+      "position": { "column": 5, "row": 2 },
+      "mobileOrder": 8,
+      "details": {
+        "responsibility": "Reindex committed source; a failure rolls canonical source back to its pre-edit backup and fails the job (REINDEX_FAILED).",
+        "evidence": [{ "path": "workers/agent_3d/orchestrator.py", "symbol": "EditWorkflowOrchestrator._reindex_after_commit", "kind": "source" }]
+      }
+    },
+    {
+      "id": "cad-exporter",
+      "label": "CAD Exporter",
+      "description": "Best-effort export queued only after commit and reindex both succeed.",
+      "type": "worker",
+      "variant": "polling",
+      "icon": "worker",
+      "href": "/services/cad-exporter/",
+      "position": { "column": 6, "row": 1 },
+      "mobileOrder": 9,
+      "details": {
+        "responsibility": "Render the committed source; an enqueue failure adds a warning to the terminal result instead of failing the job.",
+        "evidence": [{ "path": "workers/agent_3d/orchestrator.py", "symbol": "EditWorkflowOrchestrator._queue_export_after_commit", "kind": "source" }]
+      }
+    }
   ],
   "edges": [
-    {"id":"claim-tool-job","source":"tool-worker","target":"tool-jobs","label":"claim, heartbeat, and complete bounded job","protocol":"database","flow":"synchronous","direction":"two-way","request":{"label":"tool-job lifecycle RPC","type":"claim_next_cad_tool_job / completion RPC","exampleBody":"{\"p_worker_id\":\"cad-tool-uuid\",\"p_lease_seconds\":300}"},"response":{"label":"leased tool job or result acknowledgement","type":"cad_tool_jobs row / boolean","exampleBody":"{\"id\":\"tool-job-uuid\",\"job_type\":\"apply_plan\",\"status\":\"running\"}"},"details":{"durability":"Postgres is the handoff and lifecycle source of truth, not a WebSocket or in-memory queue.","evidence":[{"path":"workers/cad_editor/tool_worker.py","symbol":"claim_next_job / complete / heartbeat","kind":"source"}]}},
-    {"id":"prepare-context","source":"tool-worker","target":"context-builder","label":"prepare_context","protocol":"internal","flow":"synchronous","direction":"one-way","details":{"evidence":[{"path":"workers/cad_editor/cad_editor/tool_executor.py","symbol":"CadToolExecutor.execute","kind":"source"}]}},
-    {"id":"apply-plan","source":"tool-worker","target":"tool-executor","label":"apply_plan transaction","protocol":"internal","flow":"synchronous","direction":"one-way","details":{"evidence":[{"path":"workers/cad_editor/cad_editor/tool_executor.py","symbol":"CadToolExecutor.apply_plan","kind":"source"}]}},
-    {"id":"read-source","source":"context-builder","target":"canonical-source","label":"read accepted source and metadata","protocol":"storage","flow":"synchronous","direction":"one-way"},
-    {"id":"verify-source","source":"tool-executor","target":"canonical-source","label":"read and verify accepted base hash","protocol":"storage","flow":"synchronous","direction":"one-way"},
-    {"id":"write-candidate","source":"tool-executor","target":"candidate-storage","label":"write one complete candidate","protocol":"storage","flow":"synchronous","direction":"one-way","details":{"failureBehavior":"No upload occurs until every operation and final source contract have passed.","evidence":[{"path":"workers/cad_editor/cad_editor/tool_executor.py","symbol":"CadToolExecutor.apply_plan","kind":"source"}]}},
-    {"id":"queue-bounded-work","source":"cad-agent","target":"tool-jobs","label":"queue prepare_context or apply_plan","protocol":"database","flow":"synchronous","direction":"one-way"}
+    {
+      "id": "claim",
+      "source": "edit-jobs",
+      "target": "agent-3d",
+      "label": "claim_next_edit_job (leased)",
+      "protocol": "database",
+      "flow": "asynchronous",
+      "direction": "two-way",
+      "request": { "label": "lease claim", "type": "claim_next_edit_job", "exampleBody": "{\"p_worker_id\":\"agent-3d-uuid\",\"p_lease_seconds\":300}" },
+      "response": { "label": "leased row, or none queued", "type": "edit_jobs row", "exampleBody": "{\"id\":\"edit-job-uuid\",\"status\":\"running\"}" }
+    },
+    {
+      "id": "create-plan",
+      "source": "agent-3d",
+      "target": "goal-plan",
+      "label": "create + checkpoint goal and plan",
+      "protocol": "internal",
+      "flow": "synchronous",
+      "direction": "one-way"
+    },
+    {
+      "id": "bootstrap-candidate",
+      "source": "goal-plan",
+      "target": "candidate-storage",
+      "label": "bootstrap edit-scoped candidate from accepted source",
+      "protocol": "storage",
+      "flow": "synchronous",
+      "direction": "one-way",
+      "details": { "summary": "Runs once, before the first agent turn; a resumed job reuses the existing candidate untouched." }
+    },
+    {
+      "id": "run-loop",
+      "source": "candidate-storage",
+      "target": "agent-loop",
+      "label": "run the plan-driven loop until every step is completed",
+      "protocol": "internal",
+      "flow": "synchronous",
+      "direction": "one-way"
+    },
+    {
+      "id": "validate",
+      "source": "agent-loop",
+      "target": "cad-validator",
+      "label": "validate exact final candidate",
+      "protocol": "database",
+      "flow": "asynchronous",
+      "direction": "two-way",
+      "request": { "label": "validation request", "type": "queue_edit_candidate_validation_owned", "exampleBody": "{\"edit_job_id\":\"edit-job-uuid\",\"source_sha256\":\"sha256\"}" },
+      "response": { "label": "structured proof or diagnostics", "type": "generation_jobs result", "exampleBody": "{\"status\":\"passed\",\"valid\":true}" }
+    },
+    {
+      "id": "commit",
+      "source": "agent-loop",
+      "target": "canonical-storage",
+      "label": "hash-guarded commit",
+      "protocol": "storage",
+      "flow": "synchronous",
+      "direction": "one-way",
+      "details": { "summary": "Read-verify-write-reverify against accepted_source_sha256; idempotent no-op if canonical already equals the candidate hash." }
+    },
+    {
+      "id": "reindex",
+      "source": "canonical-storage",
+      "target": "indexer",
+      "label": "mandatory reindex",
+      "protocol": "database",
+      "flow": "asynchronous",
+      "direction": "two-way",
+      "request": { "label": "reindex request", "type": "queue_edit_index_build", "exampleBody": "{\"project_id\":\"project-uuid\"}" },
+      "response": { "label": "index job outcome", "type": "index_jobs row", "exampleBody": "{\"status\":\"completed\"}" }
+    },
+    {
+      "id": "export",
+      "source": "canonical-storage",
+      "target": "cad-exporter",
+      "label": "best-effort export enqueue",
+      "protocol": "database",
+      "flow": "asynchronous",
+      "direction": "one-way",
+      "details": { "failureBehavior": "An enqueue failure becomes a terminal-result warning; it never rolls back the commit." }
+    }
   ],
   "boundaries": [
-    {"id":"python-worker-boundary","label":"Python CAD Tool Worker runtime","kind":"worker","description":"Deterministic context preparation and source-tool execution only.","nodeIds":["tool-worker","context-builder","tool-executor"]}
+    {
+      "id": "agent-3d-boundary",
+      "label": "Agent 3D (single Python process)",
+      "kind": "worker",
+      "description": "Everything from claiming the job through the reasoning loop and hash-guarded commit runs in one worker process, with no nested tool-call queue.",
+      "nodeIds": ["agent-3d", "goal-plan", "agent-loop"]
+    }
   ]
 }

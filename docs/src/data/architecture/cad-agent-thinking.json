@@ -1,710 +1,340 @@
 {
   "id": "cad-agent-thinking",
-  "title": "CAD Agent observable reasoning and decision flow",
-  "summary": "The workflow turns a user request into bounded context, a strict registered-tool plan, deterministic source checks, and either a verified no-change completion or a validated canonical edit.",
+  "title": "Agent 3D observable reasoning loop",
+  "summary": "From claimed job to committed source: a structured goal and plan, then a bounded turn-by-turn loop where Agent3D makes one decision at a time and the orchestrator executes it, gates completion, and only then validates and commits.",
   "scope": "service",
   "direction": "RIGHT",
   "nodes": [
     {
-      "id": "request-intent",
-      "label": "1 · Request Intent",
-      "description": "Nest accepts the user request, conversation tail, project, and optional authoritative part link as one durable edit job.",
+      "id": "job-claimed",
+      "label": "1 · Job Claimed",
+      "description": "A Python worker replica claims one queued or lease-expired edit_jobs row and starts a lease heartbeat.",
       "type": "function",
       "variant": "operation",
-      "icon": "editor",
+      "icon": "worker",
       "position": { "column": 0, "row": 0 },
       "mobileOrder": 1,
       "details": {
-        "responsibility": "Preserve the exact requested change and identity scope that every later reasoning step must honor.",
-        "ownedBy": "NestJS CAD Agent",
-        "inputs": [
-          { "name": "request_text", "description": "The current user instruction." },
-          { "name": "messages", "description": "A bounded conversation ending with request_text." },
-          { "name": "requested_part_id", "description": "An optional authoritative linked CAD part." }
-        ],
-        "outputs": [
-          { "name": "edit_job", "description": "Durable workflow identity, scope, mode, state, and retry budget." }
-        ],
-        "guarantees": [
-          "A linked requested_part_id cannot be redirected to another part.",
-          "Public progress records milestones, not prompts or private model deliberation."
-        ],
+        "responsibility": "Give exactly one replica ownership of this job for as long as its lease is renewed.",
+        "ownedBy": "Agent 3D",
+        "guarantees": ["Only one replica can claim a given row (FOR UPDATE SKIP LOCKED); a crashed replica's job is reclaimable once its lease expires."],
         "evidence": [
-          { "path": "services/cad_agent/src/submission.service.ts", "symbol": "SubmissionService.submit", "kind": "source" },
-          { "path": "services/cad_agent/src/contracts.ts", "symbol": "CadEditSubmissionSchema", "kind": "schema" }
+          { "path": "workers/agent_3d/edit_worker.py", "kind": "source" },
+          { "path": "workers/agent_3d/repository.py", "symbol": "claim_next_edit_job", "kind": "source" }
         ]
       }
     },
     {
-      "id": "mode-gate",
-      "label": "2 · Workflow Mode Gate",
-      "description": "The accepted source state fixes initial-design or established-edit behavior before a model is asked to plan.",
+      "id": "goal-creation",
+      "label": "2 · Goal Creation",
+      "description": "The original request alone produces a strict CadGoalDefinition: required-vs-preserve criteria, constraints, and assumptions.",
       "type": "function",
-      "variant": "decision",
-      "icon": "process",
+      "variant": "transform",
+      "icon": "file-json",
       "position": { "column": 1, "row": 0 },
       "mobileOrder": 2,
       "details": {
-        "responsibility": "Select the legal prompt and tool-plan shape without letting OpenAI choose its own authority.",
-        "ownedBy": "NestJS CAD Agent",
-        "decisionPoints": [
-          "Exact runtime-only blank marker → initial_design.",
-          "Established accepted source → edit.",
-          "Validation diagnostics or planning_feedback → append repair instructions for the same workflow mode."
+        "responsibility": "Fix what must become true before any plan or source exists, so later steps can't drift from user intent.",
+        "ownedBy": "Agent 3D",
+        "runsIn": "workers/agent_3d/planning/goal_creator.py",
+        "guarantees": ["The validated goal is checkpointed to edit_jobs.history immediately, so a reclaimed worker never re-asks the model for a goal."],
+        "failureConditions": [
+          { "condition": "The request is ambiguous and requires clarification", "outcome": "CLARIFICATION_REQUIRED — the job ends before any plan or candidate exists." }
         ],
-        "guarantees": [
-          "Initial design requires exactly one write_initial_model operation.",
-          "Established editing never receives whole-model replacement authority."
-        ],
-        "evidence": [
-          { "path": "services/cad_agent/src/reasoner.service.ts", "symbol": "ReasonerService.requestPlan", "kind": "source" },
-          { "path": "services/cad_agent/src/prompt-loader.ts", "symbol": "loadCadReasoningPrompt", "kind": "source" }
-        ]
+        "evidence": [{ "path": "workers/agent_3d/planning/goal_creator.py", "kind": "source" }]
       }
     },
     {
-      "id": "tool-jobs",
-      "label": "CAD Tool Jobs",
-      "description": "Postgres cad_tool_jobs durably carries bounded context, apply-plan, and repair-context work between Nest and Python.",
-      "type": "database",
-      "icon": "database",
-      "foundation": true,
-      "position": { "column": 2, "row": 1 },
-      "mobileOrder": 3,
-      "details": {
-        "responsibility": "Make every Nest-to-Python reasoning support step leased, retry-safe, and inspectable.",
-        "ownedBy": "Postgres cad_tool_jobs",
-        "durableWrites": [
-          "prepare_context requests and structured results",
-          "apply_plan requests and candidate or no-change results",
-          "prepare_repair_context requests and structured diagnostic context"
-        ],
-        "guarantees": [
-          "This is the durable handoff; a WebSocket is never the work queue."
-        ],
-        "evidence": [
-          { "path": "supabase/migrations/20260727000000_add_cad_agent_progress_and_tools.sql", "symbol": "cad_tool_jobs / queue_cad_tool_job", "kind": "migration" }
-        ]
-      }
-    },
-    {
-      "id": "context-builder",
-      "label": "3 · Bounded Context",
-      "description": "Python resolves the allowed part and extracts only the source identities, dependencies, targets, and fingerprints needed to plan.",
+      "id": "semantic-plan",
+      "label": "3 · High-level Plan",
+      "description": "PlanningAgent turns the goal into a version-1 CadPlan of sequenced steps, using only two read-only semantic-index tools.",
       "type": "function",
       "variant": "transform",
       "icon": "search",
-      "position": { "column": 2, "row": 3 },
-      "mobileOrder": 4,
+      "position": { "column": 2, "row": 0 },
+      "mobileOrder": 3,
       "details": {
-        "responsibility": "Turn accepted source plus the user request into authoritative planning context without changing source.",
-        "ownedBy": "Python CAD Tool Worker",
-        "runsIn": "workers/cad_editor/cad_editor/tool_executor.py",
+        "responsibility": "Decide what outcomes are needed, in what order, before deciding how to build them.",
+        "ownedBy": "Agent 3D",
+        "runsIn": "workers/agent_3d/planning/planning_agent.py",
         "steps": [
-          "Resolve the linked part exactly, or require one unambiguous project match.",
-          "Read accepted model.py and verify its indexed identity.",
-          "Inventory semantic features, editable parameters, build_model, allowed targets, and deletable provenance.",
-          "Derive dependency paths, parameter consumers, impact candidates, and metadata warnings.",
-          "Return the accepted source SHA-256 and current target fingerprints."
+          "At most 8 read-tool rounds against index_search and index_get_feature.",
+          "Steps get sequential PS-1, PS-2, ... IDs with pending status and dependencies on earlier steps only.",
+          "Collectively, the steps must address every goal criterion."
         ],
-        "outputs": [
-          { "name": "source_context", "description": "Bounded feature, parameter, dependency, target, and hash context." }
-        ],
-        "failureConditions": [
-          { "condition": "The target is missing, ambiguous, stale, or outside the linked scope.", "outcome": "Planning stops before OpenAI is called." }
-        ],
+        "guarantees": ["The plan is checkpointed to edit_jobs.history before the agent loop starts."],
         "evidence": [
-          { "path": "workers/cad_editor/cad_editor/tool_executor.py", "symbol": "CadToolExecutor.prepare_context", "kind": "source" },
-          { "path": "workers/cad_editor/cad_editor/context_builder.py", "symbol": "build_edit_context", "kind": "source" }
+          { "path": "workers/agent_3d/planning/planning_agent.py", "kind": "source" },
+          { "path": "workers/agent_3d/tools/index/index_tools.py", "symbol": "IndexSearchTool / IndexGetFeatureTool", "kind": "source" }
         ]
       }
     },
     {
-      "id": "reasoner-request",
-      "label": "4 · Structured Planning Request",
-      "description": "Nest combines the workflow-specific instructions with the original request and bounded context, then requests one schema-constrained plan.",
+      "id": "prepare-candidate",
+      "label": "4 · Candidate Prepared",
+      "description": "Accepted source is copied to an edit-scoped candidate path; the pre-edit original is backed up and hashed.",
       "type": "function",
       "variant": "transform",
       "icon": "source-code",
       "position": { "column": 3, "row": 0 },
-      "mobileOrder": 5,
+      "mobileOrder": 4,
       "details": {
-        "responsibility": "Define what the model may consider and the exact structured response it must produce.",
-        "ownedBy": "NestJS CAD Agent",
-        "runsIn": "services/cad_agent/src/reasoner.service.ts",
-        "inputs": [
-          { "name": "original_request", "description": "The current user instruction." },
-          { "name": "source_context", "description": "Authoritative Python-produced scope, graph, source hashes, and fingerprints." },
-          { "name": "latest_validation", "description": "Structured diagnostics on repair attempts, otherwise null." },
-          { "name": "planning_feedback", "description": "Typed tool-preflight feedback on replanning attempts, otherwise null." }
-        ],
-        "steps": [
-          "Load the shared CAD source contract.",
-          "Add the registered tool catalog.",
-          "Add initialization or established-edit planning rules.",
-          "Append repair rules only when structured feedback exists.",
-          "Request ToolPlan schema version 2 as structured output."
-        ],
-        "guarantees": [
-          "The model receives no database or storage credentials.",
-          "Prompts and complete source bodies are not emitted to public progress."
-        ],
-        "evidence": [
-          { "path": "services/cad_agent/src/reasoner.service.ts", "symbol": "ReasonerService.requestPlan", "kind": "source" },
-          { "path": "services/cad_agent/src/prompt-loader.ts", "symbol": "loadCadReasoningPrompt", "kind": "source" }
-        ]
+        "responsibility": "Give the loop a mutation target that is never canonical source.",
+        "ownedBy": "Agent 3D",
+        "runsIn": "workers/agent_3d/orchestrator.py",
+        "guarantees": ["Runs once, before the first agent turn; a resumed job reuses the existing candidate untouched.", "Canonical source is never modified while the loop runs."],
+        "evidence": [{ "path": "workers/agent_3d/orchestrator.py", "symbol": "EditWorkflowOrchestrator._prepare_candidate", "kind": "source" }]
       }
     },
     {
-      "id": "openai-planner",
-      "label": "5 · OpenAI Structured Planner",
-      "description": "OpenAI returns one versioned ToolPlan containing only registered operations, bounded arguments, a summary, and dependency impact decisions.",
-      "type": "external",
-      "icon": "external",
-      "foundation": true,
-      "position": { "column": 4, "row": 1 },
-      "mobileOrder": 6,
-      "details": {
-        "responsibility": "Choose the smallest sufficient registered operation set from the supplied bounded context.",
-        "ownedBy": "OpenAI Responses API",
-        "decisionPoints": [
-          "Is this initial construction, an established edit, or a repair attempt?",
-          "Which semantic feature or shared parameter expresses the requested geometric intent?",
-          "Which dependent features are modified or verified compatible?",
-          "Does accepted source definitely satisfy the request, allowing confirm_no_change?"
-        ],
-        "outputs": [
-          { "name": "ToolPlan", "description": "target_part_id, base source hash, summary, operations, and impact_review." }
-        ],
-        "guarantees": [
-          "Only the 13 operation types declared by ToolOperationSchema are available for planning.",
-          "The model cannot write source, execute Python or CadQuery, validate geometry, commit canonical source, or complete the edit job."
-        ],
-        "evidence": [
-          { "path": "services/cad_agent/src/contracts.ts", "symbol": "ToolPlanV2Schema", "kind": "schema" },
-          { "path": "services/cad_agent/prompts/edit-plan.md", "kind": "configuration" },
-          { "path": "services/cad_agent/prompts/tool-plan.md", "kind": "configuration" }
-        ]
-      }
-    },
-    {
-      "id": "nest-plan-gate",
-      "label": "6 · Nest Plan Gate",
-      "description": "Nest parses the structured response and rejects an invalid workflow shape, part target, or base-source identity before execution.",
-      "type": "function",
-      "variant": "gate",
-      "icon": "api",
-      "position": { "column": 5, "row": 0 },
-      "mobileOrder": 7,
-      "details": {
-        "responsibility": "Prove that the model response is a legal ToolPlan for the server-selected workflow and current context.",
-        "ownedBy": "NestJS CAD Agent",
-        "preconditions": [
-          "ToolPlan parses against the workflow-specific Zod schema.",
-          "target_part_id equals the Python-resolved part.",
-          "base_source_sha256 equals the bounded context hash.",
-          "Initial design and confirm_no_change exclusivity rules hold."
-        ],
-        "shortCircuit": "Malformed or out-of-scope model output fails before an apply_plan job is queued.",
-        "evidence": [
-          { "path": "services/cad_agent/src/reasoner.service.ts", "symbol": "ReasonerService.requestPlan", "kind": "source" },
-          { "path": "services/cad_agent/src/contracts.ts", "symbol": "ToolPlanV2Schema", "kind": "schema" }
-        ]
-      }
-    },
-    {
-      "id": "python-plan-gate",
-      "label": "7 · Python Plan Gate",
-      "description": "Python independently rebuilds the accepted-source inventory and verifies every operation, impact decision, fingerprint, and no-change citation.",
-      "type": "function",
-      "variant": "gate",
-      "icon": "ast",
-      "position": { "column": 5, "row": 3 },
-      "mobileOrder": 8,
-      "details": {
-        "responsibility": "Treat the model plan as untrusted input and authorize only registered, source-current operations.",
-        "ownedBy": "Python CAD Tool Worker",
-        "runsIn": "workers/cad_editor/cad_editor/tool_executor.py",
-        "steps": [
-          "Re-read the exact base path and compare the whole-source SHA-256.",
-          "Verify target part, operation schema, ownership, target kinds, and fingerprints.",
-          "Derive and compare the complete dependency impact set.",
-          "Reject duplicate, overlapping, unassembled, out-of-scope, or stale operations.",
-          "For confirm_no_change, verify every semantic ID and current function-body fingerprint."
-        ],
-        "failureConditions": [
-          { "condition": "A repairable feature-target or impact-review preflight fails.", "outcome": "Nest replans with typed planning_feedback.", "continuesTo": "Structured Planning Request" },
-          { "condition": "A terminal scope, source, or contract check fails.", "outcome": "The job fails without a candidate." }
-        ],
-        "evidence": [
-          { "path": "workers/cad_editor/cad_editor/tool_contracts.py", "symbol": "ToolPlan", "kind": "schema" },
-          { "path": "workers/cad_editor/cad_editor/tool_executor.py", "symbol": "CadToolExecutor.apply_plan", "kind": "source" },
-          { "path": "workers/cad_editor/cad_editor/tool_executor.py", "symbol": "_validate_impact_review", "kind": "source" }
-        ]
-      }
-    },
-    {
-      "id": "outcome-router",
-      "label": "8 · Outcome Decision",
-      "description": "Nest accepts only a verified no-change result or an isolated candidate path and SHA-256 proof from the Python worker.",
+      "id": "active-step",
+      "label": "5 · Select Active Step",
+      "description": "The orchestrator picks the earliest step still pending or in_progress. No step left means the loop is over.",
       "type": "function",
       "variant": "decision",
       "icon": "process",
-      "position": { "column": 6, "row": 0 },
-      "mobileOrder": 9,
+      "position": { "column": 4, "row": 0 },
+      "mobileOrder": 5,
       "details": {
-        "responsibility": "Choose the legal terminal or validation path from the typed tool result.",
-        "ownedBy": "NestJS CAD Agent",
-        "decisionPoints": [
-          "outcome=no_change plus matching plan, base hash, and non-empty verified evidence → no-change completion.",
-          "Valid candidate path plus candidate SHA-256 → independent validation.",
-          "Any other result shape → INVALID_TOOL_RESULT."
-        ],
-        "evidence": [
-          { "path": "services/cad_agent/src/orchestrator.service.ts", "symbol": "OrchestratorService.planAndApply", "kind": "source" }
-        ]
+        "responsibility": "Drive the plan forward one step at a time; only the orchestrator ever writes step status.",
+        "ownedBy": "Agent 3D",
+        "runsIn": "workers/agent_3d/orchestrator.py",
+        "guarantees": ["Tool observations are scoped to the active step — cleared the moment the active step changes, so a later step never inherits an earlier step's transcript.", "The goal is never mutated by anything; only step status changes."],
+        "evidence": [{ "path": "workers/agent_3d/orchestrator.py", "symbol": "EditWorkflowOrchestrator._active_step", "kind": "source" }]
       }
     },
     {
-      "id": "no-change-completion",
-      "label": "9A · No-change Completion",
-      "description": "The request is completed against unchanged accepted source with explicit semantic evidence and empty changed-file and changed-symbol lists.",
-      "type": "function",
-      "variant": "completion",
-      "icon": "file-json",
-      "position": { "column": 7, "row": 0 },
-      "mobileOrder": 10,
-      "details": {
-        "responsibility": "Make an already-satisfied request a first-class truthful outcome instead of fabricating an edit.",
-        "ownedBy": "NestJS CAD Agent",
-        "preconditions": [
-          "The ToolPlan contains only confirm_no_change.",
-          "impact_review is empty.",
-          "Python verified each cited semantic feature and function-body fingerprint."
-        ],
-        "shortCircuit": "No candidate, candidate validation, commit, post-edit reindex, or export is queued.",
-        "successCondition": "The edit job records outcome=no_change and preserves the accepted source hash.",
-        "evidence": [
-          { "path": "services/cad_agent/src/orchestrator.service.ts", "symbol": "OrchestratorService.process", "kind": "source" },
-          { "path": "tests/test_cad_tool_executor.py", "symbol": "test_confirm_no_change_verifies_feature_evidence_without_upload", "kind": "test" },
-          { "path": "services/cad_agent/test/orchestrator.test.ts", "symbol": "confirmed no-change completes without candidate validation, commit, reindex, or export", "kind": "test" }
-        ]
-      }
-    },
-    {
-      "id": "candidate-builder",
-      "label": "9B · Candidate Transaction",
-      "description": "Python applies every approved operation in memory, validates the final source contract, and writes one complete edit-scoped candidate.",
+      "id": "agent3d-request",
+      "label": "6 · Assemble Turn Context",
+      "description": "Agent3D rebuilds context from scratch every turn: goal, full plan, active step, this step's observations, recent conversation, tool catalog.",
       "type": "function",
       "variant": "transform",
       "icon": "source-code",
-      "position": { "column": 6, "row": 3 },
-      "mobileOrder": 11,
+      "position": { "column": 5, "row": 0 },
+      "mobileOrder": 6,
       "details": {
-        "responsibility": "Convert an approved ToolPlan into one isolated candidate without partial durable edits.",
-        "ownedBy": "Python CAD Tool Worker",
-        "runsIn": "workers/cad_editor/cad_editor/tool_executor.py",
-        "steps": [
-          "Normalize semantic feature operations to current internal targets.",
-          "Apply all non-delete operations in memory.",
-          "Apply eligible provenance-backed deletions in memory.",
-          "Validate required imports, ModelParams, build_model, and source ownership contracts.",
-          "Write and hash-verify one attempt-specific candidate model.py."
+        "responsibility": "Give the model exactly the bounded context it needs for one decision — nothing accumulated, nothing summarized away.",
+        "ownedBy": "Agent 3D",
+        "runsIn": "workers/agent_3d/agent_3d.py",
+        "inputs": [
+          { "name": "goal + plan", "description": "Supplied in full every turn, never summarized." },
+          { "name": "active_step", "description": "Only the currently active step — Agent3D never reasons about the whole plan at once." },
+          { "name": "step_observations", "description": "This step's accumulated tool results only." },
+          { "name": "recent_conversation", "description": "At most 8 recent messages, chronologically ordered — a plain trailing slice, not a summary." }
         ],
-        "guarantees": [
-          "An earlier successful operation never becomes a durable partial candidate if a later operation fails."
-        ],
+        "guarantees": ["Agent3D holds no state between turns; every call is a fresh, complete context.", "The tool catalog is passed via the model client's native tool-calling interface, never duplicated as prompt text."],
+        "evidence": [{ "path": "workers/agent_3d/agent_3d.py", "symbol": "Agent3D.decide", "kind": "source" }]
+      }
+    },
+    {
+      "id": "openai-agent",
+      "label": "7 · Model Decision",
+      "description": "One Responses API call returns one decision — its function_call items, returned unchanged, not summarized or re-parsed.",
+      "type": "external",
+      "icon": "external",
+      "foundation": true,
+      "position": { "column": 6, "row": 1 },
+      "mobileOrder": 7,
+      "details": {
+        "responsibility": "Choose the next tool call(s) from the supplied bounded context and 12-tool catalog.",
+        "ownedBy": "OpenAI Responses API",
+        "guarantees": ["decide() makes exactly one model call per invocation and returns the raw response unchanged — no parallel decision type exists.", "OPENAI_AGENT_MODEL falls back to OPENAI_MODEL, then gpt-5.4-mini."],
         "evidence": [
-          { "path": "workers/cad_editor/cad_editor/tool_executor.py", "symbol": "CadToolExecutor.apply_plan", "kind": "source" },
-          { "path": "workers/cad_editor/cad_editor/applier.py", "symbol": "apply_edit_plan", "kind": "source" }
+          { "path": "workers/agent_3d/planning/prompts/agent-reasoning.md", "kind": "configuration" },
+          { "path": "workers/agent_3d/planning/prompts/cad-system.md", "kind": "configuration" }
         ]
       }
     },
     {
-      "id": "cad-validator",
-      "label": "10 · Independent Validation",
-      "description": "The separate CAD Validator executes the exact candidate identified by path and SHA-256 and returns structured proof or diagnostics.",
-      "type": "worker",
-      "variant": "sandbox",
-      "icon": "worker",
-      "href": "/services/cad-validator/",
-      "position": { "column": 7, "row": 3 },
-      "mobileOrder": 12,
+      "id": "execute-tools",
+      "label": "8 · Execute Tool Calls",
+      "description": "The orchestrator runs each requested call through ToolExecutor against the candidate; results become this step's new observations.",
+      "type": "function",
+      "variant": "gate",
+      "icon": "ast",
+      "position": { "column": 7, "row": 0 },
+      "mobileOrder": 8,
       "details": {
-        "responsibility": "Check syntax, source policy, runtime build behavior, model contract, and artifact shape independently of planning.",
-        "ownedBy": "CAD Validator Worker",
-        "guarantees": [
-          "Planning success is never treated as geometry or execution proof.",
-          "The proof is bound to the exact edit job, candidate path, and candidate SHA-256."
-        ],
+        "responsibility": "Turn a model decision into an actual candidate mutation or read, never trusting the model's own account of what happened.",
+        "ownedBy": "Agent 3D",
+        "runsIn": "workers/agent_3d/orchestrator.py and tools/registry.py",
+        "guarantees": ["12 tools are registered: create/edit/delete feature, create/edit/delete parameter, create CAD part, edit build_model, check_geometry, request_step_completion, plus the 2 read-only index tools.", "Agent3D never executes what it decides — Agent3D only decides; the orchestrator executes."],
         "evidence": [
-          { "path": "workers/cad_validator/validate_cad_job.py", "symbol": "validate_cad_job", "kind": "source" },
-          { "path": "workers/cad_validator/cad_validation_runner.py", "symbol": "execute / geometry_result", "kind": "source" },
-          { "path": "services/cad_agent/src/orchestrator.service.ts", "symbol": "OrchestratorService.validateCandidate", "kind": "source" }
+          { "path": "workers/agent_3d/orchestrator.py", "symbol": "EditWorkflowOrchestrator._run_agent_loop", "kind": "source" },
+          { "path": "workers/agent_3d/tools/registry.py", "symbol": "ToolExecutor", "kind": "source" }
         ]
       }
     },
     {
-      "id": "validation-decision",
-      "label": "11 · Validation Decision",
-      "description": "Nest compares the returned proof to the current candidate and chooses commit, repair, or terminal failure.",
+      "id": "step-gate",
+      "label": "9 · Completion Gate",
+      "description": "If the agent called request_step_completion, the orchestrator checks it before honoring it — otherwise the loop takes another turn.",
       "type": "function",
       "variant": "decision",
       "icon": "process",
       "position": { "column": 8, "row": 0 },
+      "mobileOrder": 9,
+      "details": {
+        "responsibility": "Stop an agent that searched, found nothing, and declared victory anyway from silently completing a step that built nothing.",
+        "ownedBy": "Agent 3D",
+        "runsIn": "workers/agent_3d/orchestrator.py",
+        "decisionPoints": [
+          "request_step_completion on a required-criterion step with zero @cad_part features in the candidate → rejected.",
+          "Otherwise → step marked completed, orchestrator advances to the next step.",
+          "No request_step_completion → another turn on the same step."
+        ],
+        "failureConditions": [
+          { "condition": "Rejected completion (STEP_REQUIRES_A_FEATURE)", "outcome": "Fed back as an observation instead of advancing — the agent gets a concrete correction on its next turn.", "continuesTo": "Assemble Turn Context" },
+          { "condition": "A decision requests no tool call at all", "outcome": "AGENT_NO_ACTION — fails fast rather than assuming the step finished." },
+          { "condition": "This step exceeds 10 turns, or the job exceeds 24 turns total", "outcome": "AGENT_STEP_TURN_LIMIT / AGENT_TURN_LIMIT." }
+        ],
+        "evidence": [{ "path": "workers/agent_3d/orchestrator.py", "symbol": "EditWorkflowOrchestrator._run_agent_loop", "kind": "source" }]
+      }
+    },
+    {
+      "id": "validate-candidate",
+      "label": "10 · Independent Validation",
+      "description": "Once every step is completed, the separate CAD Validator executes the exact final candidate and returns structured proof or diagnostics.",
+      "type": "worker",
+      "variant": "sandbox",
+      "icon": "worker",
+      "href": "/services/cad-validator/",
+      "position": { "column": 9, "row": 0 },
+      "mobileOrder": 10,
+      "details": {
+        "responsibility": "Prove the candidate is valid independently of the planning that produced it.",
+        "guarantees": ["Bound to the exact edit job, candidate path, and candidate SHA-256 — planning success is never treated as validation proof."],
+        "failureConditions": [
+          { "condition": "Validation fails", "outcome": "VALIDATION_FAILED — the job fails outright; there is no repair loop feeding diagnostics back to Agent3D for another try." }
+        ],
+        "evidence": [
+          { "path": "workers/cad_validator/validate_cad_job.py", "kind": "source" },
+          { "path": "workers/agent_3d/repository.py", "symbol": "queue_validation", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "commit-candidate",
+      "label": "11 · Hash-guarded Commit",
+      "description": "Canonical source is written only if it still equals the accepted base hash, then re-read and re-verified against the candidate hash.",
+      "type": "function",
+      "variant": "gate",
+      "icon": "object-storage",
+      "position": { "column": 10, "row": 0 },
+      "mobileOrder": 11,
+      "details": {
+        "responsibility": "Promote exactly one independently proven candidate, and only that one.",
+        "ownedBy": "Agent 3D",
+        "runsIn": "workers/agent_3d/orchestrator.py",
+        "guarantees": ["Idempotent on resume: if canonical already equals the candidate hash, commit is a no-op rather than a duplicate write."],
+        "failureConditions": [
+          { "condition": "Canonical source no longer matches accepted_source_sha256", "outcome": "SOURCE_CHANGED — commit refused, canonical untouched." }
+        ],
+        "evidence": [{ "path": "workers/agent_3d/orchestrator.py", "symbol": "EditWorkflowOrchestrator._commit_candidate", "kind": "source" }]
+      }
+    },
+    {
+      "id": "reindex",
+      "label": "12 · Mandatory Reindex",
+      "description": "A post-commit reindex proves the just-committed source still produces a fresh semantic index.",
+      "type": "function",
+      "variant": "gate",
+      "icon": "database",
+      "position": { "column": 11, "row": 0 },
+      "mobileOrder": 12,
+      "details": {
+        "responsibility": "Never leave canonical source committed without an index that describes it.",
+        "ownedBy": "Agent 3D",
+        "runsIn": "workers/agent_3d/orchestrator.py",
+        "failureConditions": [
+          { "condition": "Reindex fails", "outcome": "Canonical source is rolled back to its pre-edit backup (only if still provably safe), then REINDEX_FAILED." }
+        ],
+        "evidence": [{ "path": "workers/agent_3d/orchestrator.py", "symbol": "EditWorkflowOrchestrator._reindex_after_commit", "kind": "source" }]
+      }
+    },
+    {
+      "id": "export",
+      "label": "13 · Best-effort Export",
+      "description": "Export is queued only after commit and reindex both succeed — the one deliberately non-fatal step in the pipeline.",
+      "type": "function",
+      "variant": "operation",
+      "icon": "queue",
+      "position": { "column": 12, "row": 1 },
       "mobileOrder": 13,
       "details": {
-        "responsibility": "Keep model planning separate from the authority to accept source.",
-        "ownedBy": "NestJS CAD Agent",
-        "decisionPoints": [
-          "Exact completed passed proof → guarded commit.",
-          "Failed report with repairable_hint=true and attempts remaining → prepare repair context.",
-          "Non-repairable report or exhausted attempt budget → fail without commit."
+        "responsibility": "Render the committed source without risking an already-valid edit over a rendering failure.",
+        "ownedBy": "Agent 3D",
+        "runsIn": "workers/agent_3d/orchestrator.py",
+        "failureConditions": [
+          { "condition": "Export enqueue fails", "outcome": "Added as a warning to the terminal result; the job still completes." }
         ],
-        "operations": {
-          "retry": "At most three candidate attempts, including the first."
-        },
-        "evidence": [
-          { "path": "services/cad_agent/src/orchestrator.service.ts", "symbol": "OrchestratorService.process / validateCandidate", "kind": "source" }
-        ]
+        "evidence": [{ "path": "workers/agent_3d/orchestrator.py", "symbol": "EditWorkflowOrchestrator._queue_export_after_commit", "kind": "source" }]
       }
     },
     {
-      "id": "repair-context",
-      "label": "12 · Repair Context",
-      "description": "Python verifies the failed candidate identity and returns its exact previous ToolPlan, source context, and structured validator diagnostics for replanning.",
-      "type": "function",
-      "variant": "transform",
-      "icon": "search",
-      "position": { "column": 7, "row": 4 },
-      "mobileOrder": 14,
-      "details": {
-        "responsibility": "Turn a repairable failure into bounded evidence for the next plan without indexing or accepting the failed candidate.",
-        "ownedBy": "Python CAD Tool Worker",
-        "runsIn": "workers/cad_editor/cad_editor/tool_executor.py",
-        "inputs": [
-          { "name": "previous_plan", "description": "The exact ToolPlan that produced the failed candidate." },
-          { "name": "candidate proof", "description": "Attempt-specific path and SHA-256." },
-          { "name": "validation", "description": "Structured diagnostics and repairable hint." }
-        ],
-        "outputs": [
-          { "name": "repair source_context", "description": "Current candidate inventory plus previous plan and diagnostics." }
-        ],
-        "guarantees": [
-          "The failed candidate remains isolated and never enters the accepted semantic index."
-        ],
-        "evidence": [
-          { "path": "workers/cad_editor/cad_editor/tool_executor.py", "symbol": "CadToolExecutor.prepare_repair_context", "kind": "source" },
-          { "path": "services/cad_agent/src/orchestrator.service.ts", "symbol": "OrchestratorService.repairContext", "kind": "source" }
-        ]
-      }
-    },
-    {
-      "id": "commit-completion",
-      "label": "13 · Proof-gated Completion",
-      "description": "Nest commits only the exact validated candidate while canonical source still matches the accepted base hash, then reindexes and queues export.",
+      "id": "terminal-outcome",
+      "label": "14 · Terminal Outcome",
+      "description": "The job completes with outcome \"committed\": changed files, source hash, index/export job IDs, goal, and plan all recorded.",
       "type": "function",
       "variant": "completion",
-      "icon": "object-storage",
-      "position": { "column": 9, "row": 0 },
-      "mobileOrder": 15,
+      "icon": "file-json",
+      "position": { "column": 13, "row": 0 },
+      "mobileOrder": 14,
       "details": {
-        "responsibility": "Promote one independently proven candidate and publish the final durable workflow outcome.",
-        "ownedBy": "NestJS CAD Agent",
-        "preconditions": [
-          "Validation job, edit job, candidate path, and candidate SHA-256 all match.",
-          "Canonical model.py still matches accepted_source_sha256.",
-          "Candidate bytes still match the validated candidate SHA-256."
-        ],
-        "steps": [
-          "Write and verify canonical source.",
-          "Require a successful post-commit semantic reindex.",
-          "Queue best-effort export against the committed source hash.",
-          "Persist completion and public milestone events."
-        ],
+        "responsibility": "Publish one durable, replayable, truthful record of what happened — not a private reasoning transcript.",
+        "ownedBy": "Agent 3D",
+        "guarantees": ["Every turn of this entire loop — llm.request/response, tool.started/completed, step.started/changed/completed, agent_loop.completed/failed — is recorded in one append-only trace file per job, correlated by agent_turn and step_turn."],
         "evidence": [
-          { "path": "services/cad_agent/src/orchestrator.service.ts", "symbol": "OrchestratorService.commit", "kind": "source" }
+          { "path": "workers/agent_3d/orchestrator.py", "kind": "source" },
+          { "path": "workers/agent_3d/planning/agent_trace.py", "symbol": "AgentTraceWriter", "kind": "source" }
         ]
       }
     }
   ],
   "edges": [
+    { "id": "claim-to-goal", "source": "job-claimed", "target": "goal-creation", "label": "lease acquired; semantic index freshness ensured", "protocol": "internal", "flow": "synchronous", "direction": "one-way" },
+    { "id": "goal-to-plan", "source": "goal-creation", "target": "semantic-plan", "label": "authoritative goal checkpointed", "protocol": "internal", "flow": "synchronous", "direction": "one-way" },
+    { "id": "plan-to-candidate", "source": "semantic-plan", "target": "prepare-candidate", "label": "plan checkpointed", "protocol": "internal", "flow": "synchronous", "direction": "one-way" },
+    { "id": "candidate-to-loop", "source": "prepare-candidate", "target": "active-step", "label": "candidate ready; step queue seeded from the plan", "protocol": "internal", "flow": "synchronous", "direction": "one-way" },
+    { "id": "select-step", "source": "active-step", "target": "agent3d-request", "label": "earliest pending / in_progress step selected", "protocol": "internal", "flow": "synchronous", "direction": "one-way" },
     {
-      "id": "interpret-request",
-      "source": "request-intent",
-      "target": "mode-gate",
-      "label": "classify accepted source state",
-      "protocol": "internal",
-      "flow": "synchronous",
-      "direction": "one-way"
-    },
-    {
-      "id": "queue-context",
-      "source": "mode-gate",
-      "target": "tool-jobs",
-      "label": "queue prepare_context",
-      "protocol": "database",
-      "flow": "synchronous",
-      "direction": "one-way",
-      "details": {
-        "operation": "queueToolJob(kind=prepare_context)",
-        "payload": "request_text, bounded messages, requested_part_id, and server-selected workflow_mode",
-        "evidence": [
-          { "path": "services/cad_agent/src/orchestrator.service.ts", "symbol": "OrchestratorService.prepareContext", "kind": "source" }
-        ]
-      }
-    },
-    {
-      "id": "build-context",
-      "source": "context-builder",
-      "target": "tool-jobs",
-      "label": "claim and complete bounded context",
-      "protocol": "database",
-      "flow": "asynchronous",
-      "direction": "two-way",
-      "request": {
-        "label": "claim prepare_context",
-        "type": "cad_tool_jobs lease",
-        "exampleBody": "{\"kind\":\"prepare_context\",\"part_id\":\"part-uuid\",\"workflow_mode\":\"edit\"}"
-      },
-      "response": {
-        "label": "bounded source context",
-        "type": "completed cad_tool_jobs result",
-        "exampleBody": "{\"part_id\":\"part-uuid\",\"base_source_sha256\":\"sha256\",\"existing_features\":[\"…\"],\"impact_candidates\":[\"…\"]}"
-      }
-    },
-    {
-      "id": "read-context",
-      "source": "reasoner-request",
-      "target": "tool-jobs",
-      "label": "consume verified context",
-      "protocol": "database",
-      "flow": "synchronous",
-      "direction": "two-way",
-      "request": {
-        "label": "read completed context job",
-        "type": "cad_tool_jobs status read",
-        "exampleBody": "{\"tool_job_id\":\"context-tool-uuid\"}"
-      },
-      "response": {
-        "label": "authoritative planning context",
-        "type": "structured result",
-        "exampleBody": "{\"storage_path\":\"…/model.py\",\"base_source_sha256\":\"sha256\",\"allowed_targets\":[\"…\"]}"
-      }
-    },
-    {
-      "id": "request-plan",
-      "source": "reasoner-request",
-      "target": "openai-planner",
-      "label": "request one strict ToolPlan",
+      "id": "request-decision",
+      "source": "agent3d-request",
+      "target": "openai-agent",
+      "label": "one bounded turn",
       "protocol": "http",
       "flow": "synchronous",
       "direction": "two-way",
-      "request": {
-        "label": "bounded planning request",
-        "type": "Responses API structured-output request",
-        "exampleBody": "{\"workflow_mode\":\"edit\",\"original_request\":\"Add three drainage holes\",\"source_context\":{\"part_id\":\"part-uuid\",\"base_source_sha256\":\"sha256\"}}"
-      },
-      "response": {
-        "label": "versioned registered-tool plan",
-        "type": "ToolPlanV2",
-        "exampleBody": "{\"schema_version\":2,\"summary\":\"Add three centered drainage holes\",\"operations\":[{\"tool\":\"replace_cad_feature_body\"}],\"impact_review\":[{\"semantic_id\":\"soap_drain_holes\",\"decision\":\"modified\"}]}"
-      },
-      "details": {
-        "trustBoundary": "Only bounded context crosses to the external model; the model receives no source mutation or workflow completion authority.",
-        "evidence": [
-          { "path": "services/cad_agent/src/reasoner.service.ts", "symbol": "ReasonerService.requestPlan", "kind": "source" }
-        ]
-      }
+      "request": { "label": "turn context", "type": "Responses API request", "exampleBody": "{\"goal\":{...},\"plan\":{...},\"active_step\":{...},\"step_observations\":[...],\"recent_conversation\":[...] }" },
+      "response": { "label": "one decision", "type": "Responses API response", "exampleBody": "{\"output\":[{\"type\":\"function_call\",\"name\":\"edit_feature\",\"arguments\":\"{...}\"}]}" }
     },
+    { "id": "decision-to-execution", "source": "openai-agent", "target": "execute-tools", "label": "function_call items are the decision", "protocol": "internal", "flow": "synchronous", "direction": "one-way" },
+    { "id": "results-to-gate", "source": "execute-tools", "target": "step-gate", "label": "results appended to this step's observations", "protocol": "internal", "flow": "synchronous", "direction": "one-way" },
+    { "id": "another-turn", "source": "step-gate", "target": "agent3d-request", "label": "not yet complete → another turn", "protocol": "internal", "flow": "synchronous", "direction": "one-way" },
+    { "id": "advance-step", "source": "step-gate", "target": "active-step", "label": "completion accepted → step completed, advance", "protocol": "internal", "flow": "synchronous", "direction": "one-way" },
+    { "id": "loop-ends", "source": "active-step", "target": "validate-candidate", "label": "no step pending or in_progress → loop ends", "protocol": "internal", "flow": "synchronous", "direction": "one-way" },
     {
-      "id": "parse-plan",
-      "source": "reasoner-request",
-      "target": "nest-plan-gate",
-      "label": "parse and scope ToolPlan",
-      "protocol": "internal",
-      "flow": "synchronous",
-      "direction": "one-way"
-    },
-    {
-      "id": "queue-apply",
-      "source": "nest-plan-gate",
-      "target": "tool-jobs",
-      "label": "queue apply_plan",
-      "protocol": "database",
-      "flow": "synchronous",
-      "direction": "one-way",
-      "details": {
-        "operation": "queueToolJob(kind=apply_plan)",
-        "payload": "workflow mode, base storage path, attempt, and the exact parsed ToolPlan",
-        "evidence": [
-          { "path": "services/cad_agent/src/orchestrator.service.ts", "symbol": "OrchestratorService.planAndApply", "kind": "source" }
-        ]
-      }
-    },
-    {
-      "id": "preflight-plan",
-      "source": "python-plan-gate",
-      "target": "tool-jobs",
-      "label": "claim plan and return typed result",
+      "id": "validate",
+      "source": "validate-candidate",
+      "target": "commit-candidate",
+      "label": "structured pass/fail proof",
       "protocol": "database",
       "flow": "asynchronous",
       "direction": "two-way",
-      "request": {
-        "label": "claim apply_plan",
-        "type": "cad_tool_jobs lease",
-        "exampleBody": "{\"kind\":\"apply_plan\",\"attempt\":1,\"base_source_sha256\":\"sha256\"}"
-      },
-      "response": {
-        "label": "candidate proof, no-change proof, or typed failure",
-        "type": "cad_tool_jobs terminal result",
-        "exampleBody": "{\"outcome\":\"no_change\",\"base_source_sha256\":\"sha256\",\"evidence\":[{\"semantic_id\":\"soap_drain_holes\",\"target_fingerprint\":\"sha256\"}]}"
-      }
+      "request": { "label": "candidate identity", "type": "queue_edit_candidate_validation_owned", "exampleBody": "{\"edit_job_id\":\"edit-job-uuid\",\"source_sha256\":\"sha256\"}" },
+      "response": { "label": "proof or diagnostics", "type": "generation_jobs result", "exampleBody": "{\"status\":\"passed\",\"valid\":true}" }
     },
-    {
-      "id": "preflight-feedback",
-      "source": "python-plan-gate",
-      "target": "reasoner-request",
-      "label": "repairable planning_feedback",
-      "protocol": "database",
-      "flow": "asynchronous",
-      "direction": "one-way",
-      "details": {
-        "failureBehavior": "Only allowlisted repairable preflight codes trigger another plan; source remains unchanged.",
-        "evidence": [
-          { "path": "services/cad_agent/src/orchestrator.service.ts", "symbol": "REPAIRABLE_TOOL_PREFLIGHT / OrchestratorService.process", "kind": "source" }
-        ]
-      }
-    },
-    {
-      "id": "verified-no-change",
-      "source": "python-plan-gate",
-      "target": "outcome-router",
-      "label": "verified no-change proof",
-      "protocol": "database",
-      "flow": "asynchronous",
-      "direction": "one-way"
-    },
-    {
-      "id": "approved-operations",
-      "source": "python-plan-gate",
-      "target": "candidate-builder",
-      "label": "apply approved operations",
-      "protocol": "internal",
-      "flow": "synchronous",
-      "direction": "one-way"
-    },
-    {
-      "id": "candidate-proof",
-      "source": "candidate-builder",
-      "target": "outcome-router",
-      "label": "isolated candidate path + SHA-256",
-      "protocol": "database",
-      "flow": "asynchronous",
-      "direction": "one-way"
-    },
-    {
-      "id": "complete-no-change",
-      "source": "outcome-router",
-      "target": "no-change-completion",
-      "label": "short-circuit unchanged source",
-      "protocol": "internal",
-      "flow": "synchronous",
-      "direction": "one-way"
-    },
-    {
-      "id": "validate-candidate",
-      "source": "outcome-router",
-      "target": "cad-validator",
-      "label": "validate exact candidate",
-      "protocol": "database",
-      "flow": "asynchronous",
-      "direction": "two-way",
-      "request": {
-        "label": "hash-bound validation request",
-        "type": "generation_jobs validate_cad row",
-        "exampleBody": "{\"edit_job_id\":\"edit-job-uuid\",\"source_storage_path\":\"…/attempt-1/model.py\",\"source_sha256\":\"sha256\"}"
-      },
-      "response": {
-        "label": "proof or structured diagnostics",
-        "type": "generation_jobs result",
-        "exampleBody": "{\"status\":\"completed\",\"result\":{\"valid\":false,\"repairable_hint\":true,\"diagnostics\":[{\"code\":\"PARAMETER_METADATA_MISMATCH\"}]}}"
-      }
-    },
-    {
-      "id": "review-validation",
-      "source": "cad-validator",
-      "target": "validation-decision",
-      "label": "compare exact proof",
-      "protocol": "internal",
-      "flow": "asynchronous",
-      "direction": "one-way"
-    },
-    {
-      "id": "prepare-repair",
-      "source": "validation-decision",
-      "target": "repair-context",
-      "label": "repairable diagnostics + previous plan",
-      "protocol": "database",
-      "flow": "asynchronous",
-      "direction": "one-way",
-      "details": {
-        "preconditions": [
-          "repairable_hint is true",
-          "the validation attempt budget is not exhausted"
-        ],
-        "evidence": [
-          { "path": "services/cad_agent/src/orchestrator.service.ts", "symbol": "OrchestratorService.repairContext", "kind": "source" }
-        ]
-      }
-    },
-    {
-      "id": "replan",
-      "source": "repair-context",
-      "target": "reasoner-request",
-      "label": "verified repair context",
-      "protocol": "database",
-      "flow": "asynchronous",
-      "direction": "one-way"
-    },
-    {
-      "id": "commit-validated",
-      "source": "validation-decision",
-      "target": "commit-completion",
-      "label": "exact passed proof",
-      "protocol": "internal",
-      "flow": "synchronous",
-      "direction": "one-way"
-    }
+    { "id": "commit-to-reindex", "source": "commit-candidate", "target": "reindex", "label": "canonical hash verified", "protocol": "internal", "flow": "synchronous", "direction": "one-way" },
+    { "id": "reindex-to-export", "source": "reindex", "target": "export", "label": "fresh index proved; export queued only after", "protocol": "internal", "flow": "synchronous", "direction": "one-way" },
+    { "id": "export-to-terminal", "source": "export", "target": "terminal-outcome", "label": "best-effort; failure adds a warning, never blocks completion", "protocol": "internal", "flow": "synchronous", "direction": "one-way" }
   ],
   "boundaries": [
     {
-      "id": "nest-thinking-boundary",
-      "label": "NestJS CAD Agent control plane",
-      "kind": "service",
-      "description": "Owns workflow mode, prompt composition, OpenAI request/response parsing, orchestration decisions, public progress, proof checks, and completion.",
-      "nodeIds": [
-        "request-intent",
-        "mode-gate",
-        "reasoner-request",
-        "nest-plan-gate",
-        "outcome-router",
-        "no-change-completion",
-        "validation-decision",
-        "commit-completion"
-      ]
-    },
-    {
-      "id": "python-thinking-boundary",
-      "label": "Python CAD Tool Worker",
+      "id": "agent-3d-loop-boundary",
+      "label": "Agent 3D (single Python process)",
       "kind": "worker",
-      "description": "Owns deterministic context extraction, plan preflight, no-change evidence checks, repair-context preparation, and transactional candidate construction.",
-      "nodeIds": [
-        "context-builder",
-        "python-plan-gate",
-        "candidate-builder",
-        "repair-context"
-      ]
+      "description": "Everything except the model call itself and independent validation runs inside the one worker process handling this job.",
+      "nodeIds": ["job-claimed", "goal-creation", "semantic-plan", "prepare-candidate", "active-step", "agent3d-request", "execute-tools", "step-gate", "commit-candidate", "reindex", "export", "terminal-outcome"]
     }
   ]
 }

@@ -249,6 +249,8 @@ class AgentTool(ABC, Generic[InputT, OutputT]):
     description: ClassVar[str]
     input_model: ClassVar[type[InputT]]
     output_model: ClassVar[type[OutputT]]
+    batchable: ClassVar[bool]
+    parallel_safe: ClassVar[bool]
 
     @final
     async def run(

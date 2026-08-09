@@ -1,257 +1,174 @@
 {
   "id": "cad-agent",
   "title": "CAD Agent system design",
-  "summary": "The NestJS CAD Agent owns durable CAD-edit orchestration, OpenAI tool planning, and replayable progress; it delegates bounded AST/source operations to the Python CAD Tool Worker.",
+  "summary": "The NestJS CAD Agent is a lightweight control plane: it validates requests, creates one durable edit_jobs row, and replays progress. It performs no CAD reasoning or source mutation itself — the Python Agent 3D worker claims the job and does everything else.",
   "scope": "service",
   "direction": "RIGHT",
   "nodes": [
     {
       "id": "clients",
       "label": "CAD Clients",
-      "description": "CLI or application clients submit one request, retain its idempotency key and job ID, and optionally follow replayable progress.",
+      "description": "CLI or application clients submit one request over WebSocket and optionally follow replayable progress or poll HTTP status.",
       "type": "client",
       "icon": "terminal",
       "foundation": true,
       "position": { "column": 0, "row": 0 },
       "mobileOrder": 1,
       "details": {
-        "responsibility": "Submit agent requests over WebSocket and acknowledge the latest progress sequence received.",
+        "responsibility": "Submit a request, retain its client_request_id and job ID, and acknowledge the latest progress sequence received.",
         "evidence": [
-          { "path": "cad_agent_cli.py", "symbol": "follow_edit_job", "kind": "source" }
+          { "path": "services/cad_agent/src/contracts.ts", "symbol": "CadEditSubmissionSchema", "kind": "schema" }
         ]
       }
     },
     {
-      "id": "cad-agent-api",
-      "label": "CAD Agent WebSocket",
-      "description": "NestJS accepts agent submissions only over WebSocket and replays or streams public progress events.",
+      "id": "cad-edits-gateway",
+      "label": "CAD Edits Gateway",
+      "description": "The only entry point for CAD and linked-mesh conversations: WebSocket submit, subscribe, unsubscribe, and ack.",
       "type": "api",
       "icon": "api",
       "foundation": true,
       "position": { "column": 1, "row": 0 },
       "mobileOrder": 2,
       "details": {
-        "responsibility": "Validate submission DTOs, create or return one durable edit job, and serve snapshot-plus-replay subscriptions.",
-        "ownedBy": "Manifest CAD Agent",
-        "runsIn": "services/cad_agent",
+        "responsibility": "Parse and validate submissions, route linked mesh parts to mesh generation, hand CAD requests to SubmissionService, and replay/stream durable progress per connected client.",
+        "ownedBy": "NestJS CAD Agent",
+        "runsIn": "services/cad_agent/src/cad-edits.gateway.ts",
         "guarantees": [
-          "A repeated client_request_id with the same fingerprint returns the existing job.",
-          "Disconnecting a WebSocket never cancels or pauses orchestration.",
-          "Live events contain user-visible summaries, never private model reasoning."
+          "A WebSocket connection is never the workflow's source of truth; disconnecting never cancels a job.",
+          "Replay uses a per-subscription high watermark, so reconnecting with after_sequence never re-delivers or skips events.",
+          "Events sent to a client are milestones only — never prompts, source bodies, or private model reasoning."
         ],
         "evidence": [
-          { "path": "services/cad_agent/src/submission.service.ts", "symbol": "SubmissionService", "kind": "source" },
           { "path": "services/cad_agent/src/cad-edits.gateway.ts", "symbol": "CadEditsGateway", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "cad-edits-controller",
+      "label": "CAD Edits Controller",
+      "description": "GET /v1/cad-edits/:jobId serves the same durable job and event history over plain HTTP.",
+      "type": "api",
+      "icon": "api",
+      "position": { "column": 1, "row": 2 },
+      "mobileOrder": 3,
+      "details": {
+        "responsibility": "Read-only durable status and bounded event replay for clients that are not holding a live WebSocket.",
+        "ownedBy": "NestJS CAD Agent",
+        "runsIn": "services/cad_agent/src/cad-edits.controller.ts",
+        "guarantees": ["after_sequence must be a non-negative safe integer or the request is rejected before any lookup."],
+        "evidence": [
+          { "path": "services/cad_agent/src/cad-edits.controller.ts", "symbol": "CadEditsController.status", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "submission-service",
+      "label": "Submission Service",
+      "description": "Turns a validated CAD request into one idempotent durable edit_jobs row.",
+      "type": "function",
+      "variant": "operation",
+      "icon": "process",
+      "position": { "column": 2, "row": 0 },
+      "mobileOrder": 4,
+      "details": {
+        "responsibility": "Resolve and validate project/part linkage, then create or return the existing job for a repeated client_request_id.",
+        "ownedBy": "NestJS CAD Agent",
+        "runsIn": "services/cad_agent/src/submission.service.ts",
+        "guarantees": ["Reusing client_request_id with different request content is rejected rather than silently accepted."],
+        "evidence": [
+          { "path": "services/cad_agent/src/submission.service.ts", "symbol": "SubmissionService.submit", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "mesh-generation-service",
+      "label": "Mesh Generation Service",
+      "description": "Handles linked mesh-type parts entirely inside Nest; it never enters the CAD edit_jobs workflow.",
+      "type": "function",
+      "variant": "operation",
+      "icon": "process",
+      "position": { "column": 2, "row": 2 },
+      "mobileOrder": 5,
+      "details": {
+        "responsibility": "Generate an updated mesh part and queue its export when the submitted part_id resolves to part_type = mesh.",
+        "ownedBy": "NestJS CAD Agent",
+        "runsIn": "services/cad_agent/src/mesh-generation.service.ts",
+        "guarantees": ["A mesh part never reaches SubmissionService, Agent 3D, or edit_jobs — the gateway branches before either is called."],
+        "evidence": [
+          { "path": "services/cad_agent/src/cad-edits.gateway.ts", "symbol": "CadEditsGateway.submit", "kind": "source" },
+          { "path": "services/cad_agent/src/mesh-generation.service.ts", "symbol": "MeshGenerationService.generate", "kind": "source" }
+        ]
+      }
+    },
+    {
+      "id": "progress-service",
+      "label": "Progress Service",
+      "description": "Polls edit_job_events on an interval and fans new sequences out to whichever connected clients are subscribed.",
+      "type": "function",
+      "variant": "transform",
+      "icon": "process",
+      "position": { "column": 2, "row": 1 },
+      "mobileOrder": 6,
+      "details": {
+        "responsibility": "Turn durable database rows into live push events without a in-memory job queue or per-request polling by clients.",
+        "ownedBy": "NestJS CAD Agent",
+        "runsIn": "services/cad_agent/src/progress.service.ts",
+        "operations": {
+          "controls": ["CAD_AGENT_EVENT_POLL_INTERVAL_MS"]
+        },
+        "guarantees": [
+          "One RPC batch covers up to 100 subscribed jobs with an independent cursor per job, so one noisy job cannot starve another's delivery."
+        ],
+        "evidence": [
+          { "path": "services/cad_agent/src/progress.service.ts", "symbol": "ProgressService", "kind": "source" }
         ]
       }
     },
     {
       "id": "edit-jobs",
       "label": "Edit Jobs",
-      "description": "Postgres edit_jobs rows own request identity, workflow mode, lease, hashes, attempts, child-job IDs, and terminal outcome.",
-      "type": "database",
-      "icon": "database",
-      "foundation": true,
-      "position": { "column": 2, "row": 0 },
-      "mobileOrder": 3,
-      "details": {
-        "responsibility": "Remain the durable source of truth for asynchronous CAD editing.",
-        "ownedBy": "Postgres edit_jobs",
-        "durableWrites": [
-          "client_request_id and request_fingerprint",
-          "state, status, worker lease, and attempt_count",
-          "candidate, validation, index, and export child-job IDs",
-          "bounded result, error_code, and error_message"
-        ],
-        "evidence": [
-          { "path": "supabase/migrations/20260727000000_add_cad_agent_progress_and_tools.sql", "symbol": "edit_jobs / submit_cad_edit_job", "kind": "migration" }
-        ]
-      }
-    },
-    {
-      "id": "orchestrator",
-      "label": "Nest CAD Orchestrator",
-      "description": "A leased background worker advances each workflow independently of its submitting WebSocket connection.",
-      "type": "worker",
-      "variant": "polling",
-      "icon": "worker",
-      "position": { "column": 3, "row": 0 },
-      "mobileOrder": 4,
-      "details": {
-        "responsibility": "Coordinate index readiness, context preparation, planning, candidate execution, validation, repair, guarded commit, reindex, and export handoff.",
-        "ownedBy": "Manifest CAD Agent",
-        "runsIn": "services/cad_agent/src/orchestrator.service.ts",
-        "operations": {
-          "concurrency": "One claimed edit job is processed at a time by each service process.",
-          "retry": "Initialization and established edits use distinct repair contexts within one shared three-attempt budget.",
-          "controls": ["CAD_AGENT_WORKER_ID", "CAD_AGENT_LEASE_SECONDS", "CAD_AGENT_POLL_INTERVAL_MS"]
-        },
-        "evidence": [
-          { "path": "services/cad_agent/src/orchestrator.service.ts", "symbol": "OrchestratorService", "kind": "source" }
-        ]
-      }
-    },
-    {
-      "id": "progress-events",
-      "label": "Edit Progress Events",
-      "description": "Postgres edit_job_events stores ordered public milestones for status reads and WebSocket reconnect replay.",
-      "type": "database",
-      "icon": "database",
-      "foundation": true,
-      "position": { "column": 2, "row": 1 },
-      "mobileOrder": 5,
-      "details": {
-        "responsibility": "Persist a per-job sequence, event type, concise message, and allowlisted metadata.",
-        "ownedBy": "Postgres edit_job_events",
-        "durableWrites": ["queued, planning, tool execution, validation, repair, commit, reindex, completed, and failed milestones"],
-        "evidence": [
-          { "path": "supabase/migrations/20260727000000_add_cad_agent_progress_and_tools.sql", "symbol": "edit_job_events / append_edit_job_event", "kind": "migration" },
-          { "path": "services/cad_agent/src/progress.service.ts", "symbol": "ProgressService", "kind": "source" }
-        ]
-      }
-    },
-    {
-      "id": "index-jobs",
-      "label": "Index Jobs",
-      "description": "Postgres index_jobs provides the pre-plan freshness barrier and mandatory post-commit reindex handoff.",
+      "description": "Postgres edit_jobs and edit_job_events are the entire durable handoff between Nest and the Python worker — no nested tool queue exists anymore.",
       "type": "database",
       "icon": "database",
       "foundation": true,
       "position": { "column": 3, "row": 1 },
-      "mobileOrder": 6,
-      "details": {
-        "responsibility": "Own durable build_index work claimed by the independent Indexer Worker.",
-        "evidence": [
-          { "path": "supabase/migrations/20260725000000_add_cad_edit_workflow.sql", "symbol": "queue_edit_index_build", "kind": "migration" }
-        ]
-      }
-    },
-    {
-      "id": "openai",
-      "label": "OpenAI Responses API",
-      "description": "Returns one strict workflow-specific ToolPlan from bounded blank, accepted-source, or candidate-repair context.",
-      "type": "external",
-      "icon": "external",
-      "foundation": true,
-      "position": { "column": 4, "row": 1 },
       "mobileOrder": 7,
       "details": {
-        "responsibility": "Generate one complete initial-model operation or a bounded established-edit plan; it cannot select workflow mode, write storage, execute CAD, validate, commit, or complete a job.",
-        "ownedBy": "OpenAI",
-        "evidence": [
-          { "path": "services/cad_agent/src/reasoner.service.ts", "symbol": "ReasonerService", "kind": "source" },
-          { "path": "services/cad_agent/src/contracts.ts", "symbol": "ToolPlanSchema", "kind": "schema" }
-        ]
-      }
-    },
-    {
-      "id": "tool-jobs",
-      "label": "CAD Tool Jobs",
-      "description": "Postgres cad_tool_jobs is the durable handoff from Nest orchestration to bounded Python AST execution.",
-      "type": "database",
-      "icon": "database",
-      "foundation": true,
-      "position": { "column": 4, "row": 0 },
-      "mobileOrder": 8,
-      "details": {
-        "responsibility": "Own prepare_context, apply_plan, and prepare_repair_context requests, leases, and bounded results.",
-        "ownedBy": "Postgres cad_tool_jobs",
-        "guarantees": ["No OpenAI prompt or unrestricted code-execution request is accepted by this queue."],
-        "evidence": [
-          { "path": "supabase/migrations/20260727000000_add_cad_agent_progress_and_tools.sql", "symbol": "cad_tool_jobs / queue_cad_tool_job / claim_next_cad_tool_job", "kind": "migration" }
-        ]
-      }
-    },
-    {
-      "id": "tool-worker",
-      "label": "Python CAD Tool Worker",
-      "description": "A separate Python process validates scope and fingerprints, applies all operations in memory, and uploads only one complete candidate.",
-      "type": "worker",
-      "variant": "sandbox",
-      "icon": "worker",
-      "href": "/services/cad-editor/",
-      "position": { "column": 5, "row": 0 },
-      "mobileOrder": 9,
-      "details": {
-        "responsibility": "Resolve bounded context and perform transactional Python AST/source transformations without reasoning or canonical commit authority.",
-        "ownedBy": "Manifest CAD Tool Worker",
-        "runsIn": "workers/cad_editor/tool_worker.py",
-        "guarantees": [
-          "Unknown plan versions, tools, arguments, paths, hashes, symbols, and fingerprints are rejected before candidate upload.",
-          "System-owned runtime imports and required model-contract elements cannot be removed.",
-          "Delete operations are limited to PART markers or explicit CAD-AGENT provenance markers."
+        "responsibility": "Own request identity, worker lease, private history checkpoints, ordered public events, and terminal outcome for one CAD edit.",
+        "ownedBy": "Postgres edit_jobs / edit_job_events",
+        "durableWrites": [
+          "client_request_id, request_fingerprint, and requested_part_id",
+          "status, state, worker lease, and attempt_count",
+          "history checkpoints: goal, high-level plan, and step transitions",
+          "terminal result, error_code, and error_message"
         ],
         "evidence": [
-          { "path": "workers/cad_editor/cad_editor/tool_executor.py", "symbol": "CadToolExecutor", "kind": "source" },
-          { "path": "workers/cad_editor/cad_editor/tool_contracts.py", "symbol": "ToolPlan", "kind": "schema" }
+          { "path": "supabase/migrations/20260727000000_add_cad_agent_progress_and_tools.sql", "symbol": "edit_jobs / edit_job_events / submit_cad_edit_job", "kind": "migration" }
         ]
       }
     },
     {
-      "id": "candidate-storage",
-      "label": "Candidate Storage",
-      "description": "3dProjects candidate prefixes hold original backups and attempt-specific model.py candidates outside canonical source.",
-      "type": "storage",
-      "icon": "object-storage",
-      "contents": ["original/model.py", "attempt-n/model.py"],
-      "foundation": true,
-      "position": { "column": 5, "row": 1 },
-      "mobileOrder": 10,
+      "id": "agent-3d-worker",
+      "label": "Agent 3D (Python)",
+      "description": "A separate horizontally-scaled Python service claims the job and owns everything from goal creation through canonical commit.",
+      "type": "worker",
+      "variant": "polling",
+      "icon": "worker",
+      "href": "/services/cad-editor/",
+      "position": { "column": 4, "row": 1 },
+      "mobileOrder": 8,
       "details": {
-        "responsibility": "Keep unaccepted source isolated and hash-addressable for validation, repair, and rollback.",
-        "ownedBy": "3dProjects object storage",
+        "responsibility": "Create the goal and plan, run the Agent3D reasoning loop against an edit-scoped candidate, then validate, commit, reindex, and queue export.",
+        "ownedBy": "Manifest Agent 3D",
+        "runsIn": "workers/agent_3d/edit_worker.py",
+        "guarantees": [
+          "Nest never calls OpenAI, never sees CAD source, and never decides commit — this worker does.",
+          "A linked part_id is reserved before any model call, so replicas add parallelism across parts, not concurrent mutation of one part."
+        ],
         "evidence": [
-          { "path": "workers/cad_editor/cad_editor/tool_executor.py", "symbol": "CadToolExecutor.apply_plan", "kind": "source" }
-        ]
-      }
-    },
-    {
-      "id": "validation-jobs",
-      "label": "Validation Jobs",
-      "description": "Postgres generation_jobs rows hand exact candidate paths and hashes to the independent CAD Validator.",
-      "type": "database",
-      "icon": "database",
-      "foundation": true,
-      "position": { "column": 5, "row": 2 },
-      "mobileOrder": 11,
-      "details": {
-        "responsibility": "Durably own validate_cad work and its exact passed or failed proof.",
-        "evidence": [
-          { "path": "supabase/migrations/20260725000000_add_cad_edit_workflow.sql", "symbol": "queue_edit_candidate_validation", "kind": "migration" }
-        ]
-      }
-    },
-    {
-      "id": "canonical-storage",
-      "label": "Canonical CAD Source",
-      "description": "The accepted model.py is replaced only after exact validation proof and an unchanged base-source hash.",
-      "type": "storage",
-      "icon": "object-storage",
-      "contents": ["model.py", "params.json"],
-      "foundation": true,
-      "position": { "column": 4, "row": 2 },
-      "mobileOrder": 12,
-      "details": {
-        "responsibility": "Own accepted CAD source; preserve the previous source before proof-gated commit.",
-        "ownedBy": "3dProjects object storage",
-        "evidence": [
-          { "path": "services/cad_agent/src/orchestrator.service.ts", "symbol": "OrchestratorService.commit", "kind": "source" }
-        ]
-      }
-    },
-    {
-      "id": "export-jobs",
-      "label": "Export Jobs",
-      "description": "Postgres generation_jobs rows hand the committed source hash to the independent CAD Exporter after reindexing.",
-      "type": "database",
-      "icon": "database",
-      "foundation": true,
-      "position": { "column": 3, "row": 2 },
-      "mobileOrder": 13,
-      "details": {
-        "responsibility": "Own best-effort export_cad work; an enqueue failure becomes a completion warning rather than a rollback.",
-        "evidence": [
-          { "path": "supabase/migrations/20260725000000_add_cad_edit_workflow.sql", "symbol": "queue_edit_export", "kind": "migration" }
+          { "path": "workers/agent_3d/edit_worker.py", "symbol": "build_runtime / main", "kind": "source" },
+          { "path": "workers/agent_3d/orchestrator.py", "symbol": "EditWorkflowOrchestrator", "kind": "source" }
         ]
       }
     }
@@ -260,196 +177,153 @@
     {
       "id": "submit-request",
       "source": "clients",
-      "target": "cad-agent-api",
-      "label": "submit CAD edit",
-      "protocol": "event",
-      "flow": "synchronous",
-      "direction": "two-way",
-      "request": { "label": "agent request", "type": "WebSocket cad.edit.submit", "exampleBody": "{\"event\":\"cad.edit.submit\",\"data\":{\"client_request_id\":\"request-uuid\",\"project_id\":\"project-uuid\",\"part_id\":\"part-uuid\",\"request_text\":\"Add two mounting holes\"}}" },
-      "response": { "label": "agent acknowledgement", "type": "WebSocket event", "exampleBody": "{\"event\":\"cad.plan.logged\",\"data\":{\"status\":\"plan_logged\"}}" }
-    },
-    {
-      "id": "follow-progress",
-      "source": "clients",
-      "target": "cad-agent-api",
-      "label": "subscribe and replay progress",
-      "protocol": "event",
-      "flow": "asynchronous",
-      "direction": "two-way",
-      "request": { "label": "job subscription", "type": "WebSocket subscribe", "exampleBody": "{\"event\":\"subscribe\",\"job_id\":\"edit-job-uuid\",\"after_sequence\":4}" },
-      "response": { "label": "snapshot and ordered events", "type": "WebSocket snapshot/progress", "exampleBody": "{\"event\":\"progress\",\"job_id\":\"edit-job-uuid\",\"sequence\":5,\"type\":\"validating\",\"message\":\"Validating candidate attempt 1.\"}" },
-      "details": {
-        "durability": "Events are replayed from Postgres; the socket is not the workflow queue.",
-        "failureBehavior": "Disconnecting loses only the live channel. Reconnect with the last acknowledged sequence.",
-        "evidence": [
-          { "path": "services/cad_agent/src/cad-edits.gateway.ts", "symbol": "handleSubscribe", "kind": "source" }
-        ]
-      }
-    },
-    {
-      "id": "api-edit-job",
-      "source": "cad-agent-api",
-      "target": "edit-jobs",
-      "label": "create or reuse edit job",
-      "protocol": "database",
-      "flow": "synchronous",
-      "direction": "two-way",
-      "request": { "label": "validated submission", "type": "submit_cad_edit_job RPC", "exampleBody": "{\"p_client_request_id\":\"request-uuid\",\"p_request_fingerprint\":\"sha256\",\"p_project_id\":\"project-uuid\",\"p_requested_part_id\":\"part-uuid\"}" },
-      "response": { "label": "created or existing job", "type": "edit_jobs row", "exampleBody": "{\"id\":\"edit-job-uuid\",\"status\":\"queued\",\"state\":\"queued\"}" }
-    },
-    {
-      "id": "api-event-replay",
-      "source": "cad-agent-api",
-      "target": "progress-events",
-      "label": "read missed progress",
-      "protocol": "database",
-      "flow": "synchronous",
-      "direction": "two-way",
-      "request": { "label": "events after acknowledgement", "type": "edit_job_events query", "exampleBody": "{\"edit_job_id\":\"edit-job-uuid\",\"sequence_gt\":4}" },
-      "response": { "label": "ordered public events", "type": "edit_job_events rows", "exampleBody": "[{\"sequence\":5,\"event_type\":\"validating\",\"message\":\"Validating candidate attempt 1.\"}]" }
-    },
-    {
-      "id": "claim-edit-job",
-      "source": "orchestrator",
-      "target": "edit-jobs",
-      "label": "claim, heartbeat, and advance workflow",
-      "protocol": "database",
-      "flow": "synchronous",
-      "direction": "two-way",
-      "request": { "label": "lease or state mutation", "type": "claim/heartbeat/update operation", "exampleBody": "{\"worker_id\":\"cad-agent-1\",\"lease_seconds\":300}" },
-      "response": { "label": "owned job or acknowledgement", "type": "edit_jobs row / boolean", "exampleBody": "{\"id\":\"edit-job-uuid\",\"status\":\"running\",\"state\":\"planning\"}" }
-    },
-    {
-      "id": "persist-progress",
-      "source": "orchestrator",
-      "target": "progress-events",
-      "label": "append public milestone",
-      "protocol": "database",
-      "flow": "synchronous",
-      "direction": "one-way",
-      "request": { "label": "allowlisted progress event", "type": "append_edit_job_event RPC", "exampleBody": "{\"event_type\":\"planning\",\"message\":\"Planning approved CAD operations.\",\"metadata\":{\"attempt\":1}}" }
-    },
-    {
-      "id": "ensure-index",
-      "source": "orchestrator",
-      "target": "index-jobs",
-      "label": "ensure fresh index",
-      "protocol": "database",
-      "flow": "synchronous",
-      "direction": "two-way",
-      "request": { "label": "queue or inspect index build", "type": "queue_edit_index_build RPC + status read", "exampleBody": "{\"p_edit_job_id\":\"edit-job-uuid\",\"p_state\":\"ensuring_index\"}" },
-      "response": { "label": "fresh index result", "type": "index_jobs row", "exampleBody": "{\"id\":\"index-job-uuid\",\"status\":\"completed\"}" }
-    },
-    {
-      "id": "queue-context-tool",
-      "source": "orchestrator",
-      "target": "tool-jobs",
-      "label": "prepare bounded context",
-      "protocol": "database",
-      "flow": "asynchronous",
-      "direction": "two-way",
-      "request": { "label": "context tool request", "type": "prepare_context cad_tool_job", "exampleBody": "{\"edit_job_id\":\"edit-job-uuid\",\"kind\":\"prepare_context\",\"payload\":{\"request_text\":\"Add two mounting holes\"}}" },
-      "response": { "label": "bounded context and target inventory", "type": "completed cad_tool_jobs result", "exampleBody": "{\"mode\":\"edit\",\"base_source_sha256\":\"sha256\",\"allowed_targets\":[\"feature:mount\"]}" }
-    },
-    {
-      "id": "reason-plan",
-      "source": "orchestrator",
-      "target": "openai",
-      "label": "request strict tool plan",
+      "target": "cad-edits-gateway",
+      "label": "cad.edit.submit / subscribe / unsubscribe / ack",
       "protocol": "http",
       "flow": "synchronous",
       "direction": "two-way",
-      "request": { "label": "bounded accepted or repair context", "type": "Responses API structured-output request", "exampleBody": "{\"request_text\":\"Add two mounting holes\",\"mode\":\"edit\",\"allowed_targets\":[\"feature:mount\"]}" },
-      "response": { "label": "versioned registered ToolPlan", "type": "tool_plan_v1", "exampleBody": "{\"schema_version\":1,\"summary\":\"Add mounting holes\",\"operations\":[{\"tool\":\"replace_function_body\",\"arguments\":{\"semantic_id\":\"feature:mount\",\"body\":\"...\"}}]}" },
-      "details": {
-        "trustBoundary": "Only bounded source context and validator diagnostics cross to the external API.",
-        "failureBehavior": "Refusal, malformed output, unknown tools, or invalid arguments fail before candidate mutation.",
-        "evidence": [
-          { "path": "services/cad_agent/src/reasoner.service.ts", "symbol": "plan", "kind": "source" }
-        ]
+      "request": {
+        "label": "CAD or linked-mesh request",
+        "type": "cad.edit.submit WebSocket message",
+        "exampleBody": "{\"project_id\":\"project-uuid\",\"part_id\":\"part-uuid\",\"request_text\":\"Make the mounting holes 6 mm\",\"client_request_id\":\"idempotency-uuid\"}"
+      },
+      "response": {
+        "label": "accepted job or mesh queued",
+        "type": "cad.edit.accepted / cad.mesh.accepted / cad.edit.error",
+        "exampleBody": "{\"job_id\":\"edit-job-uuid\",\"status\":\"queued\",\"deduplicated\":false}"
       }
     },
     {
-      "id": "queue-apply-tool",
-      "source": "orchestrator",
-      "target": "tool-jobs",
-      "label": "apply plan transactionally",
-      "protocol": "database",
-      "flow": "asynchronous",
+      "id": "poll-status",
+      "source": "clients",
+      "target": "cad-edits-controller",
+      "label": "poll durable status",
+      "protocol": "http",
+      "flow": "synchronous",
       "direction": "two-way",
-      "request": { "label": "versioned plan and expected fingerprints", "type": "apply_plan cad_tool_job", "exampleBody": "{\"kind\":\"apply_plan\",\"payload\":{\"attempt\":1,\"base_source_sha256\":\"sha256\",\"plan\":{\"schema_version\":1,\"operations\":[]}}}" },
-      "response": { "label": "one isolated candidate", "type": "completed cad_tool_jobs result", "exampleBody": "{\"candidate_path\":\"project/candidates/cad/part/job/attempt-1/model.py\",\"candidate_sha256\":\"sha256\"}" }
+      "request": {
+        "label": "status + replay request",
+        "type": "GET /v1/cad-edits/:jobId",
+        "exampleBody": "GET /v1/cad-edits/edit-job-uuid?after_sequence=4"
+      },
+      "response": {
+        "label": "job snapshot and events since after_sequence",
+        "type": "{ job, events }",
+        "exampleBody": "{\"job\":{\"id\":\"edit-job-uuid\",\"status\":\"running\"},\"events\":[{\"sequence\":5,\"event_type\":\"plan.created\"}]}"
+      }
     },
     {
-      "id": "execute-tool-job",
-      "source": "tool-worker",
-      "target": "tool-jobs",
-      "label": "claim and complete bounded tool",
+      "id": "route-cad",
+      "source": "cad-edits-gateway",
+      "target": "submission-service",
+      "label": "submit(parsed CAD request)",
+      "protocol": "internal",
+      "flow": "synchronous",
+      "direction": "one-way",
+      "details": {
+        "evidence": [{ "path": "services/cad_agent/src/cad-edits.gateway.ts", "symbol": "CadEditsGateway.submit", "kind": "source" }]
+      }
+    },
+    {
+      "id": "route-mesh",
+      "source": "cad-edits-gateway",
+      "target": "mesh-generation-service",
+      "label": "linked part_type = mesh",
+      "protocol": "internal",
+      "flow": "synchronous",
+      "direction": "one-way",
+      "details": {
+        "summary": "Checked before SubmissionService is ever called; a mesh part never becomes an edit_jobs row.",
+        "evidence": [{ "path": "services/cad_agent/src/cad-edits.gateway.ts", "symbol": "CadEditsGateway.submit", "kind": "source" }]
+      }
+    },
+    {
+      "id": "create-job",
+      "source": "submission-service",
+      "target": "edit-jobs",
+      "label": "submit_cad_edit_job (idempotent)",
       "protocol": "database",
       "flow": "synchronous",
       "direction": "two-way",
-      "request": { "label": "claim, heartbeat, or result", "type": "cad_tool_jobs RPC", "exampleBody": "{\"worker_id\":\"cad-tool-1\",\"lease_seconds\":300}" },
-      "response": { "label": "typed tool job or acknowledgement", "type": "cad_tool_jobs row / boolean", "exampleBody": "{\"id\":\"tool-job-uuid\",\"kind\":\"apply_plan\",\"status\":\"running\"}" }
+      "request": {
+        "label": "create-or-return RPC",
+        "type": "submit_cad_edit_job",
+        "exampleBody": "{\"p_client_request_id\":\"idempotency-uuid\",\"p_request_fingerprint\":\"sha256\"}"
+      },
+      "response": {
+        "label": "durable job row",
+        "type": "edit_jobs row",
+        "exampleBody": "{\"id\":\"edit-job-uuid\",\"status\":\"queued\",\"deduplicated\":false}"
+      }
     },
     {
-      "id": "write-candidate",
-      "source": "tool-worker",
-      "target": "candidate-storage",
-      "label": "write complete candidate",
-      "protocol": "storage",
+      "id": "read-job",
+      "source": "cad-edits-controller",
+      "target": "edit-jobs",
+      "label": "read job + events",
+      "protocol": "database",
       "flow": "synchronous",
       "direction": "two-way",
-      "request": { "label": "single verified model.py upload", "type": "Supabase Storage upsert", "exampleBody": "{\"path\":\"project/candidates/cad/part/job/attempt-1/model.py\",\"sha256\":\"sha256\"}" },
-      "response": { "label": "stored candidate acknowledgement", "type": "storage response", "exampleBody": "{\"success\":true}" }
+      "request": { "label": "durable read", "type": "editJob(jobId) / events(jobId, afterSequence)", "exampleBody": "{\"jobId\":\"edit-job-uuid\",\"afterSequence\":4}" },
+      "response": { "label": "job row and event slice", "type": "{ job, events }", "exampleBody": "{\"job\":{\"status\":\"running\"},\"events\":[]}" }
     },
     {
-      "id": "validate-candidate",
-      "source": "orchestrator",
-      "target": "validation-jobs",
-      "label": "validate exact candidate",
+      "id": "claim-job",
+      "source": "edit-jobs",
+      "target": "agent-3d-worker",
+      "label": "claim_next_edit_job (leased FOR UPDATE SKIP LOCKED)",
       "protocol": "database",
       "flow": "asynchronous",
       "direction": "two-way",
-      "request": { "label": "queue hash-bound validation", "type": "queue_edit_candidate_validation RPC", "exampleBody": "{\"candidate_path\":\".../attempt-1/model.py\",\"candidate_sha256\":\"sha256\"}" },
-      "response": { "label": "exact validation proof", "type": "generation_jobs result", "exampleBody": "{\"status\":\"completed\",\"result\":{\"valid\":true,\"source_sha256\":\"sha256\"}}" }
+      "request": { "label": "lease claim", "type": "claim_next_edit_job", "exampleBody": "{\"p_worker_id\":\"agent-3d-uuid\",\"p_lease_seconds\":300}" },
+      "response": { "label": "leased row, or none", "type": "edit_jobs row", "exampleBody": "{\"id\":\"edit-job-uuid\",\"status\":\"running\"}" },
+      "details": {
+        "summary": "The same worker heartbeats the lease and writes every state update, history checkpoint, and public event for this job as it runs — there is no separate handoff row.",
+        "evidence": [{ "path": "workers/agent_3d/repository.py", "symbol": "claim_next_edit_job", "kind": "source" }]
+      }
     },
     {
-      "id": "commit-source",
-      "source": "orchestrator",
-      "target": "canonical-storage",
-      "label": "guarded canonical commit",
-      "protocol": "storage",
-      "flow": "synchronous",
-      "direction": "two-way",
-      "request": { "label": "hash-checked candidate replacement", "type": "storage download and upsert", "exampleBody": "{\"expected_base_sha256\":\"sha256\",\"validated_candidate_sha256\":\"sha256\"}" },
-      "response": { "label": "verified accepted source", "type": "storage bytes and hash", "exampleBody": "{\"canonical_sha256\":\"sha256\"}" }
-    },
-    {
-      "id": "queue-export",
-      "source": "orchestrator",
-      "target": "export-jobs",
-      "label": "queue committed-source export",
+      "id": "poll-events",
+      "source": "edit-jobs",
+      "target": "progress-service",
+      "label": "poll edit_job_events since last delivered sequence",
       "protocol": "database",
       "flow": "asynchronous",
-      "direction": "two-way",
-      "request": { "label": "hash-bound export handoff", "type": "queue_edit_export RPC", "exampleBody": "{\"p_edit_job_id\":\"edit-job-uuid\",\"p_source_sha256\":\"sha256\"}" },
-      "response": { "label": "export job reference or warning", "type": "generation_jobs row", "exampleBody": "{\"id\":\"export-job-uuid\",\"status\":\"queued\",\"type\":\"export_cad\"}" }
+      "direction": "one-way",
+      "details": {
+        "evidence": [{ "path": "services/cad_agent/src/progress.service.ts", "symbol": "ProgressService", "kind": "source" }]
+      }
+    },
+    {
+      "id": "publish-progress",
+      "source": "progress-service",
+      "target": "cad-edits-gateway",
+      "label": "publish new sequences to matching subscriptions",
+      "protocol": "internal",
+      "flow": "asynchronous",
+      "direction": "one-way"
+    },
+    {
+      "id": "deliver-progress",
+      "source": "cad-edits-gateway",
+      "target": "clients",
+      "label": "cad.edit.snapshot (replay) / cad.edit.progress (live)",
+      "protocol": "event",
+      "flow": "asynchronous",
+      "direction": "one-way",
+      "details": {
+        "summary": "Terminal events (job.completed / job.failed) end the subscription and stop polling for that job.",
+        "evidence": [{ "path": "services/cad_agent/src/cad-edits.gateway.ts", "symbol": "CadEditsGateway.afterInit", "kind": "source" }]
+      }
     }
   ],
   "boundaries": [
     {
-      "id": "nest-boundary",
-      "label": "NestJS CAD Agent",
+      "id": "nest-control-plane",
+      "label": "NestJS CAD Agent (thin control plane)",
       "kind": "service",
-      "description": "Owns submission, reasoning, orchestration, and live progress transport.",
-      "nodeIds": ["cad-agent-api", "orchestrator"]
-    },
-    {
-      "id": "python-boundary",
-      "label": "Python CAD Tool Executor",
-      "kind": "worker",
-      "description": "Owns bounded AST/source inspection and mutation only.",
-      "nodeIds": ["tool-worker"]
+      "description": "Owns request validation, idempotent job creation, linked-mesh generation, and durable-progress replay. It owns no CAD reasoning, no source mutation, and no commit authority.",
+      "nodeIds": ["cad-edits-gateway", "cad-edits-controller", "submission-service", "mesh-generation-service", "progress-service"]
     }
   ]
 }

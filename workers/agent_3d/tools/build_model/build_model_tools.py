@@ -89,6 +89,8 @@ class EditCadBuildModelTool(AgentTool[EditCadBuildModelInput, EditCadBuildModelO
     )
     input_model = EditCadBuildModelInput
     output_model = EditCadBuildModelOutput
+    batchable = False
+    parallel_safe = False
 
     async def normalize_input(self, tool_input: EditCadBuildModelInput) -> EditCadBuildModelInput:
         normalized_body = tool_input.function_body.replace("\r\n", "\n").replace("\r", "\n").expandtabs(4)

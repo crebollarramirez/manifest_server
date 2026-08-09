@@ -97,6 +97,8 @@ class ExampleTool(AgentTool[ExampleInput, ExampleOutput]):
     description = "Double one validated integer without changing server state."
     input_model = ExampleInput
     output_model = ExampleOutput
+    batchable = True
+    parallel_safe = True
 
     def __init__(self):
         self.trace: list[str] = []
@@ -233,6 +235,24 @@ class ToolFrameworkTests(unittest.IsolatedAsyncioTestCase):
             async def run(self, raw_arguments, tool_context):  # type: ignore[override]
                 return await super().run(raw_arguments, tool_context)
 
+        class BadBatchableTool(ExampleTool):
+            tool_id = "example_bad_batchable"
+            batchable = "yes"  # type: ignore[assignment]
+
+        class MissingBatchMetadataTool(AgentTool[ExampleInput, ExampleOutput]):
+            tool_id = "example_missing_batch_metadata"
+            version = 1
+            description = "Missing batchable/parallel_safe metadata."
+            input_model = ExampleInput
+            output_model = ExampleOutput
+
+            async def execute(
+                self,
+                tool_input: ExampleInput,
+                _context: ToolExecutionContext,
+            ) -> ExampleOutput:
+                return ExampleOutput(doubled=tool_input.value * 2)
+
         for malformed in (
             VagueTool(),
             BadVersionTool(),
@@ -241,6 +261,8 @@ class ToolFrameworkTests(unittest.IsolatedAsyncioTestCase):
             BadConfigTool(),
             MissingExecuteTool(),
             OverrideRunTool(),
+            BadBatchableTool(),
+            MissingBatchMetadataTool(),
         ):
             with self.subTest(tool=type(malformed).__name__):
                 with self.assertRaises(InvalidToolDefinitionError):
@@ -446,6 +468,34 @@ class ToolExecutorSyncBridgeTests(unittest.TestCase):
                 )
 
         asyncio.run(invoke())
+
+
+class NonBatchableExampleTool(ExampleTool):
+    tool_id = "example_non_batchable"
+    batchable = False
+    parallel_safe = False
+
+
+class ToolExecutorBatchMetadataTests(unittest.TestCase):
+    def test_is_batchable_reflects_a_batchable_tool(self):
+        registry = ToolRegistry()
+        registry.register(ExampleTool())
+        executor = ToolExecutor(registry)
+
+        self.assertTrue(executor.is_batchable("example_double"))
+
+    def test_is_batchable_reflects_a_non_batchable_tool(self):
+        registry = ToolRegistry()
+        registry.register(NonBatchableExampleTool())
+        executor = ToolExecutor(registry)
+
+        self.assertFalse(executor.is_batchable("example_non_batchable"))
+
+    def test_is_batchable_fails_closed_for_an_unknown_tool(self):
+        registry = ToolRegistry()
+        executor = ToolExecutor(registry)
+
+        self.assertFalse(executor.is_batchable("not_a_real_tool"))
 
 
 class PlanningTargetResolutionTests(unittest.TestCase):

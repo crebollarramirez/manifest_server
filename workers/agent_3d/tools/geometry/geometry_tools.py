@@ -190,6 +190,8 @@ class CheckGeometryTool(AgentTool[CheckGeometryInput, CheckGeometryOutput]):
     )
     input_model = CheckGeometryInput
     output_model = CheckGeometryOutput
+    batchable = False
+    parallel_safe = False
 
     def __init__(
         self,

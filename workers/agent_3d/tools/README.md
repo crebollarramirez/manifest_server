@@ -28,6 +28,62 @@ the geometry-check job it queues, see
    tools, errors, and runtime helpers without requiring callers to know the
    module structure.
 
+## Registered tools
+
+12 concrete tools are registered at startup (`edit_worker.py::build_runtime`). All 12 are
+available in `Agent3D`'s main mutation-loop catalog; the separate `PlanningAgent`
+(read-only high-level planning, before the loop starts) may call only the two
+`index` tools below. Every input/output model is a frozen, extra-forbidding
+`StrictToolModel` — unknown fields, missing required fields, and wrong types
+produce a structured `TOOL_INPUT_INVALID` failure rather than being coerced.
+
+### index (read-only)
+
+| Tool | Params | Summary |
+| --- | --- | --- |
+| `index_search` | `query: str` (1–1000, required) · `limit: int` (1–10, required) | Search semantic CAD features in the selected part by free-text query; ranks by exact/substring/token overlap. Use before `index_get_feature`. |
+| `index_get_feature` | `semantic_id: str` (required) | Retrieve one feature's exact role, parameters, dependencies, and dependents by exact semantic ID. |
+
+### feature
+
+| Tool | Params | Summary |
+| --- | --- | --- |
+| `create_feature` | `semantic_id, function_name, role, docstring, function_body: str` (required) · `parameters, dependencies, search_keys: list` (optional, default empty) | Create one new, isolated semantic CadQuery feature function in the candidate. Does not wire it into `build_model`. |
+| `edit_feature` | `semantic_id?, function_name?: str` (≥1 required to identify target) · `role?, parameters?, dependencies?, search_keys?, docstring?, function_body?` (optional replacements, ≥1 required) | Change one or more properties of an existing feature; only fields you pass are changed. Does not rename or touch `build_model`. |
+| `delete_feature` | `semantic_id?, function_name?: str` (≥1 required) | Delete an existing agent-created feature. Refuses if still referenced by another feature's `depends_on` or by `build_model`. |
+
+### parameter
+
+| Tool | Params | Summary |
+| --- | --- | --- |
+| `create_parameter` | `parameter_name: str` (required) · `value: float` (`> 0`, required) | Add one new agent-owned `ModelParams` field with a numeric default. |
+| `edit_parameter` | `parameter_name: str` (required) · `value: float` (`> 0`, required) | Change an existing `ModelParams` field's default value (any field, agent-created or hand-authored). Never renames. |
+| `delete_parameter` | `parameter_name: str` (required) | Delete an existing agent-created `ModelParams` field. Refuses if still referenced by any feature. |
+
+### build_model
+
+| Tool | Params | Summary |
+| --- | --- | --- |
+| `edit_cad_build_model` | `function_body: str` (1–8000 chars, required) | Replace the entire body of `build_model`, the final assembly-wiring step. Rejects wiring in a function that doesn't exist yet in the candidate (`undefined_function_call`). |
+
+### part
+
+| Tool | Params | Summary |
+| --- | --- | --- |
+| `create_cad_part` | `part_name: str` (required, must be unique in the project, case-insensitive) | Create one new CAD part with a minimal, valid, empty `model.py` skeleton. Does not create parameters or features. |
+
+### geometry
+
+| Tool | Params | Summary |
+| --- | --- | --- |
+| `check_geometry` | none — identity comes from `ToolExecutionContext` | Inspect the candidate's actual executed geometry (volume, bounding box, center of mass, solid/face/edge counts) against the immediately preceding candidate. Deterministic evidence only — never modifies source, never gates anything. See [`workers/cad_validator/GEOMETRY_CHECK.md`](../../cad_validator/GEOMETRY_CHECK.md). |
+
+### step
+
+| Tool | Params | Summary |
+| --- | --- | --- |
+| `request_step_completion` | `summary: str` (1–2000, required) | Signal that the active plan step is complete. The orchestrator gates this against the plan's completion criteria — it is not honored blindly; see `AGENT_REASONING.md`. |
+
 ## How the pieces fit
 
 Concrete tools inherit the shared contract in `base.py`. A `ToolRegistry` accepts

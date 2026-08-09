@@ -132,6 +132,8 @@ class CreateParameterTool(AgentTool[CreateParameterInput, CreateParameterOutput]
     )
     input_model = CreateParameterInput
     output_model = CreateParameterOutput
+    batchable = False
+    parallel_safe = False
 
     async def normalize_input(self, tool_input: CreateParameterInput) -> CreateParameterInput:
         return tool_input.model_copy(update={"parameter_name": tool_input.parameter_name.strip()})
@@ -228,6 +230,8 @@ class EditParameterTool(AgentTool[EditParameterInput, EditParameterOutput]):
     )
     input_model = EditParameterInput
     output_model = EditParameterOutput
+    batchable = False
+    parallel_safe = False
 
     async def normalize_input(self, tool_input: EditParameterInput) -> EditParameterInput:
         return tool_input.model_copy(update={"parameter_name": tool_input.parameter_name.strip()})
@@ -323,6 +327,8 @@ class DeleteParameterTool(AgentTool[DeleteParameterInput, DeleteParameterOutput]
     )
     input_model = DeleteParameterInput
     output_model = DeleteParameterOutput
+    batchable = False
+    parallel_safe = False
 
     async def normalize_input(self, tool_input: DeleteParameterInput) -> DeleteParameterInput:
         return tool_input.model_copy(update={"parameter_name": tool_input.parameter_name.strip()})

@@ -72,7 +72,7 @@
     {
       "id": "cad-agent-service",
       "label": "NestJS CAD Agent",
-      "description": "The CAD-edit submission, orchestration, OpenAI reasoning, durable-status, and WebSocket progress service.",
+      "description": "The CAD-edit submission, linked-mesh generation, durable-status, and WebSocket progress service. It performs no CAD reasoning itself — the separate Agent 3D Python worker does.",
       "type": "service",
       "icon": "service",
       "href": "/services/cad-agent/",
@@ -90,11 +90,11 @@
         ],
         "guarantees": [
           "The WebSocket is a delivery channel, not a durable queue.",
-          "OpenAI returns only a strict tool plan and has no mutation or commit authority."
+          "Nest never calls OpenAI for CAD requests, never reads CAD source, and never decides commit — Agent 3D (Python) owns that."
         ],
         "evidence": [
           { "path": "services/cad_agent/src/submission.service.ts", "symbol": "SubmissionService", "kind": "source" },
-          { "path": "services/cad_agent/src/orchestrator.service.ts", "symbol": "OrchestratorService", "kind": "source" },
+          { "path": "services/cad_agent/src/mesh-generation.service.ts", "symbol": "MeshGenerationService", "kind": "source" },
           { "path": "services/cad_agent/src/cad-edits.gateway.ts", "symbol": "CadEditsGateway", "kind": "source" }
         ]
       }
@@ -122,15 +122,15 @@
     {
       "id": "job-tables",
       "label": "Workflow Data Tables",
-      "description": "Postgres durable jobs, bounded CAD tool handoffs, and ordered CAD-edit progress used across asynchronous backend workflows.",
+      "description": "Postgres durable jobs and ordered CAD-edit progress used across asynchronous backend workflows.",
       "type": "database",
       "icon": "database",
       "foundation": true,
       "position": { "column": 2, "row": 1 },
       "mobileOrder": 4,
       "details": {
-        "responsibility": "Durably own queued work, edit/tool leases, results, and reconnectable public progress without relying on a client connection.",
-        "ownedBy": "Postgres index_jobs, generation_jobs, edit_jobs, cad_tool_jobs, and edit_job_events",
+        "responsibility": "Durably own queued work, edit leases, results, and reconnectable public progress without relying on a client connection.",
+        "ownedBy": "Postgres index_jobs, generation_jobs, edit_jobs, and edit_job_events",
         "inputs": [
           { "name": "index work", "description": "build_index or test_getter row." },
           { "name": "generation work", "description": "validate_cad, export_cad, or export_mesh row." },
@@ -140,15 +140,15 @@
           { "name": "job reference", "description": "Durable UUID and initial status." },
           { "name": "status record", "description": "Selected index or edit job fields safe for the API response." }
         ],
-        "durableWrites": ["automatic build_index row during CAD part creation", "idempotent CAD edit submission", "bounded Python tool handoff", "ordered public progress", "explicitly queued worker rows", "queued-job cancellation during deletion preparation"],
-        "downstream": ["Independent workers claim these rows outside the Nest request lifecycle."],
+        "durableWrites": ["automatic build_index row during CAD part creation", "idempotent CAD edit submission", "ordered public progress", "explicitly queued worker rows", "queued-job cancellation during deletion preparation"],
+        "downstream": ["Agent 3D (Python) leases and advances edit_jobs; the Indexer, CAD Validator, and CAD Exporter independently claim their own rows — none of this happens inside the Nest request lifecycle."],
         "evidence": [
           { "path": "services/cad_agent/src/cad-agent.repository.ts", "symbol": "queueGenerationJob / queueStandaloneIndexJob / submitEditJob", "kind": "source" },
           { "path": "supabase/migrations/20260724000000_add_index_jobs.sql", "symbol": "index_jobs", "kind": "migration" },
           { "path": "supabase/migrations/20260725000000_add_cad_edit_workflow.sql", "symbol": "edit_jobs", "kind": "migration" },
           { "path": "supabase/migrations/20260726000000_add_initial_cad_design.sql", "symbol": "workflow_mode", "kind": "migration" },
           { "path": "supabase/migrations/20260726010000_add_requested_cad_part.sql", "symbol": "requested_part_id", "kind": "migration" },
-          { "path": "supabase/migrations/20260727000000_add_cad_agent_progress_and_tools.sql", "symbol": "edit_job_events / cad_tool_jobs / submit_cad_edit_job", "kind": "migration" }
+          { "path": "supabase/migrations/20260727000000_add_cad_agent_progress_and_tools.sql", "symbol": "edit_job_events / submit_cad_edit_job", "kind": "migration" }
         ]
       }
     },
@@ -179,29 +179,29 @@
     {
       "id": "openai",
       "label": "OpenAI Responses API",
-      "description": "External structured-output dependency used by direct linked-mesh generation and by the Nest CAD Agent’s bounded tool-plan reasoner.",
+      "description": "External structured-output dependency used by linked-mesh generation inside Nest, and independently by the separate Agent 3D worker's reasoning loop.",
       "type": "external",
       "icon": "external",
       "foundation": true,
       "position": { "column": 1, "row": 3 },
       "mobileOrder": 6,
       "details": {
-        "responsibility": "Return either a strict generated_code mesh body or a strict versioned CAD ToolPlan, depending on the initiating service.",
+        "responsibility": "Return a strict generated_code mesh body to Nest, or one function-call decision per turn to Agent 3D's CAD reasoning loop — two independent callers, never a shared request.",
         "ownedBy": "OpenAI",
         "inputs": [
-          { "name": "bounded generation context", "description": "Mesh source for the synchronous action path, or bounded CAD source targets and diagnostics for the Nest reasoner." }
+          { "name": "bounded generation context", "description": "Mesh source and conversation for Nest's synchronous path, or one turn's bounded goal/plan/step context for Agent 3D." }
         ],
         "outputs": [
-          { "name": "structured output", "description": "A strict mesh generated_code response or registered CAD tool_plan_v1." }
+          { "name": "structured output", "description": "A strict mesh generated_code response, or one Agent3D function-call decision." }
         ],
         "shortCircuit": "Refusal or invalid structured output fails before mesh storage replacement or CAD candidate mutation.",
         "operations": {
           "retry": "No synchronous mesh-generation retry is implemented.",
-          "controls": ["OPENAI_MODEL defaults to gpt-5.4-mini."]
+          "controls": ["OPENAI_MODEL defaults to gpt-5.4-mini.", "OPENAI_AGENT_MODEL (Agent 3D only) falls back to OPENAI_MODEL, then gpt-5.4-mini."]
         },
         "evidence": [
           { "path": "services/cad_agent/src/mesh-generation.service.ts", "symbol": "MeshGenerationService / RESPONSE_SCHEMA", "kind": "source" },
-          { "path": "services/cad_agent/src/reasoner.service.ts", "symbol": "ReasonerService", "kind": "source" }
+          { "path": "workers/agent_3d/agent_3d.py", "symbol": "Agent3D.decide", "kind": "source" }
         ]
       }
     }
@@ -319,49 +319,25 @@
       "id": "cad-agent-workflow",
       "source": "cad-agent-service",
       "target": "job-tables",
-      "label": "claim edits, queue tools, and append progress",
+      "label": "create edit jobs and poll progress",
       "protocol": "database",
       "direction": "two-way",
       "flow": "synchronous",
       "request": {
-        "label": "workflow, tool, or progress operation",
+        "label": "job creation or progress poll",
         "type": "Postgres RPC/table operation",
-        "exampleBody": "{\"edit_job_id\":\"edit-job-uuid\",\"event_type\":\"planning\",\"message\":\"Planning bounded CAD changes.\"}"
+        "exampleBody": "{\"client_request_id\":\"idempotency-uuid\",\"request_fingerprint\":\"sha256\"}"
       },
       "response": {
-        "label": "owned work or durable acknowledgement",
-        "type": "edit_jobs / cad_tool_jobs / edit_job_events data",
-        "exampleBody": "{\"id\":\"edit-job-uuid\",\"status\":\"running\",\"state\":\"planning_edit\"}"
+        "label": "durable job row or new event sequences",
+        "type": "edit_jobs / edit_job_events data",
+        "exampleBody": "{\"id\":\"edit-job-uuid\",\"status\":\"queued\"}"
       },
       "details": {
-        "summary": "Nest initiates every database interaction; durable rows allow processing and replay to outlive clients.",
+        "summary": "Nest creates the edit_jobs row and polls edit_job_events for progress fan-out; it never claims, leases, or advances the job itself — Agent 3D does.",
         "evidence": [
-          { "path": "services/cad_agent/src/cad-agent.repository.ts", "symbol": "CadAgentRepository", "kind": "source" }
-        ]
-      }
-    },
-    {
-      "id": "cad-planning",
-      "source": "cad-agent-service",
-      "target": "openai",
-      "label": "bounded CAD tool-plan exchange",
-      "protocol": "http",
-      "direction": "two-way",
-      "flow": "synchronous",
-      "request": {
-        "label": "request plus allowed source context",
-        "type": "Responses API structured-output request",
-        "exampleBody": "{\"mode\":\"edit\",\"request_text\":\"Add two holes\",\"allowed_targets\":[\"feature:mount\"]}"
-      },
-      "response": {
-        "label": "registered versioned tool plan",
-        "type": "tool_plan_v1",
-        "exampleBody": "{\"schema_version\":1,\"summary\":\"Add mounting holes\",\"operations\":[]}"
-      },
-      "details": {
-        "summary": "OpenAI selects typed operations only; it cannot execute tools or access canonical storage.",
-        "evidence": [
-          { "path": "services/cad_agent/src/reasoner.service.ts", "symbol": "ReasonerService", "kind": "source" }
+          { "path": "services/cad_agent/src/submission.service.ts", "symbol": "SubmissionService.submit", "kind": "source" },
+          { "path": "services/cad_agent/src/progress.service.ts", "symbol": "ProgressService", "kind": "source" }
         ]
       }
     },
@@ -395,7 +371,7 @@
     },
     {
       "id": "mesh-generation",
-      "source": "cad-agent",
+      "source": "cad-agent-service",
       "target": "openai",
       "label": "mesh source generation exchange",
       "protocol": "http",
@@ -412,7 +388,7 @@
         "exampleBody": "{\"generated_code\":\"def build_model(params):\\n    ...\"}"
       },
       "details": {
-        "summary": "A WebSocket request targeting a linked mesh part takes this direct synchronous AI path; CAD requests enter the CAD goal/workflow path.",
+        "summary": "A WebSocket request targeting a linked mesh part takes this direct synchronous AI path; a CAD request instead creates a durable edit_jobs row for the separate Agent 3D worker to process.",
         "trustBoundary": "Current mesh model.py and recent conversation cross to the external API.",
         "failureBehavior": "Any API or response-contract failure emits a WebSocket error and leaves model.py unchanged.",
         "evidence": [

@@ -190,6 +190,13 @@ intent:
 - A newly created feature is not considered integrated until `build_model`
   has been updated so the feature contributes to the final returned model.
 - Do not leave unused or disconnected public semantic features in the part.
+- Every feature function's parameters follow one fixed shape: `params:
+  ModelParams` first, then one positional argument per declared `depends_on`
+  dependency, in the exact order declared, using each dependency's
+  `argument_name`. This applies even when a feature's `parameters` list is
+  empty -- `params` is still its first argument. Omitting `params` or a
+  dependency argument when calling a feature from `build_model` or another
+  feature is invalid.
 
 ## System-owned provenance
 

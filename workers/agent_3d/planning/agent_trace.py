@@ -26,17 +26,25 @@ def content_sha256(value: str) -> str:
 
 @dataclass(frozen=True)
 class AgentTraceContext:
-    """Correlation identifiers one Agent3D turn needs but cannot derive from
-    ``goal``/``plan``/``active_step`` alone.
+    """Correlation identifiers one Agent3D reasoning round needs but cannot
+    derive from ``goal``/``plan``/``active_step`` alone.
 
     ``goal_id``, ``plan_id``, and ``step_id`` already come from the workflow
-    state arguments already passed to ``decide``; only the edit job identity
-    and the orchestrator's own turn counters are new.
+    state arguments already passed to ``start_step``/``continue_step``; only
+    the edit job identity and the orchestrator's own turn counters are new.
+
+    ``agent_turn`` counts model calls across the whole workflow run.
+    ``step_attempt`` counts how many separate reasoning chains have been
+    started for the active step (normally 1; increments only if a new chain
+    must start for the same step, e.g. after a worker-process restart mid-
+    step). ``reasoning_round`` counts model calls within the current chain,
+    resetting to 1 whenever a new chain starts.
     """
 
     edit_job_id: str
     agent_turn: int
-    step_turn: int
+    step_attempt: int
+    reasoning_round: int
 
 
 def _json_safe(value: Any) -> Any:
@@ -71,8 +79,9 @@ class AgentTraceWriter:
     one self-contained event -- the exact LLM request payload, the raw model
     response, tool execution, and orchestrator-owned state transitions --
     carrying enough correlation IDs (``edit_job_id``, ``goal_id``, ``plan_id``,
-    ``step_id``, ``agent_turn``, ``step_turn``, ``response_id``,
-    ``tool_call_id``) to reconstruct one turn end to end. This is debugging
+    ``step_id``, ``agent_turn``, ``step_attempt``, ``reasoning_round``,
+    ``previous_response_id``, ``response_id``, ``tool_call_id``) to
+    reconstruct one reasoning chain end to end. This is debugging
     infrastructure, not a chain-of-thought log: a model response may include
     an API-provided ``reasoning_summary``, never private reasoning tokens.
 

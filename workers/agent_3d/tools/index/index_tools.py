@@ -216,6 +216,8 @@ class IndexSearchTool(AgentTool[IndexSearchInput, IndexSearchOutput]):
     )
     input_model = IndexSearchInput
     output_model = IndexSearchOutput
+    batchable = True
+    parallel_safe = True
 
     async def execute(
         self,
@@ -301,6 +303,8 @@ class IndexGetFeatureTool(
     )
     input_model = IndexGetFeatureInput
     output_model = IndexGetFeatureOutput
+    batchable = True
+    parallel_safe = True
 
     async def execute(
         self,

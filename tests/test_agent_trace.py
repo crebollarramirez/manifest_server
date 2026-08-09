@@ -19,7 +19,9 @@ EDIT_JOB_ID = "33333333-3333-4333-8333-333333333333"
 
 class AgentTraceContextTests(unittest.TestCase):
     def test_is_frozen(self):
-        context = AgentTraceContext(edit_job_id=EDIT_JOB_ID, agent_turn=1, step_turn=1)
+        context = AgentTraceContext(
+            edit_job_id=EDIT_JOB_ID, agent_turn=1, step_attempt=1, reasoning_round=1
+        )
 
         with self.assertRaises(Exception):
             context.agent_turn = 2  # type: ignore[misc]

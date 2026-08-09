@@ -23,13 +23,19 @@ const modes = [
 		name: 'Candidate source',
 		source: 'Edit-scoped candidate model.py plus canonical part params.json.',
 		success: 'Completes the running candidate validation row with its schema-v2 report.',
-		downstream: 'CAD Agent can verify and consume the proof. No export row is inserted by this path.',
+		downstream: 'Agent 3D can verify and consume the proof before committing. No export row is inserted by this path.',
 	},
 	{
 		name: 'Accepted source',
 		source: 'Canonical part model.py plus params.json.',
 		success: 'Completes validation and inserts a queued export_cad row in one database function.',
 		downstream: 'CAD Exporter can independently claim the queued export job.',
+	},
+	{
+		name: 'Geometry check',
+		source: 'Agent 3D’s check_geometry tool call — no arguments, current edit-scoped candidate only.',
+		success: 'Executes candidate source, measures volume/bounding box/center of mass/solid-face-edge counts, and diffs it against the immediately preceding checked state.',
+		downstream: 'Returned straight to Agent3D mid-loop as deterministic evidence; it never gates a step and is unrelated to the pass/fail validate_cad report.',
 	},
 ];
 
@@ -119,6 +125,7 @@ const failures = [
 			<p>The CAD Validator consumes <code>validate_cad</code> jobs and returns a schema-v2 proof for accepted or edit-scoped candidate source. It owns the active execution and its temporary workspace, but it does not commit candidate source, plan repairs, promote canonical source, or generate final export files.</p>
 			<p>Postgres owns job lifecycle state, 3dProjects storage owns source objects and parameters, and the CAD Agent or CAD Exporter consumes the appropriate successful outcome.</p>
 			<p>Static validation also proves semantic dependency integrity before execution: direct <code>depends_on</code> edges must be unique, acyclic, and consistent with <code>build_model</code> dataflow, while decorator <code>parameters</code> must match effective <code>params.*</code> usage through reachable private helpers. Metadata drift returns repairable diagnostics and never reaches canonical commit.</p>
+			<p>This worker also serves <code>geometry_check</code> jobs, a separate and much lighter job type behind Agent 3D's <code>check_geometry</code> tool (see the <a href="/workflows/cad-thinking/">reasoning loop</a>). It shares this container's sandboxed execution and geometry-measurement primitives with full validation, but is a repeatable mid-loop probe with its own result schema and cache — it never gates step completion or candidate commit the way a <code>validate_cad</code> pass/fail does. Full details: <code>workers/cad_validator/GEOMETRY_CHECK.md</code>.</p>
 		</article>
 
 		<BoundaryMatrix
@@ -157,6 +164,8 @@ const failures = [
 			{ path: 'workers/cad_validator/cad_ast_validator.py', symbol: 'validate_cad_source', description: 'Ordered static contract and safety gates.' },
 			{ path: 'workers/cad_validator/cad_validation_runner.py', symbol: 'execute / geometry_result', description: 'ModelParams construction, build_model invocation, and geometry contract.' },
 			{ path: 'supabase/migrations/20260725000000_add_cad_edit_workflow.sql', symbol: 'complete_candidate_cad_validation / complete_cad_validation_and_queue_export', description: 'Candidate and accepted completion transaction semantics.' },
+			{ path: 'workers/cad_validator/geometry_check_job.py', symbol: 'process_geometry_check_job', description: 'check_geometry job handling: re-hash, cached or fresh GeometrySnapshot, comparison, and completion.' },
+			{ path: 'workers/agent_3d/tools/geometry/geometry_tools.py', symbol: 'CheckGeometryTool', description: 'The Agent3D tool that queues and polls a geometry_check job.' },
 		]}
 	/>
 </ArchitecturePage>

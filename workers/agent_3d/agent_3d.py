@@ -14,10 +14,6 @@ from .planning.prompt_loader import load_agent_reasoning_prompt, load_cad_system
 LOGGER = logging.getLogger(__name__)
 
 
-def _default_instructions() -> str:
-    return f"{load_agent_reasoning_prompt()}\n\n{load_cad_system_prompt()}"
-
-
 def _field(value: Any, name: str, default: Any = None) -> Any:
     """Read one field from a model response item that may be a dict or object."""
 
@@ -42,16 +38,31 @@ def _reasoning_summary(response: Any) -> Any:
     return None
 
 
-class Agent3D:
-    """Model-driven decision component of the future agent loop.
+# Model families known to support the Responses API's `reasoning.context`
+# parameter (persisted reasoning across `previous_response_id` turns). Only
+# GPT-5.6 and later support it today; sending it to a model that doesn't
+# support it risks an API rejection, so this stays an explicit allowlist
+# rather than a version comparison -- extending it is a one-line addition.
+_REASONING_CONTEXT_MODEL_PREFIXES = ("gpt-5.6",)
 
-    Agent3D turns one workflow-state snapshot -- goal, plan, active step,
-    bounded recent conversation, and current-step tool observations -- into
-    one next-action model decision through :meth:`decide`. It does not
-    execute tools, mutate goals/plans, select plan steps, or drive workflow
-    control; that stays with the orchestrator and the tool executor. It also
-    does not loop: a future orchestrator loop is expected to call ``decide``
-    repeatedly, once per turn.
+
+def _supports_reasoning_context(model: str) -> bool:
+    return (model or "").strip().lower().startswith(_REASONING_CONTEXT_MODEL_PREFIXES)
+
+
+class Agent3D:
+    """Model-driven reasoning component of the agent loop.
+
+    Agent3D reasons about one active plan step across a single continuous
+    Responses API chain: :meth:`start_step` opens the chain with the full
+    workflow-state snapshot (goal, plan, active step, bounded recent
+    conversation, current-step tool observations), and :meth:`continue_step`
+    carries that same chain forward with each round's tool results via
+    ``previous_response_id``. It does not execute tools, mutate goals/plans,
+    select plan steps, or drive workflow control; that stays with the
+    orchestrator and the tool executor. It also does not loop on its own --
+    the orchestrator alone decides when to call ``start_step`` vs
+    ``continue_step``, and when to stop calling either.
     """
 
     def __init__(
@@ -99,7 +110,7 @@ class Agent3D:
 
         return self._tool_catalog
 
-    def decide(
+    def start_step(
         self,
         *,
         goal: CadGoal,
@@ -108,16 +119,25 @@ class Agent3D:
         trace_context: AgentTraceContext,
         recent_messages: Sequence[Mapping[str, Any]] = (),
         observations: Sequence[Mapping[str, Any]] = (),
+        project_inventory: Mapping[str, Any] | None = None,
     ) -> Any:
-        """Make one next-action decision for the active plan step.
+        """Start a new reasoning chain for ``active_step``.
 
-        Returns the raw model-client response object unchanged -- its
-        ``function_call``/message output items already represent the
-        decision, so no parallel decision type is introduced. Neither
-        ``goal`` nor ``plan`` is mutated. ``trace_context`` supplies the
-        correlation IDs (edit job, turn counters) the orchestrator owns and
-        this method cannot derive on its own; it never affects the request
-        sent to the model.
+        Sends the full workflow-state snapshot -- goal, plan, active step,
+        the project inventory roster, current-step observations, and recent
+        conversation -- as a single input item, with no
+        ``previous_response_id``. This is the only point at which that
+        snapshot is sent for a given step's chain; every subsequent round for
+        this step goes through :meth:`continue_step` instead. Returns the raw
+        model-client response object unchanged. Neither ``goal`` nor ``plan``
+        is mutated.
+
+        ``project_inventory`` is what parts/features already exist -- the
+        orchestrator assembles it (other parts from the project's semantic
+        index, the part being edited from a live scan of its candidate
+        source) so the model doesn't need a tool round to discover it. When
+        omitted, an empty roster is sent instead of the field being absent,
+        so the model always sees the same shape.
         """
 
         execution_context = {
@@ -125,35 +145,108 @@ class Agent3D:
                 "goal": goal.model_dump(mode="json"),
                 "plan": plan.model_dump(mode="json"),
                 "active_step": active_step.model_dump(mode="json"),
+                "project_inventory": (
+                    dict(project_inventory)
+                    if project_inventory is not None
+                    else {
+                        "current_part": {
+                            "part_id": "",
+                            "part_name": "",
+                            "features": [],
+                            "parameters": [],
+                        },
+                        "other_parts": [],
+                    }
+                ),
             },
             "step_observations": list(observations),
             "recent_conversation": list(recent_messages),
         }
-
-        reasoning_input = [
+        input_items = [
             {
                 "role": "user",
-                "content": json.dumps(
-                    execution_context,
-                    ensure_ascii=False,
-                ),
+                "content": json.dumps(execution_context, ensure_ascii=False),
             }
         ]
+        return self._send_reasoning_request(
+            goal=goal,
+            plan=plan,
+            active_step=active_step,
+            trace_context=trace_context,
+            input_items=input_items,
+            previous_response_id=None,
+        )
+
+    def continue_step(
+        self,
+        *,
+        goal: CadGoal,
+        plan: CadPlan,
+        active_step: PlanStep,
+        trace_context: AgentTraceContext,
+        previous_response_id: str,
+        tool_outputs: Sequence[Mapping[str, Any]],
+    ) -> Any:
+        """Continue ``active_step``'s reasoning chain with this round's tool
+        results.
+
+        ``tool_outputs`` must already be a sequence of Responses API
+        ``function_call_output`` items (``{"type": "function_call_output",
+        "call_id": ..., "output": <json string>}``) -- this method does not
+        know about ``ToolResult``/``ToolFailure`` shapes; the orchestrator
+        builds these. ``goal``/``plan``/``active_step`` are used only for
+        trace correlation, not re-serialized into the request -- the chain's
+        own server-side history already carries that context forward.
+        Returns the raw model-client response object unchanged.
+        """
+
+        return self._send_reasoning_request(
+            goal=goal,
+            plan=plan,
+            active_step=active_step,
+            trace_context=trace_context,
+            input_items=list(tool_outputs),
+            previous_response_id=previous_response_id,
+        )
+
+    def _reasoning_config(self) -> dict[str, Any]:
+        config: dict[str, Any] = {"effort": "medium"}
+        if _supports_reasoning_context(self.model):
+            config["context"] = "all_turns"
+        return config
+
+    def _send_reasoning_request(
+        self,
+        *,
+        goal: CadGoal,
+        plan: CadPlan,
+        active_step: PlanStep,
+        trace_context: AgentTraceContext,
+        input_items: list[dict[str, Any]],
+        previous_response_id: str | None,
+    ) -> Any:
+        """Build, trace, and send one Responses API request, and trace and
+        return the raw response unchanged.
+
+        This is the single place request-building, tracing, and error
+        handling live -- :meth:`start_step` and :meth:`continue_step` differ
+        only in what ``input_items``/``previous_response_id`` they supply.
+        """
 
         # This is the exact payload handed to the model client below -- the
         # trace logs this literal dict rather than a separately reconstructed
         # approximation, so the two can never diverge.
-        request = {
+        request: dict[str, Any] = {
             "model": self.model,
             "instructions": self.instructions,
-            "input": reasoning_input,
+            "input": input_items,
             "tools": list(self._tool_catalog),
             "tool_choice": "required",
-            "parallel_tool_calls": False,
-            "reasoning": {
-                "effort": "medium",
-            },
+            "parallel_tool_calls": True,
+            "reasoning": self._reasoning_config(),
         }
+        if previous_response_id is not None:
+            request["previous_response_id"] = previous_response_id
 
         correlation = {
             "edit_job_id": trace_context.edit_job_id,
@@ -161,7 +254,9 @@ class Agent3D:
             "plan_id": str(plan.plan_id),
             "step_id": active_step.step_id,
             "agent_turn": trace_context.agent_turn,
-            "step_turn": trace_context.step_turn,
+            "step_attempt": trace_context.step_attempt,
+            "reasoning_round": trace_context.reasoning_round,
+            "previous_response_id": previous_response_id,
         }
 
         try:

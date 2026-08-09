@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any, Callable, TypeVar
 from uuid import uuid4
 
@@ -19,6 +20,9 @@ from .planning.resolver import resolve_deterministic_edit_target
 from .tools import ToolExecutionContext, ToolServices
 from .tools.base import tool_failure
 from .tools.hashing import source_hash
+from .tools.index.index_tools import _index as _load_semantic_index
+from .tools.index.index_tools import _parts as _semantic_index_parts
+from .tools.index.index_tools import _text as _index_text
 
 
 TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
@@ -26,7 +30,8 @@ RECENT_MESSAGE_LIMIT = 8
 ACTIVE_STEP_STATUSES = ("pending", "in_progress")
 STEP_COMPLETION_TOOL_ID = "request_step_completion"
 MAX_AGENT_TURNS = 24
-MAX_STEP_TURNS = 10
+MAX_STEP_TURNS = 20
+MAX_TOOL_CALLS_PER_BATCH = 5
 T = TypeVar("T")
 LOGGER = logging.getLogger(__name__)
 
@@ -78,6 +83,56 @@ def _output(response: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+@dataclass(frozen=True)
+class ToolCallRequest:
+    """One tool call requested by a single model response.
+
+    Arguments are parsed exactly once, here, at batch-construction time.
+    ``parse_error`` is set (and ``arguments`` is empty) when the model's
+    arguments string failed to parse as a JSON object; dispatch turns that
+    into a TOOL_INPUT_INVALID result without ever calling the tool -- a
+    per-call execution failure, not a batch-validation failure.
+    """
+
+    call_id: str
+    tool_id: str
+    raw_arguments: str
+    arguments: dict[str, Any]
+    parse_error: str | None = None
+
+
+@dataclass(frozen=True)
+class ToolCallBatch:
+    """The full, ordered set of tool calls requested by one model response."""
+
+    calls: tuple[ToolCallRequest, ...]
+
+
+def _parse_call(item: Any) -> ToolCallRequest:
+    """Build one ToolCallRequest from a raw function_call response item."""
+
+    call_id = str(_field(item, "call_id", "") or "")
+    tool_id = str(_field(item, "name", "") or "")
+    raw_arguments = str(_field(item, "arguments", "{}"))
+    try:
+        parsed = json.loads(raw_arguments)
+        if not isinstance(parsed, dict):
+            raise ValueError("Tool arguments must be a JSON object.")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ToolCallRequest(call_id, tool_id, raw_arguments, {}, "Tool arguments are invalid.")
+    return ToolCallRequest(call_id, tool_id, raw_arguments, parsed, None)
+
+
+def _batch_rejection_outputs(batch: ToolCallBatch, failure: Any) -> list[dict[str, Any]]:
+    """Build one identical rejection function_call_output per call in ``batch``."""
+
+    payload = json.dumps(failure.model_dump(mode="json"), ensure_ascii=False)
+    return [
+        {"type": "function_call_output", "call_id": call.call_id, "output": payload}
+        for call in batch.calls
+    ]
+
+
 def _with_step_status(plan: CadPlan, step_id: str, status: str) -> CadPlan:
     """Return a revalidated copy of ``plan`` with one step's status replaced.
 
@@ -119,20 +174,23 @@ def _active_step(plan: CadPlan) -> PlanStep | None:
     return None
 
 
-def _count_cad_features(source: str) -> int:
-    """Count top-level functions decorated with ``@cad_part(...)`` in CAD source.
+def _extract_cad_features(source: str) -> list[dict[str, str]]:
+    """Return one record per top-level ``@cad_part(...)``-decorated function.
 
-    A lightweight presence check, not full ``extractor.py``-style validation --
-    a candidate mid-edit need not be fully well-formed, and a syntax error
-    (e.g. between two tool calls) fails open to ``0`` rather than crashing the
-    loop, since ``0`` is also the correct answer for "no feature exists yet."
+    Same AST walk and decorator-matching predicate ``_count_cad_features``
+    uses, but collects ``{"semantic_id", "function_name", "role"}`` per match
+    instead of just counting. A decorator keyword that's absent, or isn't a
+    plain string literal, defaults to ``""`` rather than raising -- the same
+    fail-open philosophy as the rest of this scan. Fails open to ``[]`` on a
+    candidate source with a syntax error, since an empty roster is also the
+    correct answer for "nothing to report yet."
     """
 
     try:
         tree = ast.parse(source)
     except SyntaxError:
-        return 0
-    count = 0
+        return []
+    features: list[dict[str, str]] = []
     for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -140,9 +198,77 @@ def _count_cad_features(source: str) -> int:
             if isinstance(decorator, ast.Call) and (
                 isinstance(decorator.func, ast.Name) and decorator.func.id == "cad_part"
             ):
-                count += 1
+                keywords = {kw.arg: kw.value for kw in decorator.keywords if kw.arg}
+
+                def _literal(name: str) -> str:
+                    value = keywords.get(name)
+                    return (
+                        value.value
+                        if isinstance(value, ast.Constant) and isinstance(value.value, str)
+                        else ""
+                    )
+
+                features.append(
+                    {
+                        "semantic_id": _literal("semantic_id"),
+                        "function_name": node.name,
+                        "role": _literal("role"),
+                    }
+                )
                 break
-    return count
+    return features
+
+
+def _extract_model_params(source: str) -> list[dict[str, str]]:
+    """Return one record per field declared on the source's ``ModelParams`` class.
+
+    Mirrors ``_extract_cad_features``'s fail-open philosophy: a syntax error
+    or an absent ``ModelParams`` class yields ``[]`` rather than raising,
+    since an empty roster is also the correct answer for "no parameters
+    declared yet." A field's declared type and literal default are included
+    so the roster doesn't just say a parameter exists, but what it already
+    is -- the information that would otherwise cost a tool call to learn.
+    """
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef) or node.name != "ModelParams":
+            continue
+        params: list[dict[str, str]] = []
+        for item in node.body:
+            if not isinstance(item, ast.AnnAssign) or not isinstance(item.target, ast.Name):
+                continue
+            value = item.value
+            if isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.USub):
+                value = value.operand
+                default = f"-{value.value}" if isinstance(value, ast.Constant) else ""
+            elif isinstance(value, ast.Constant):
+                default = str(value.value)
+            else:
+                default = ""
+            params.append(
+                {
+                    "name": item.target.id,
+                    "type_name": ast.unparse(item.annotation),
+                    "default": default,
+                }
+            )
+        return params
+    return []
+
+
+def _count_cad_features(source: str) -> int:
+    """Count top-level functions decorated with ``@cad_part(...)`` in CAD source.
+
+    A lightweight presence check, not full ``extractor.py``-style validation.
+    Thin wrapper over ``_extract_cad_features`` -- keep the two in lockstep;
+    this remains the ``STEP_REQUIRES_A_FEATURE`` completion gate's only use.
+    """
+
+    return len(_extract_cad_features(source))
 
 
 def _step_needs_new_geometry(step: PlanStep, goal: CadGoal) -> bool:
@@ -832,45 +958,244 @@ class EditWorkflowOrchestrator:
 
         return None
 
-    def _execute_call(
+    def _validate_batch(
         self,
-        call: Any,
-        tool_context: ToolExecutionContext,
+        batch: ToolCallBatch,
         allowed_tool_ids: set[str],
-        observations: list[dict[str, Any]],
-    ) -> tuple[str, dict[str, Any], Any]:
-        """Run one requested tool call and return its ID, arguments, and result.
+    ) -> list[dict[str, Any]] | None:
+        """Validate one model response's full batch of requested tool calls.
 
-        Malformed arguments and tools outside the agent's catalog become
-        ordinary failure results rather than exceptions, so the agent observes
-        and can correct them on its next turn. A read-only call that cannot
-        produce information beyond what this step's observations already
-        contain is rejected the same way, without dispatching to the tool.
+        Checks run in order; the first violation rejects the WHOLE batch --
+        nothing in it is dispatched. Returns None when the batch is valid
+        (always true for a single call, unless it has an invalid call ID, an
+        unavailable tool, or -- impossible at size 1 -- exceeds the batch
+        size cap). Returns a ready-to-send function_call_output list, one
+        per call, every one carrying the SAME structured rejection,
+        otherwise.
         """
 
-        tool_id = str(_field(call, "name", ""))
-        try:
-            arguments = json.loads(str(_field(call, "arguments", "{}")))
-            if not isinstance(arguments, dict):
-                raise ValueError("Tool arguments must be a JSON object.")
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return tool_id, {}, tool_failure(
-                "TOOL_INPUT_INVALID",
-                "Tool arguments are invalid.",
+        calls = batch.calls
+
+        seen_call_ids: set[str] = set()
+        for call in calls:
+            if not call.call_id or call.call_id in seen_call_ids:
+                return _batch_rejection_outputs(
+                    batch,
+                    tool_failure(
+                        "TOOL_BATCH_REJECTED",
+                        "Every tool call in a batch must have a unique, "
+                        "non-empty call ID.",
+                        details={"reason": "invalid_call_id"},
+                    ),
+                )
+            seen_call_ids.add(call.call_id)
+
+        for call in calls:
+            if allowed_tool_ids and call.tool_id not in allowed_tool_ids:
+                return _batch_rejection_outputs(
+                    batch,
+                    tool_failure(
+                        "TOOL_NOT_FOUND",
+                        "The requested tool is unavailable.",
+                    ),
+                )
+
+        if len(calls) > MAX_TOOL_CALLS_PER_BATCH:
+            return _batch_rejection_outputs(
+                batch,
+                tool_failure(
+                    "TOOL_BATCH_REJECTED",
+                    f"A batch may request at most {MAX_TOOL_CALLS_PER_BATCH} "
+                    "tool calls.",
+                    details={
+                        "reason": "batch_too_large",
+                        "batch_size": len(calls),
+                        "max_batch_size": MAX_TOOL_CALLS_PER_BATCH,
+                    },
+                ),
             )
-        if allowed_tool_ids and tool_id not in allowed_tool_ids:
-            return tool_id, arguments, tool_failure(
-                "TOOL_NOT_FOUND",
-                "The requested tool is unavailable.",
+
+        if len(calls) > 1:
+            non_batchable = sorted(
+                {
+                    call.tool_id
+                    for call in calls
+                    if not self.tool_executor.is_batchable(call.tool_id)
+                }
             )
-        redundant = self._redundant_call_rejection(tool_id, arguments, observations)
+            if non_batchable:
+                return _batch_rejection_outputs(
+                    batch,
+                    tool_failure(
+                        "TOOL_BATCH_REJECTED",
+                        "Every call in a multi-call batch must be "
+                        "individually batchable; call these tools one at a "
+                        "time instead: " + ", ".join(non_batchable) + ".",
+                        details={"reason": "not_batchable", "tool_ids": non_batchable},
+                    ),
+                )
+
+        return None
+
+    def _trace_rejected_batch(
+        self,
+        edit_job_id: str,
+        goal: CadGoal,
+        plan: CadPlan,
+        active_step: PlanStep,
+        agent_turn: int,
+        step_attempt: int,
+        reasoning_round: int,
+        decision: Any,
+        batch: ToolCallBatch,
+        rejection_outputs: list[dict[str, Any]],
+    ) -> None:
+        """Trace every call in a wholesale-rejected batch as a failed tool call.
+
+        Reuses the existing tool.started/tool.completed event types (rather
+        than a new event type) so the trace stays a complete ledger of what
+        the model tried to call, even though nothing was actually dispatched.
+        """
+
+        rejection_result = json.loads(rejection_outputs[0]["output"])
+        for call in batch.calls:
+            tool_call_correlation = dict(
+                goal_id=str(goal.goal_id),
+                plan_id=str(plan.plan_id),
+                step_id=active_step.step_id,
+                agent_turn=agent_turn,
+                step_attempt=step_attempt,
+                reasoning_round=reasoning_round,
+                response_id=_field(decision, "id"),
+                tool_call_id=call.call_id,
+            )
+            self._trace(
+                "tool.started",
+                edit_job_id,
+                tool_id=call.tool_id,
+                arguments=call.raw_arguments,
+                **tool_call_correlation,
+            )
+            self._trace(
+                "tool.completed",
+                edit_job_id,
+                tool_id=call.tool_id,
+                ok=False,
+                result=rejection_result,
+                duration_seconds=0.0,
+                **tool_call_correlation,
+            )
+
+    def _dispatch_call(
+        self,
+        call: ToolCallRequest,
+        tool_context: ToolExecutionContext,
+        observations: list[dict[str, Any]],
+    ) -> tuple[str, dict[str, Any], Any]:
+        """Run one already-batch-validated tool call and return its ID,
+        arguments, and result.
+
+        Batch validation (_validate_batch) already guarantees this call's
+        tool ID is allowed and, for a multi-call batch, batchable -- this
+        method does not re-check either. A call whose arguments failed to
+        parse at batch-construction time becomes a TOOL_INPUT_INVALID
+        result without dispatching. A read-only call that cannot produce
+        information beyond what this step's observations already contain
+        is rejected the same way, without dispatching to the tool.
+        """
+
+        if call.parse_error is not None:
+            return call.tool_id, {}, tool_failure("TOOL_INPUT_INVALID", call.parse_error)
+        redundant = self._redundant_call_rejection(call.tool_id, call.arguments, observations)
         if redundant is not None:
-            return tool_id, arguments, redundant
-        return tool_id, arguments, self.tool_executor.execute_sync(
-            tool_id=tool_id,
-            raw_arguments=arguments,
+            return call.tool_id, call.arguments, redundant
+        return call.tool_id, call.arguments, self.tool_executor.execute_sync(
+            tool_id=call.tool_id,
+            raw_arguments=call.arguments,
             context=tool_context,
         )
+
+    @staticmethod
+    def _other_parts_inventory(tool_context: ToolExecutionContext) -> list[dict[str, Any]]:
+        """Other parts' known features and parameters from the project's
+        semantic index.
+
+        Call once per job -- the persisted index only changes at reindex
+        time, well outside a running job. Excludes the part this job is
+        editing: that part's live state comes from
+        ``_current_part_inventory`` instead, never from this index, since the
+        index can be stale relative to this job's own in-progress edits.
+        Degrades to ``[]`` on any index problem (missing, malformed, or
+        cross-project) rather than failing the job -- an inventory roster is
+        an optimization, not a correctness requirement, the same stance
+        ``IndexSearchTool``/``IndexGetFeatureTool`` already take on these same
+        failure modes. Unlike the live candidate scan, the index has no
+        default value for a parameter, only its declared type.
+        """
+
+        try:
+            index = _load_semantic_index(tool_context)
+        except WorkflowFailure:
+            return []
+        return [
+            {
+                "part_id": part["part_id"],
+                "part_name": part["part_name"],
+                "features": [
+                    {
+                        "semantic_id": _index_text(feature.get("semantic_id")),
+                        "function_name": _index_text(feature.get("function_name")),
+                        "role": _index_text(feature.get("role")),
+                    }
+                    for feature in part["cad_parts"]
+                    if _index_text(feature.get("semantic_id"))
+                ],
+                "parameters": [
+                    {
+                        "name": _index_text(parameter.get("name")),
+                        "type_name": _index_text(parameter.get("type_name")),
+                    }
+                    for parameter in part["model_params"]
+                    if _index_text(parameter.get("name"))
+                ],
+            }
+            for part in _semantic_index_parts(index)
+            if part["part_id"] != tool_context.part_id
+        ]
+
+    def _current_part_inventory(self, job: dict[str, Any]) -> dict[str, Any]:
+        """The part being edited's live features and parameters, scanned
+        fresh from the candidate.
+
+        Call at the start of every step's chain, never once per job: the
+        candidate mutates as this job's own tool calls run
+        (``create_feature``, ``create_parameter``, ``edit_cad_build_model``),
+        so a later step in the same job must see what an earlier step in the
+        same job just built -- something the persisted semantic index cannot
+        supply, since it only reflects state as of the last reindex. A
+        candidate that can't yet be read fails open to empty feature and
+        parameter lists, mirroring ``_step_blocked_on_missing_geometry``'s
+        convention.
+        """
+
+        resolved_targets = list(job.get("resolved_targets") or [])
+        part_name = (
+            _index_text(resolved_targets[0].get("part_name")) if resolved_targets else ""
+        )
+        try:
+            source = self.repository.read_text(self._candidate_path(job))
+        except WorkflowFailure:
+            features: list[dict[str, str]] = []
+            parameters: list[dict[str, str]] = []
+        else:
+            features = _extract_cad_features(source)
+            parameters = _extract_model_params(source)
+        return {
+            "part_id": str(job["resolved_part_id"]),
+            "part_name": part_name,
+            "features": features,
+            "parameters": parameters,
+        }
 
     def _run_agent_loop(
         self,
@@ -878,13 +1203,15 @@ class EditWorkflowOrchestrator:
         goal: CadGoal,
         plan: CadPlan,
     ) -> CadPlan:
-        """Drive the plan to completion one Agent3D decision at a time.
+        """Drive the plan to completion one continuous reasoning chain per
+        active step.
 
         The plan is the loop's engine: each pass works the earliest unfinished
         step until the agent reports it complete, then advances. The loop ends
-        when no step remains active. Observations are scoped to the active step
-        and cleared whenever it changes, so a later step never inherits an
-        earlier step's tool transcript.
+        when no step remains active. A step's reasoning chain -- and the
+        orchestrator-local ``observations`` bookkeeping used for redundant-call
+        rejection -- are scoped to that step and reset whenever it changes, so
+        a later step never inherits an earlier step's chain or tool transcript.
         """
 
         edit_job_id = str(job["id"])
@@ -895,6 +1222,7 @@ class EditWorkflowOrchestrator:
             candidate_id=edit_job_id,
             services=ToolServices(repository=self.repository),
         )
+        other_parts_inventory = self._other_parts_inventory(tool_context)
         recent_messages = _recent_messages(job.get("messages"))
         allowed_tool_ids = {
             str(definition["name"])
@@ -903,8 +1231,11 @@ class EditWorkflowOrchestrator:
         }
         observations: list[dict[str, Any]] = []
         current_step_id: str | None = None
-        total_turns = 0
-        step_turns = 0
+        previous_response_id: str | None = None
+        pending_tool_outputs: list[dict[str, Any]] = []
+        agent_turn = 0
+        step_attempt = 0
+        reasoning_round = 0
 
         while True:
             active_step = _active_step(plan)
@@ -913,21 +1244,24 @@ class EditWorkflowOrchestrator:
                     "agent loop finished edit_job_id=%s plan_id=%s turns=%s",
                     edit_job_id,
                     plan.plan_id,
-                    total_turns,
+                    agent_turn,
                 )
                 self._trace(
                     "agent_loop.completed",
                     edit_job_id,
                     goal_id=str(goal.goal_id),
                     plan_id=str(plan.plan_id),
-                    total_turns=total_turns,
+                    agent_turn=agent_turn,
                 )
                 return plan
 
             if active_step.step_id != current_step_id:
                 previous_step_id = current_step_id
                 current_step_id = active_step.step_id
-                step_turns = 0
+                previous_response_id = None
+                pending_tool_outputs = []
+                step_attempt = 0
+                reasoning_round = 0
                 observations = []
                 if active_step.status == "pending":
                     plan = self._set_step_status(
@@ -958,17 +1292,24 @@ class EditWorkflowOrchestrator:
                     observation_count_before=len(observations),
                 )
 
-            total_turns += 1
-            step_turns += 1
-            if total_turns > MAX_AGENT_TURNS:
+            starting_new_chain = previous_response_id is None
+            agent_turn += 1
+            if starting_new_chain:
+                step_attempt += 1
+                reasoning_round = 1
+            else:
+                reasoning_round += 1
+
+            if agent_turn > MAX_AGENT_TURNS:
                 self._trace(
                     "agent_loop.failed",
                     edit_job_id,
                     goal_id=str(goal.goal_id),
                     plan_id=str(plan.plan_id),
                     step_id=active_step.step_id,
-                    agent_turn=total_turns,
-                    step_turn=step_turns,
+                    agent_turn=agent_turn,
+                    step_attempt=step_attempt,
+                    reasoning_round=reasoning_round,
                     error_code="AGENT_TURN_LIMIT",
                 )
                 raise WorkflowFailure(
@@ -979,15 +1320,16 @@ class EditWorkflowOrchestrator:
                         "max_turns": MAX_AGENT_TURNS,
                     },
                 )
-            if step_turns > MAX_STEP_TURNS:
+            if reasoning_round > MAX_STEP_TURNS:
                 self._trace(
                     "agent_loop.failed",
                     edit_job_id,
                     goal_id=str(goal.goal_id),
                     plan_id=str(plan.plan_id),
                     step_id=active_step.step_id,
-                    agent_turn=total_turns,
-                    step_turn=step_turns,
+                    agent_turn=agent_turn,
+                    step_attempt=step_attempt,
+                    reasoning_round=reasoning_round,
                     error_code="AGENT_STEP_TURN_LIMIT",
                 )
                 raise WorkflowFailure(
@@ -1000,23 +1342,46 @@ class EditWorkflowOrchestrator:
                 )
 
             decision_step = active_step
-            decision_observations = list(observations)
             trace_context = AgentTraceContext(
                 edit_job_id=edit_job_id,
-                agent_turn=total_turns,
-                step_turn=step_turns,
+                agent_turn=agent_turn,
+                step_attempt=step_attempt,
+                reasoning_round=reasoning_round,
             )
-            decision = self._with_heartbeat(
-                edit_job_id,
-                lambda: self.agent_3d.decide(
-                    goal=goal,
-                    plan=plan,
-                    active_step=decision_step,
-                    trace_context=trace_context,
-                    recent_messages=recent_messages,
-                    observations=decision_observations,
-                ),
-            )
+            if starting_new_chain:
+                decision_observations = list(observations)
+                decision_project_inventory = {
+                    "current_part": self._current_part_inventory(job),
+                    "other_parts": other_parts_inventory,
+                }
+                decision = self._with_heartbeat(
+                    edit_job_id,
+                    lambda: self.agent_3d.start_step(
+                        goal=goal,
+                        plan=plan,
+                        active_step=decision_step,
+                        trace_context=trace_context,
+                        recent_messages=recent_messages,
+                        observations=decision_observations,
+                        project_inventory=decision_project_inventory,
+                    ),
+                )
+            else:
+                decision_previous_response_id = previous_response_id
+                decision_tool_outputs = list(pending_tool_outputs)
+                decision = self._with_heartbeat(
+                    edit_job_id,
+                    lambda: self.agent_3d.continue_step(
+                        goal=goal,
+                        plan=plan,
+                        active_step=decision_step,
+                        trace_context=trace_context,
+                        previous_response_id=decision_previous_response_id,
+                        tool_outputs=decision_tool_outputs,
+                    ),
+                )
+            previous_response_id = str(_field(decision, "id", "") or "") or None
+
             calls = [
                 item
                 for item in _output(decision)
@@ -1029,8 +1394,9 @@ class EditWorkflowOrchestrator:
                     goal_id=str(goal.goal_id),
                     plan_id=str(plan.plan_id),
                     step_id=active_step.step_id,
-                    agent_turn=total_turns,
-                    step_turn=step_turns,
+                    agent_turn=agent_turn,
+                    step_attempt=step_attempt,
+                    reasoning_round=reasoning_round,
                     response_id=_field(decision, "id"),
                     error_code="AGENT_NO_ACTION",
                 )
@@ -1040,31 +1406,50 @@ class EditWorkflowOrchestrator:
                     details={"step_id": active_step.step_id},
                 )
 
+            batch = ToolCallBatch(calls=tuple(_parse_call(item) for item in calls))
+            rejection_outputs = self._validate_batch(batch, allowed_tool_ids)
+            if rejection_outputs is not None:
+                self._trace_rejected_batch(
+                    edit_job_id,
+                    goal,
+                    plan,
+                    active_step,
+                    agent_turn,
+                    step_attempt,
+                    reasoning_round,
+                    decision,
+                    batch,
+                    rejection_outputs,
+                )
+                pending_tool_outputs = rejection_outputs
+                continue
+
             step_completed = False
             completion_summary = ""
-            for call in calls:
-                tool_call_id = str(_field(call, "call_id", "") or "")
+            pending_tool_outputs = []
+            for call in batch.calls:
+                tool_call_id = call.call_id
                 tool_call_correlation = dict(
                     goal_id=str(goal.goal_id),
                     plan_id=str(plan.plan_id),
                     step_id=active_step.step_id,
-                    agent_turn=total_turns,
-                    step_turn=step_turns,
+                    agent_turn=agent_turn,
+                    step_attempt=step_attempt,
+                    reasoning_round=reasoning_round,
                     response_id=_field(decision, "id"),
                     tool_call_id=tool_call_id,
                 )
                 self._trace(
                     "tool.started",
                     edit_job_id,
-                    tool_id=str(_field(call, "name", "")),
-                    arguments=str(_field(call, "arguments", "{}")),
+                    tool_id=call.tool_id,
+                    arguments=call.raw_arguments,
                     **tool_call_correlation,
                 )
                 started_at = self.monotonic()
-                tool_id, arguments, result = self._execute_call(
+                tool_id, arguments, result = self._dispatch_call(
                     call,
                     tool_context,
-                    allowed_tool_ids,
                     observations,
                 )
                 duration_seconds = self.monotonic() - started_at
@@ -1073,7 +1458,7 @@ class EditWorkflowOrchestrator:
                     "tool_id=%s ok=%s",
                     edit_job_id,
                     active_step.step_id,
-                    total_turns,
+                    agent_turn,
                     tool_id,
                     result.ok,
                 )
@@ -1099,7 +1484,7 @@ class EditWorkflowOrchestrator:
                             "step_id=%s turn=%s reason=no_cad_features",
                             edit_job_id,
                             active_step.step_id,
-                            total_turns,
+                            agent_turn,
                         )
                     else:
                         step_completed = True
@@ -1115,6 +1500,19 @@ class EditWorkflowOrchestrator:
                     result=result.model_dump(mode="json"),
                     duration_seconds=duration_seconds,
                     **tool_call_correlation,
+                )
+                # Feeds the next continue_step call, if the chain keeps going
+                # (i.e. this call didn't complete the step) -- built from the
+                # same (possibly gate-rewritten) result just traced above, so
+                # the model's next round sees exactly what was recorded.
+                pending_tool_outputs.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": tool_call_id,
+                        "output": json.dumps(
+                            result.model_dump(mode="json"), ensure_ascii=False
+                        ),
+                    }
                 )
 
             if step_completed:
@@ -1132,7 +1530,7 @@ class EditWorkflowOrchestrator:
                     {
                         "step_id": active_step.step_id,
                         "summary": completion_summary,
-                        "turns": step_turns,
+                        "turns": reasoning_round,
                     },
                 )
                 self._trace(
@@ -1141,8 +1539,9 @@ class EditWorkflowOrchestrator:
                     goal_id=str(goal.goal_id),
                     plan_id=str(plan.plan_id),
                     step_id=active_step.step_id,
-                    agent_turn=total_turns,
-                    step_turn=step_turns,
+                    agent_turn=agent_turn,
+                    step_attempt=step_attempt,
+                    reasoning_round=reasoning_round,
                     summary=completion_summary,
                     observation_count=len(observations),
                 )

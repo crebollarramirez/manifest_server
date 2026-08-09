@@ -62,6 +62,10 @@ def _validate_tool(tool: AgentTool[Any, Any]) -> None:
     version = getattr(tool_type, "version", None)
     if type(version) is not int or version < 1:
         raise InvalidToolDefinitionError("Tool versions must be positive integers.")
+    for attribute in ("batchable", "parallel_safe"):
+        value = getattr(tool_type, attribute, None)
+        if type(value) is not bool:
+            raise InvalidToolDefinitionError(f"Tool {attribute} must be a bool.")
     description = getattr(tool_type, "description", None)
     if not isinstance(description, str) or not description.strip():
         raise InvalidToolDefinitionError("Tool descriptions must be non-empty.")
@@ -247,3 +251,17 @@ class ToolExecutor:
         raise RuntimeError(
             "ToolExecutor.execute_sync() cannot run inside an active event loop."
         )
+
+    def is_batchable(self, tool_id: str) -> bool:
+        """Return whether ``tool_id`` may be grouped with other calls in one batch.
+
+        Fails closed (``False``) for an unknown tool ID -- defensive only,
+        since callers reach this only after the tool ID has already passed
+        an allowlist check.
+        """
+
+        try:
+            tool = self._registry.get(tool_id)
+        except UnknownToolError:
+            return False
+        return bool(tool.batchable)

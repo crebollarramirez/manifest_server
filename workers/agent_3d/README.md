@@ -695,5 +695,7 @@ The most important implementation files are:
 - `agent_3d/agent_3d.py` — `Agent3D`, the MVP one-turn reasoning decision (see
   `AGENT_REASONING.md`);
 - `agent_3d/tools/` — canonical tool interface, registry, toolbox, executor,
-  strict contracts, and the mutating/read-only agent tools themselves;
+  strict contracts, and the mutating/read-only agent tools themselves; see
+  [`tools/README.md`](tools/README.md#registered-tools) for the full table of
+  every registered tool, its parameters, and what it does;
 - `agent_3d/repository.py` — Supabase jobs, events, storage, and child queues.
