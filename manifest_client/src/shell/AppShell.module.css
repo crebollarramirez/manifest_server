@@ -1,0 +1,15 @@
+.app {
+  width: 100%;
+  height: 100vh;
+  margin: 0;
+  background: var(--bg-page);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.previewLayer {
+  position: relative;
+  flex: 1;
+  overflow: hidden;
+}

@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics="">
+<link rel="stylesheet" href="_ds/manifest-design-system-86bf114c-1a23-4c41-91e8-8771aec993f0/tokens/colors.css">
+<link rel="stylesheet" href="_ds/manifest-design-system-86bf114c-1a23-4c41-91e8-8771aec993f0/tokens/typography.css">
+<link rel="stylesheet" href="_ds/manifest-design-system-86bf114c-1a23-4c41-91e8-8771aec993f0/tokens/spacing.css">
+<link rel="stylesheet" href="_ds/manifest-design-system-86bf114c-1a23-4c41-91e8-8771aec993f0/tokens/effects.css">
+<link rel="stylesheet" href="_ds/manifest-design-system-86bf114c-1a23-4c41-91e8-8771aec993f0/tokens/base.css">
+<link rel="stylesheet" href="_ds/manifest-design-system-86bf114c-1a23-4c41-91e8-8771aec993f0/styles.css">
+<script src="_ds/manifest-design-system-86bf114c-1a23-4c41-91e8-8771aec993f0/_ds_bundle.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/regular/style.css">
+<style>
+body{margin:0;font-family:var(--font-sans);}
+a{color:var(--text-link)}
+a:hover{color:var(--text-link-hover)}
+input[type="range"]{accent-color:var(--color-primary);}
+</style>
+</helmet>
+
+<div style="width:100%;height:100vh;margin:0;background:var(--bg-page);overflow:hidden;display:flex;flex-direction:column;" data-screen-label="Main Interface — Light">
+
+  <!-- TOP BAR -->
+  <div style="height:72px;flex:none;position:relative;display:flex;align-items:center;justify-content:space-between;padding:0 24px;background-color:rgba(255,255,255,0.12);background-image:linear-gradient(to bottom, rgba(255,255,255,0.30) 0%, rgba(255,255,255,0.04) 40%, rgba(255,255,255,0) 100%);backdrop-filter:blur(var(--blur-lg)) saturate(1.4);-webkit-backdrop-filter:blur(var(--blur-lg)) saturate(1.4);border-bottom:1px solid var(--surface-glass-border-soft);box-shadow:inset 0 1px 0 rgba(255,255,255,0.6);z-index:30;">
+    <div style="display:flex;align-items:center;gap:12px;">
+      <div style="width:38px;height:38px;border-radius:var(--radius-md);background:linear-gradient(155deg,var(--purple-300),var(--purple-500));box-shadow:var(--shadow-sm);"></div>
+      <span style="font:800 24px var(--font-sans);color:var(--text-primary);letter-spacing:var(--tracking-tight);">Manifest</span>
+    </div>
+
+    <div style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);font:700 var(--text-sm) var(--font-sans);color:var(--text-secondary);background:var(--surface-glass);border:1px solid var(--surface-glass-border-soft);padding:8px 16px;border-radius:var(--radius-pill);white-space:nowrap;">My Dino Adventure</div>
+
+    <div style="display:flex;align-items:center;gap:6px;">
+      <x-import component-from-global-scope="ManifestDesignSystem_86bf11.Button" variant="secondary" size="md" hint-size="auto,44px"><i class="ph ph-export" style="margin-right:6px;"></i>Export</x-import>
+      <x-import component-from-global-scope="ManifestDesignSystem_86bf11.Button" variant="primary" size="md" hint-size="auto,44px"><i class="ph ph-printer" style="margin-right:6px;"></i>Order</x-import>
+      <x-import component-from-global-scope="ManifestDesignSystem_86bf11.IconButton" variant="ghost" size="md" label="Switch to dark mode" onClick="{{goToDark}}" hint-size="40px,40px"><i class="ph ph-moon"></i></x-import>
+      <div style="width:40px;height:40px;border-radius:50%;background:linear-gradient(155deg,var(--purple-300),var(--purple-500));box-shadow:var(--shadow-sm);display:flex;align-items:center;justify-content:center;overflow:hidden;flex:none;">
+        <i class="ph ph-smiley" style="font-size:24px;color:#fff;"></i>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== PREVIEW LAYER (full-bleed, everything floats above it) ===== -->
+  <div style="position:relative;flex:1;overflow:hidden;background-color:#EFEAF9;background-image:radial-gradient(circle at 50% 30%, rgba(159,135,224,.20), transparent 60%), radial-gradient(rgba(107,88,168,.20) 1.3px, transparent 1.3px);background-size:auto, 34px 34px;background-position:center, center;" data-screen-label="Preview layer">
+
+    <!-- ASSEMBLED VIEW (single group selected) -->
+    <sc-if value="{{plateSingle}}" hint-placeholder-val="{{false}}">
+    <!-- build plate -->
+    <div style="position:absolute;left:50%;top:60%;transform:translate(-50%,-50%);width:520px;height:230px;border-radius:var(--radius-md);background:rgba(107,88,168,.10);box-shadow:0 0 0 1px rgba(74,59,120,.18), 0 10px 30px rgba(74,59,120,.14);">
+      <div style="position:absolute;inset:0;border-radius:var(--radius-md);background:repeating-linear-gradient(0deg,rgba(74,59,120,.10) 0 1px,transparent 1px 26px),repeating-linear-gradient(90deg,rgba(74,59,120,.10) 0 1px,transparent 1px 26px);"></div>
+    </div>
+
+    <!-- dino model -->
+    <div style="position:absolute;left:50%;top:52%;transform:translate(-50%,-50%) scale({{modelScale}});width:340px;height:280px;transition:transform .18s ease;">
+      <div style="position:absolute;bottom:44px;left:65px;width:200px;height:22px;border-radius:50%;background:rgba(0,0,0,.35);filter:blur(4px);"></div>
+      <div style="left:40px;bottom:60px;width:160px;height:38px;border-radius:22px;{{shapeStyleA}}"></div>
+      <div style="left:26px;bottom:66px;width:88px;height:66px;border-radius:70% 30% 60% 40%;transform:rotate(-15deg);{{shapeStyleB}}"></div>
+      <div style="left:55px;bottom:76px;width:185px;height:130px;border-radius:60% 60% 55% 55%;{{shapeStyleC}}"></div>
+      <div style="left:200px;bottom:130px;width:110px;height:104px;border-radius:55%;{{shapeStyleD}}"></div>
+      <div style="position:absolute;left:268px;bottom:186px;width:18px;height:18px;border-radius:50%;background:rgba(0,0,0,.25);"></div>
+      <div style="left:100px;bottom:196px;width:24px;height:30px;clip-path:polygon(50% 0,0 100%,100% 100%);{{shapeStyleE}}"></div>
+      <div style="left:132px;bottom:208px;width:24px;height:34px;clip-path:polygon(50% 0,0 100%,100% 100%);{{shapeStyleE}}"></div>
+      <div style="left:164px;bottom:200px;width:24px;height:30px;clip-path:polygon(50% 0,0 100%,100% 100%);{{shapeStyleE}}"></div>
+    </div>
+    </sc-if>
+
+    <!-- SEPARATED VIEW (All parts — each group on its own plate) -->
+    <sc-if value="{{plateAll}}" hint-placeholder-val="{{true}}">
+    <div style="position:absolute;left:50%;top:54%;transform:translate(-50%,-50%);display:flex;gap:44px;align-items:flex-end;">
+      <!-- Plate 1: body & legs -->
+      <div style="width:300px;">
+        <div style="position:relative;width:300px;height:200px;border-radius:var(--radius-md);background:rgba(107,88,168,.10);box-shadow:0 0 0 1px rgba(74,59,120,.18), 0 10px 30px rgba(74,59,120,.14);">
+          <div style="position:absolute;inset:0;border-radius:var(--radius-md);background:repeating-linear-gradient(0deg,rgba(74,59,120,.10) 0 1px,transparent 1px 26px),repeating-linear-gradient(90deg,rgba(74,59,120,.10) 0 1px,transparent 1px 26px);"></div>
+          <div style="left:30px;bottom:30px;width:150px;height:34px;border-radius:22px;{{shapeStyleA}}"></div>
+          <div style="left:20px;bottom:34px;width:80px;height:60px;border-radius:70% 30% 60% 40%;transform:rotate(-15deg);{{shapeStyleB}}"></div>
+          <div style="left:70px;bottom:46px;width:175px;height:120px;border-radius:60% 60% 55% 55%;{{shapeStyleC}}"></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-top:10px;padding-left:4px;">
+          <span style="font:800 var(--text-xs) var(--font-mono);color:var(--text-tertiary);">PLATE 1</span>
+          <span style="font:600 var(--text-xs) var(--font-sans);color:var(--text-secondary);">Body &amp; legs</span>
+        </div>
+      </div>
+      <!-- Plate 2: head & spikes -->
+      <div style="width:220px;">
+        <div style="position:relative;width:220px;height:200px;border-radius:var(--radius-md);background:rgba(107,88,168,.10);box-shadow:0 0 0 1px rgba(74,59,120,.18), 0 10px 30px rgba(74,59,120,.14);">
+          <div style="position:absolute;inset:0;border-radius:var(--radius-md);background:repeating-linear-gradient(0deg,rgba(74,59,120,.10) 0 1px,transparent 1px 26px),repeating-linear-gradient(90deg,rgba(74,59,120,.10) 0 1px,transparent 1px 26px);"></div>
+          <div style="left:56px;bottom:36px;width:108px;height:100px;border-radius:55%;{{shapeStyleD}}"></div>
+          <div style="position:absolute;left:120px;bottom:88px;width:16px;height:16px;border-radius:50%;background:rgba(0,0,0,.25);"></div>
+          <div style="left:40px;bottom:150px;width:24px;height:30px;clip-path:polygon(50% 0,0 100%,100% 100%);{{shapeStyleE}}"></div>
+          <div style="left:96px;bottom:150px;width:24px;height:34px;clip-path:polygon(50% 0,0 100%,100% 100%);{{shapeStyleE}}"></div>
+          <div style="left:150px;bottom:150px;width:24px;height:30px;clip-path:polygon(50% 0,0 100%,100% 100%);{{shapeStyleE}}"></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-top:10px;padding-left:4px;">
+          <span style="font:800 var(--text-xs) var(--font-mono);color:var(--text-tertiary);">PLATE 2</span>
+          <span style="font:600 var(--text-xs) var(--font-sans);color:var(--text-secondary);">Head &amp; spikes</span>
+        </div>
+      </div>
+    </div>
+    </sc-if>
+
+    <!-- ===== PLATE SELECTOR (top-center): collapsible button ===== -->
+    <div style="position:absolute;left:50%;top:24px;transform:translateX(-50%);width:230px;z-index:19;" onMouseLeave="{{closePlateMenu}}">
+      <div onClick="{{togglePlateMenu}}" style="display:flex;align-items:center;gap:10px;width:100%;box-sizing:border-box;cursor:pointer;background-color:rgba(255,255,255,0.12);background-image:linear-gradient(to bottom, rgba(255,255,255,0.30) 0%, rgba(255,255,255,0.04) 40%, rgba(255,255,255,0) 100%);backdrop-filter:blur(var(--blur-lg)) saturate(1.4);-webkit-backdrop-filter:blur(var(--blur-lg)) saturate(1.4);border:1px solid rgba(255,255,255,0.45);box-shadow:var(--shadow-md), inset 0 1px 0 rgba(255,255,255,0.6);border-radius:var(--radius-pill);padding:10px 16px;">
+        <i class="ph ph-squares-four" style="font-size:17px;color:var(--color-primary);"></i>
+        <div style="flex:1;"><div style="font:800 var(--text-sm) var(--font-sans);color:var(--text-primary);">{{plateLabel}}</div></div>
+        <i class="{{plateCaret}}" style="font-size:14px;color:var(--text-tertiary);"></i>
+      </div>
+      <sc-if value="{{plateMenuOpen}}" hint-placeholder-val="{{false}}">
+        <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px;box-sizing:border-box;background-color:rgba(255,255,255,0.12);background-image:linear-gradient(to bottom, rgba(255,255,255,0.30) 0%, rgba(255,255,255,0.04) 40%, rgba(255,255,255,0) 100%);backdrop-filter:blur(var(--blur-lg)) saturate(1.4);-webkit-backdrop-filter:blur(var(--blur-lg)) saturate(1.4);border:1px solid rgba(255,255,255,0.45);box-shadow:var(--shadow-md), inset 0 1px 0 rgba(255,255,255,0.6);border-radius:var(--radius-lg);padding:8px;">
+          <div onClick="{{setPlate0}}" style="{{plate0Style}}">
+            <i class="ph ph-stack" style="font-size:17px;color:var(--color-primary);"></i>
+            <div style="flex:1;"><div style="font:700 var(--text-sm) var(--font-sans);color:var(--text-primary);">All plates</div></div>
+            <span style="font:800 var(--text-xs) var(--font-mono);color:var(--text-tertiary);">5</span>
+          </div>
+          <div onClick="{{setPlate1}}" style="{{plate1Style}}">
+            <i class="ph ph-circles-three" style="font-size:17px;color:var(--color-primary);"></i>
+            <div style="flex:1;"><div style="font:700 var(--text-sm) var(--font-sans);color:var(--text-primary);">Body &amp; legs</div></div>
+            <span style="font:800 var(--text-xs) var(--font-mono);color:var(--text-tertiary);">3</span>
+          </div>
+          <div onClick="{{setPlate2}}" style="{{plate2Style}}">
+            <i class="ph ph-triangle" style="font-size:17px;color:var(--color-primary);"></i>
+            <div style="flex:1;"><div style="font:700 var(--text-sm) var(--font-sans);color:var(--text-primary);">Head &amp; spikes</div></div>
+            <span style="font:800 var(--text-xs) var(--font-mono);color:var(--text-tertiary);">2</span>
+          </div>
+        </div>
+      </sc-if>
+    </div>
+
+    <!-- RULER OVERLAY -->
+    <sc-if value="{{rulerOn}}" hint-placeholder-val="{{false}}">
+      <div style="position:absolute;left:50%;top:52%;transform:translate(-50%,-50%);width:420px;height:340px;pointer-events:none;">
+        <!-- width -->
+        <div style="position:absolute;left:60px;right:60px;bottom:36px;height:0;border-top:2px dashed rgba(159,135,224,.9);"></div>
+        <div style="position:absolute;left:50%;bottom:20px;transform:translateX(-50%);font:700 var(--text-xs) var(--font-mono);color:#fff;background:rgba(55,42,92,.7);padding:3px 8px;border-radius:var(--radius-pill);">W {{dimW}} {{unitLabel}}</div>
+        <!-- height -->
+        <div style="position:absolute;right:44px;top:70px;bottom:60px;width:0;border-left:2px dashed rgba(95,190,151,.95);"></div>
+        <div style="position:absolute;right:8px;top:50%;transform:translateY(-50%);font:700 var(--text-xs) var(--font-mono);color:#fff;background:rgba(55,42,92,.7);padding:3px 8px;border-radius:var(--radius-pill);">H {{dimH}} {{unitLabel}}</div>
+        <!-- length (depth) -->
+        <div style="position:absolute;left:70px;bottom:70px;width:78px;height:0;border-top:2px dashed rgba(242,168,104,.95);transform:rotate(-26deg);transform-origin:left;"></div>
+        <div style="position:absolute;left:52px;bottom:96px;font:700 var(--text-xs) var(--font-mono);color:#fff;background:rgba(55,42,92,.7);padding:3px 8px;border-radius:var(--radius-pill);">L {{dimL}} {{unitLabel}}</div>
+      </div>
+    </sc-if>
+
+    <!-- ===== DIMENSIONS LABEL (top-right, always visible) ===== -->
+    <div style="{{dimsChipStyle}}">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+        <i class="ph ph-cube" style="font-size:15px;color:var(--color-primary);"></i>
+        <span style="font:800 var(--text-xs) var(--font-sans);letter-spacing:var(--tracking-wide);text-transform:uppercase;color:var(--text-tertiary);">Dimensions</span>
+        <div style="flex:1;"></div>
+        <x-import component-from-global-scope="ManifestDesignSystem_86bf11.IconButton" variant="ghost" size="sm" label="Ruler — show measurements" onClick="{{toggleRuler}}" style="{{rulerBtnStyle}}" hint-size="32px,32px"><i class="ph ph-ruler"></i></x-import>
+      </div>
+      <div style="display:flex;gap:14px;align-items:flex-end;">
+        <div><div style="font:700 10px var(--font-sans);letter-spacing:var(--tracking-wide);text-transform:uppercase;color:var(--text-tertiary);margin-bottom:2px;">Width</div><div style="font:700 var(--text-sm) var(--font-mono);color:var(--text-primary);">{{dimW}}</div></div>
+        <div style="width:1px;align-self:stretch;background:var(--surface-glass-border-soft);"></div>
+        <div><div style="font:700 10px var(--font-sans);letter-spacing:var(--tracking-wide);text-transform:uppercase;color:var(--text-tertiary);margin-bottom:2px;">Length</div><div style="font:700 var(--text-sm) var(--font-mono);color:var(--text-primary);">{{dimL}}</div></div>
+        <div style="width:1px;align-self:stretch;background:var(--surface-glass-border-soft);"></div>
+        <div><div style="font:700 10px var(--font-sans);letter-spacing:var(--tracking-wide);text-transform:uppercase;color:var(--text-tertiary);margin-bottom:2px;">Height</div><div style="font:700 var(--text-sm) var(--font-mono);color:var(--text-primary);">{{dimH}}</div></div>
+        <div style="flex:1;"></div>
+        <div style="width:78px;flex:none;">
+          <x-import component-from-global-scope="ManifestDesignSystem_86bf11.Select" options="{{unitDimOptions}}" value="{{unit}}" onChange="{{onUnitChange}}" hint-size="78px,40px"></x-import>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== CENTER TOOLBAR (always revealed): undo / redo / version / zoom / fullscreen ===== -->
+    <div style="{{toolboxWrapStyle}}">
+        <div style="display:flex;align-items:center;gap:4px;background-color:rgba(255,255,255,0.12);background-image:linear-gradient(to bottom, rgba(255,255,255,0.30) 0%, rgba(255,255,255,0.04) 40%, rgba(255,255,255,0) 100%);backdrop-filter:blur(var(--blur-lg)) saturate(1.4);-webkit-backdrop-filter:blur(var(--blur-lg)) saturate(1.4);border:1px solid rgba(255,255,255,0.45);box-shadow:var(--shadow-md), inset 0 1px 0 rgba(255,255,255,0.6);border-radius:var(--radius-pill);padding:6px;">
+          <x-import component-from-global-scope="ManifestDesignSystem_86bf11.IconButton" variant="ghost" size="md" label="Undo" onClick="{{undo}}" hint-size="40px,40px"><i class="ph ph-arrow-counter-clockwise"></i></x-import>
+          <x-import component-from-global-scope="ManifestDesignSystem_86bf11.IconButton" variant="ghost" size="md" label="Redo" onClick="{{redo}}" hint-size="40px,40px"><i class="ph ph-arrow-clockwise"></i></x-import>
+          <div style="display:flex;align-items:center;gap:5px;background:var(--surface-card-tint);border-radius:var(--radius-pill);padding:8px 14px;">
+            <i class="ph ph-git-commit" style="font-size:14px;color:var(--text-tertiary);"></i>
+            <span style="font:800 var(--text-sm) var(--font-mono);color:var(--text-secondary);">{{versionLabel}}</span>
+          </div>
+          <div style="width:1px;height:26px;background:var(--surface-glass-border-soft);margin:0 4px;"></div>
+          <x-import component-from-global-scope="ManifestDesignSystem_86bf11.IconButton" variant="ghost" size="md" label="Zoom in" onClick="{{zoomIn}}" hint-size="40px,40px"><i class="ph ph-plus"></i></x-import>
+          <x-import component-from-global-scope="ManifestDesignSystem_86bf11.IconButton" variant="ghost" size="md" label="Zoom out" onClick="{{zoomOut}}" hint-size="40px,40px"><i class="ph ph-minus"></i></x-import>
+        </div>
+    </div>
+
+    <!-- ===== CHAT (bottom-left, 3 stages) ===== -->
+    <div style="{{chatOuterStyle}}" onMouseEnter="{{onChatEnter}}" onMouseLeave="{{onChatLeave}}">
+      <div style="{{chatExpandBtnStyle}}">
+        <sc-if value="{{chatCanDown}}" hint-placeholder-val="{{false}}">
+          <div onClick="{{chatStepDown}}" style="width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;"><i class="ph ph-caret-down" style="font-size:13px;line-height:1;display:block;"></i></div>
+        </sc-if>
+        <sc-if value="{{chatCanUp}}" hint-placeholder-val="{{true}}">
+          <div onClick="{{chatStepUp}}" style="width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;"><i class="ph ph-caret-up" style="font-size:13px;line-height:1;display:block;"></i></div>
+        </sc-if>
+      </div>
+      <div style="{{chatContainerStyle}}">
+      <sc-if value="{{chatExpanded}}" hint-placeholder-val="{{true}}">
+        <div style="display:flex;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid var(--surface-glass-border-soft);flex:none;">
+          <div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(155deg,var(--purple-300),var(--purple-500));flex:none;position:relative;">
+            <div style="position:absolute;left:11px;top:14px;width:5px;height:5px;border-radius:50%;background:var(--purple-900);"></div>
+            <div style="position:absolute;left:22px;top:14px;width:5px;height:5px;border-radius:50%;background:var(--purple-900);"></div>
+          </div>
+          <div style="flex:1;">
+            <div style="font:800 var(--text-base) var(--font-sans);color:var(--text-primary);">Manny</div>
+            <div style="font:600 var(--text-xs) var(--font-sans);color:var(--text-tertiary);">your buddy</div>
+          </div>
+          <div style="flex:1;"></div>
+          <x-import component-from-global-scope="ManifestDesignSystem_86bf11.IconButton" variant="ghost" size="sm" label="Collapse chat" onClick="{{chatDown}}" hint-size="32px,32px"></x-import>
+        </div>
+        <div style="flex:1;padding:20px;display:flex;flex-direction:column;overflow-y:auto;">
+          <sc-if value="{{chatFull}}" hint-placeholder-val="{{false}}">
+            <div style="text-align:center;font:600 var(--text-xs) var(--font-sans);color:var(--text-tertiary);margin-bottom:10px;">Today</div>
+            <x-import component-from-global-scope="ManifestDesignSystem_86bf11.MessageBubble" role="assistant" hint-size="100%,auto">Hi! What should we build today?</x-import>
+            <x-import component-from-global-scope="ManifestDesignSystem_86bf11.MessageBubble" role="user" hint-size="100%,auto">a friendly dinosaur!</x-import>
+            <x-import component-from-global-scope="ManifestDesignSystem_86bf11.MessageBubble" role="assistant" hint-size="100%,auto">Love it. Big and stompy, or small and cute?</x-import>
+            <x-import component-from-global-scope="ManifestDesignSystem_86bf11.MessageBubble" role="user" hint-size="100%,auto">small and cute please</x-import>
+          </sc-if>
+          <x-import component-from-global-scope="ManifestDesignSystem_86bf11.MessageBubble" role="assistant" hint-size="100%,auto">Here's a first draft — want it rounder or more detailed?</x-import>
+          <x-import component-from-global-scope="ManifestDesignSystem_86bf11.MessageBubble" role="user" hint-size="100%,auto">a bit rounder!</x-import>
+          <x-import component-from-global-scope="ManifestDesignSystem_86bf11.MessageBubble" role="assistant" hint-size="100%,auto">Done! Tap a suggestion or tell me more.</x-import>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:2px;">
+            <x-import component-from-global-scope="ManifestDesignSystem_86bf11.Button" variant="soft" size="sm" hint-size="auto,36px">Add spikes</x-import>
+            <x-import component-from-global-scope="ManifestDesignSystem_86bf11.Button" variant="soft" size="sm" hint-size="auto,36px">Longer tail</x-import>
+          </div>
+        </div>
+      </sc-if>
+
+      <div style="padding:12px 16px;display:flex;gap:8px;align-items:center;flex:none;{{chatInputBorderStyle}}">
+        <div style="flex:1;min-width:0;">
+          <x-import component-from-global-scope="ManifestDesignSystem_86bf11.Input" placeholder="Ask Manny..." hint-size="100%,44px"></x-import>
+        </div>
+        <x-import component-from-global-scope="ManifestDesignSystem_86bf11.IconButton" variant="ghost" size="md" label="Speak instead of typing" onClick="{{toggleMic}}" style="{{micBtnStyle}}" hint-size="40px,40px"><i class="ph ph-microphone"></i></x-import>
+        <x-import component-from-global-scope="ManifestDesignSystem_86bf11.IconButton" variant="soft" size="md" label="Send message" hint-size="40px,40px" style="{{sendBtnStyle}}"><i class="ph ph-paper-plane-right"></i></x-import>
+      </div>
+    </div>
+    </div>
+
+    <!-- ===== AXIS CUBE (orbit gizmo, right of chat) ===== -->
+    <div style="{{cubeWrapStyle}}" onPointerDown="{{startOrbit}}" title="Drag to orbit — click a face to snap">
+      <div style="{{cubeInnerStyle}}">
+        <div onClick="{{snapFront}}" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font:800 8px var(--font-mono);letter-spacing:.5px;color:var(--purple-800);background:linear-gradient(150deg, rgba(255,255,255,.62), rgba(159,135,224,.24));border:1px solid var(--surface-glass-border);box-shadow:inset 0 0 14px rgba(255,255,255,.4);border-radius:7px;backface-visibility:hidden;transform:translateZ(26px);">FRONT</div>
+        <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font:800 8px var(--font-mono);letter-spacing:.5px;color:var(--purple-700);background:linear-gradient(150deg, rgba(255,255,255,.5), rgba(159,135,224,.18));border:1px solid var(--surface-glass-border);box-shadow:inset 0 0 14px rgba(255,255,255,.35);border-radius:7px;backface-visibility:hidden;transform:rotateY(180deg) translateZ(26px);">BACK</div>
+        <div onClick="{{snapRight}}" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font:800 8px var(--font-mono);letter-spacing:.5px;color:var(--purple-800);background:linear-gradient(150deg, rgba(255,255,255,.52), rgba(95,190,151,.24));border:1px solid var(--surface-glass-border);box-shadow:inset 0 0 14px rgba(255,255,255,.35);border-radius:7px;backface-visibility:hidden;transform:rotateY(90deg) translateZ(26px);">RIGHT</div>
+        <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font:800 8px var(--font-mono);letter-spacing:.5px;color:var(--purple-700);background:linear-gradient(150deg, rgba(255,255,255,.46), rgba(95,190,151,.16));border:1px solid var(--surface-glass-border);box-shadow:inset 0 0 14px rgba(255,255,255,.3);border-radius:7px;backface-visibility:hidden;transform:rotateY(-90deg) translateZ(26px);">LEFT</div>
+        <div onClick="{{snapTop}}" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font:800 8px var(--font-mono);letter-spacing:.5px;color:var(--peach-700);background:linear-gradient(150deg, rgba(255,255,255,.66), rgba(242,168,104,.26));border:1px solid var(--surface-glass-border);box-shadow:inset 0 0 14px rgba(255,255,255,.45);border-radius:7px;backface-visibility:hidden;transform:rotateX(90deg) translateZ(26px);">TOP</div>
+        <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font:800 8px var(--font-mono);letter-spacing:.5px;color:var(--peach-700);background:linear-gradient(150deg, rgba(255,255,255,.44), rgba(242,168,104,.16));border:1px solid var(--surface-glass-border);box-shadow:inset 0 0 14px rgba(255,255,255,.28);border-radius:7px;backface-visibility:hidden;transform:rotateX(-90deg) translateZ(26px);">BASE</div>
+      </div>
+    </div>
+
+    <!-- viewport controls merged into center toolbar -->
+
+    <!-- ===== SETTINGS (bottom-right, 3 stages; expands upward) ===== -->
+    <div style="{{settingsOuterStyle}}" onMouseEnter="{{onSettingsEnter}}" onMouseLeave="{{onSettingsLeave}}">
+      <div style="{{settingsExpandBtnStyle}}">
+        <sc-if value="{{settingsCanDown}}" hint-placeholder-val="{{false}}">
+          <div onClick="{{settingsDown}}" style="width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;" style-hover="background:var(--surface-card-tint);"><i class="ph ph-caret-down" style="font-size:13px;line-height:1;display:block;"></i></div>
+        </sc-if>
+        <sc-if value="{{settingsCanUp}}" hint-placeholder-val="{{true}}">
+          <div onClick="{{settingsUp}}" style="width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;" style-hover="background:var(--surface-card-tint);"><i class="ph ph-caret-up" style="font-size:13px;line-height:1;display:block;"></i></div>
+        </sc-if>
+      </div>
+      <div style="{{settingsPanelStyle}}">
+      <sc-if value="{{settingsClosed}}" hint-placeholder-val="{{false}}">
+        <div onClick="{{settingsUp}}" style="display:flex;align-items:center;gap:10px;height:56px;padding:0 20px;cursor:pointer;flex:none;">
+          <i class="ph ph-sliders" style="font-size:20px;color:var(--color-primary);"></i>
+          <span style="font:800 var(--text-sm) var(--font-sans);color:var(--text-secondary);">Print settings</span>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{settingsPanelOpen}}" hint-placeholder-val="{{true}}">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:20px 20px 0;flex:none;">
+          <div style="font:800 var(--text-lg) var(--font-sans);color:var(--text-primary);">Print settings</div>
+        </div>
+
+        <div style="padding:18px 20px 0;flex:none;">
+          <x-import component-from-global-scope="ManifestDesignSystem_86bf11.Tabs" tabs="{{settingsTabs}}" active="{{settingsTab}}" onChange="{{onSettingsTabChange}}" hint-size="100%,44px"></x-import>
+        </div>
+
+        <div style="flex:1;overflow-y:auto;overflow-x:hidden;padding:20px;">
+          <!-- MATERIAL TAB: filament type + color -->
+          <sc-if value="{{tabMaterial}}" hint-placeholder-val="{{true}}">
+            <div style="font:700 var(--text-xs) var(--font-sans);letter-spacing:var(--tracking-wide);color:var(--text-tertiary);text-transform:uppercase;margin-bottom:12px;">Filament type</div>
+            <div style="margin-bottom:26px;">
+              <x-import component-from-global-scope="ManifestDesignSystem_86bf11.Select" options="{{filamentTypeOptions}}" value="{{filamentType}}" onChange="{{onFilamentTypeChange}}" hint-size="100%,48px"></x-import>
+            </div>
+            <div style="font:700 var(--text-xs) var(--font-sans);letter-spacing:var(--tracking-wide);color:var(--text-tertiary);text-transform:uppercase;margin-bottom:12px;">Color</div>
+            <div style="display:flex;gap:12px;margin-bottom:12px;">
+              <div onClick="{{setFilamentWhite}}" style="width:32px;height:32px;border-radius:50%;background:#F2F2F0;{{ringWhite}}cursor:pointer;"></div>
+              <div onClick="{{setFilamentBlack}}" style="width:32px;height:32px;border-radius:50%;background:#2B2B2E;{{ringBlack}}cursor:pointer;"></div>
+              <div onClick="{{setFilamentPurple}}" style="width:32px;height:32px;border-radius:50%;background:var(--purple-500);{{ringPurple}}cursor:pointer;"></div>
+              <div onClick="{{setFilamentOrange}}" style="width:32px;height:32px;border-radius:50%;background:var(--peach-500);{{ringOrange}}cursor:pointer;"></div>
+              <div onClick="{{setFilamentGray}}" style="width:32px;height:32px;border-radius:50%;background:var(--gray-400);{{ringGray}}cursor:pointer;"></div>
+            </div>
+            <div style="font:600 var(--text-sm) var(--font-sans);color:var(--text-secondary);">{{filamentName}} · {{filamentType}}</div>
+          </sc-if>
+
+          <!-- SIZE TAB: size + unit -->
+          <sc-if value="{{tabSize}}" hint-placeholder-val="{{false}}">
+            <div style="font:700 var(--text-xs) var(--font-sans);letter-spacing:var(--tracking-wide);color:var(--text-tertiary);text-transform:uppercase;margin-bottom:12px;">Size — {{scalePct}}%</div>
+            <input type="range" min="50" max="150" value="{{scalePct}}" onChange="{{onScaleChange}}" style="width:100%;margin-bottom:26px;">
+            <div style="font:700 var(--text-xs) var(--font-sans);letter-spacing:var(--tracking-wide);color:var(--text-tertiary);text-transform:uppercase;margin-bottom:12px;">Measurement unit</div>
+            <div style="margin-bottom:26px;">
+              <x-import component-from-global-scope="ManifestDesignSystem_86bf11.Select" options="{{unitOptions}}" value="{{unit}}" onChange="{{onUnitChange}}" hint-size="100%,48px"></x-import>
+            </div>
+            <div style="background:var(--surface-card-tint);border-radius:var(--radius-md);padding:16px;display:flex;justify-content:space-between;text-align:center;">
+              <div style="flex:1;"><div style="font:700 10px var(--font-sans);text-transform:uppercase;letter-spacing:var(--tracking-wide);color:var(--text-tertiary);margin-bottom:6px;">Width</div><div style="font:700 var(--text-sm) var(--font-mono);color:var(--text-primary);">{{dimW}}</div></div>
+              <div style="flex:1;"><div style="font:700 10px var(--font-sans);text-transform:uppercase;letter-spacing:var(--tracking-wide);color:var(--text-tertiary);margin-bottom:6px;">Length</div><div style="font:700 var(--text-sm) var(--font-mono);color:var(--text-primary);">{{dimL}}</div></div>
+              <div style="flex:1;"><div style="font:700 10px var(--font-sans);text-transform:uppercase;letter-spacing:var(--tracking-wide);color:var(--text-tertiary);margin-bottom:6px;">Height</div><div style="font:700 var(--text-sm) var(--font-mono);color:var(--text-primary);">{{dimH}}</div></div>
+            </div>
+          </sc-if>
+
+          <!-- QUALITY TAB: fill + smoothness + helpers -->
+          <sc-if value="{{tabQuality}}" hint-placeholder-val="{{false}}">
+            <div style="font:700 var(--text-xs) var(--font-sans);letter-spacing:var(--tracking-wide);color:var(--text-tertiary);text-transform:uppercase;margin-bottom:12px;">Fill — {{infill}}%</div>
+            <input type="range" min="0" max="100" value="{{infill}}" onChange="{{onInfillChange}}" style="width:100%;margin-bottom:26px;">
+            <div style="font:700 var(--text-xs) var(--font-sans);letter-spacing:var(--tracking-wide);color:var(--text-tertiary);text-transform:uppercase;margin-bottom:12px;">Smoothness</div>
+            <div style="margin-bottom:26px;">
+              <x-import component-from-global-scope="ManifestDesignSystem_86bf11.Tabs" tabs="{{layerTabs}}" active="{{layerHeightStr}}" onChange="{{onLayerTabChange}}" hint-size="100%,44px"></x-import>
+            </div>
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-radius:var(--radius-md);background:var(--surface-card-tint);">
+              <div style="font:700 var(--text-sm) var(--font-sans);color:var(--text-secondary);">Supports</div>
+              <x-import component-from-global-scope="ManifestDesignSystem_86bf11.Switch" checked="{{supportsOn}}" onChange="{{toggleSupports}}" hint-size="46px,26px"></x-import>
+            </div>
+          </sc-if>
+
+          <!-- STAGE 3 EXTRAS -->
+          <sc-if value="{{settingsFull}}" hint-placeholder-val="{{false}}">
+            <div style="height:1px;background:var(--surface-glass-border-soft);margin:26px 0;"></div>
+            <div style="font:700 var(--text-xs) var(--font-sans);letter-spacing:var(--tracking-wide);color:var(--text-tertiary);text-transform:uppercase;margin-bottom:12px;">Parts</div>
+            <div style="display:flex;flex-direction:column;gap:8px;">
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-radius:var(--radius-sm);background:var(--surface-card-tint);font:600 var(--text-sm) var(--font-sans);color:var(--text-secondary);"><span>Body</span><i class="ph ph-eye" style="color:var(--text-tertiary);"></i></div>
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-radius:var(--radius-sm);background:var(--surface-card-tint);font:600 var(--text-sm) var(--font-sans);color:var(--text-secondary);"><span>Head</span><i class="ph ph-eye" style="color:var(--text-tertiary);"></i></div>
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-radius:var(--radius-sm);background:var(--surface-card-tint);font:600 var(--text-sm) var(--font-sans);color:var(--text-secondary);"><span>Spikes</span><i class="ph ph-eye" style="color:var(--text-tertiary);"></i></div>
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-radius:var(--radius-sm);background:var(--surface-card-tint);font:600 var(--text-sm) var(--font-sans);color:var(--text-secondary);"><span>Legs</span><i class="ph ph-eye" style="color:var(--text-tertiary);"></i></div>
+            </div>
+          </sc-if>
+        </div>
+      </sc-if>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{
+  &quot;$preview&quot;: {&quot;width&quot;: 1400, &quot;height&quot;: 900},
+  &quot;filamentColor&quot;: {
+    &quot;editor&quot;: &quot;color&quot;,
+    &quot;default&quot;: &quot;#9F87E0&quot;,
+    &quot;options&quot;: [&quot;#F2F2F0&quot;, &quot;#2B2B2E&quot;, &quot;#9F87E0&quot;, &quot;#F2A868&quot;, &quot;#B9AFD1&quot;],
+    &quot;tsType&quot;: &quot;string&quot;,
+    &quot;section&quot;: &quot;Print&quot;
+  }
+}">
+class Component extends DCLogic {
+  state = {
+    chatStage: 2,        // 2 = mid (default), 3 = full
+    plate: 0,            // 0 = all parts, 1 = body group, 2 = head group
+    plateMenuOpen: false,
+    settingsStage: 1,    // 1 = half, 2 = full
+    settingsOpen: true,
+    micOn: false,
+    filament: null,
+    filamentType: 'PLA',
+    scalePct: 100,
+    infill: 15,
+    layerHeight: 0.2,
+    supportsOn: true,
+    unit: 'mm',
+    settingsTab: 'material',
+    version: 3,
+    toolboxOpen: false,
+    toolboxMode: 'bubble',
+    rulerOn: false,
+    moveMode: 'orbit',
+    viewZoom: 1,
+    orbitX: -18,
+    orbitY: -30,
+    dragging: false,
+    chatHovered: false,
+    settingsHovered: false,
+  };
+
+  PAD = 24;
+  CHAT_W = 320;
+  SET_W = 320;
+  MAX_VERSION = 6;
+
+  shade(hex) {
+    return `background-color:${hex};background-image:linear-gradient(180deg, rgba(255,255,255,.30), rgba(0,0,0,.18)), repeating-linear-gradient(0deg, rgba(0,0,0,.10) 0 1px, transparent 1px 4px);position:absolute;box-shadow:0 3px 0 rgba(0,0,0,.25);`;
+  }
+  ring(active) {
+    return active
+      ? 'box-shadow:0 0 0 2px #fff,0 0 0 4px var(--color-primary);'
+      : 'box-shadow:0 0 0 2px #fff,0 0 0 3px var(--border-default);';
+  }
+  glass(extra) {
+    return {
+      background: 'var(--surface-glass-strong)',
+      backdropFilter: 'blur(var(--blur-md))',
+      WebkitBackdropFilter: 'blur(var(--blur-md))',
+      border: '1px solid var(--surface-glass-border)',
+      boxShadow: 'var(--shadow-md)',
+      ...extra,
+    };
+  }
+  partDim(group, plate) {
+    if (plate === 0) return '';
+    const on = (plate === 1 && group === 'body') || (plate === 2 && group === 'head');
+    return on ? '' : 'opacity:0.14;';
+  }
+  plateChip(active) {
+    return {
+      display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left',
+      cursor: 'pointer', border: active ? '1px solid var(--color-primary)' : '1px solid var(--surface-glass-border)',
+      background: active ? 'var(--color-primary-soft)' : 'rgba(255,255,255,0.12)',
+      backdropFilter: 'blur(var(--blur-lg)) saturate(1.4)', WebkitBackdropFilter: 'blur(var(--blur-lg)) saturate(1.4)',
+      borderRadius: 'var(--radius-md)', padding: '9px 12px',
+      boxShadow: active ? 'var(--shadow-sm)' : 'none',
+      transition: 'background .2s ease, border-color .2s ease',
+    };
+  }
+  glassGloss(extra) {
+    return {
+      backgroundColor: 'rgba(255,255,255,0.12)',
+      backgroundImage: 'linear-gradient(to bottom, rgba(255,255,255,0.30) 0%, rgba(255,255,255,0.04) 40%, rgba(255,255,255,0) 100%)',
+      backdropFilter: 'blur(var(--blur-lg)) saturate(1.4)',
+      WebkitBackdropFilter: 'blur(var(--blur-lg)) saturate(1.4)',
+      border: '1px solid rgba(255,255,255,0.45)',
+      boxShadow: 'var(--shadow-md), inset 0 1px 0 rgba(255,255,255,0.6)',
+      ...extra,
+    };
+  }
+
+  clearToolTimer() { if (this._t) { clearTimeout(this._t); this._t = null; } }
+  componentWillUnmount() { this.clearToolTimer(); }
+
+  renderVals() {
+    const PAD = this.PAD, s = this.state;
+
+    // ---- dimensions (unit-aware) ----
+    const baseW = 142, baseL = 68, baseH = 96, f = s.scalePct / 100;
+    const conv = (mm) => {
+      const v = mm * f;
+      if (s.unit === 'cm') return (v / 10).toFixed(1);
+      if (s.unit === 'in') return (v / 25.4).toFixed(2);
+      return String(Math.round(v));
+    };
+    const dimW = conv(baseW), dimL = conv(baseL), dimH = conv(baseH);
+
+    const infill = s.infill;
+    const printHours = 2 + infill / 45;
+    const printTimeLabel = `${Math.floor(printHours)}h ${Math.round((printHours % 1) * 60)}m`;
+    const weightLabel = `${Math.round((28 + infill * 0.55) * f * f)}g`;
+
+    const filament = s.filament ?? this.props.filamentColor ?? '#9F87E0';
+    const filamentNames = { '#F2F2F0': 'White', '#2B2B2E': 'Black', '#9F87E0': 'Purple', '#F2A868': 'Orange', '#B9AFD1': 'Gray' };
+
+    // ---- chat ----
+    const cs = s.chatStage;
+    const chatHeight = cs === 1 ? '74px' : cs === 2 ? 'calc(50% - 12px)' : 'calc(100% - 48px)';
+    const chatOuterStyle = {
+      position: 'absolute', left: PAD, bottom: PAD, width: this.CHAT_W, height: chatHeight, zIndex: 16,
+      transition: 'height .34s var(--ease-out)',
+    };
+    const chatContainerStyle = this.glassGloss({
+      position: 'absolute', inset: 0, width: '100%', height: '100%',
+      borderRadius: cs === 1 ? 'var(--radius-pill)' : 'var(--radius-lg)',
+      display: 'flex', flexDirection: 'column', overflow: 'hidden',
+      transition: 'border-radius .3s var(--ease-standard)',
+    });
+
+    // ---- settings (bottom-right, 3 stages; always mounted so it expands smoothly) ----
+    const ss = s.settingsStage;
+    const setOpen = ss >= 2;
+    const setHeight = ss === 1 ? '56px' : 'calc(100% - 240px)';
+    const settingsOuterStyle = {
+      position: 'absolute', right: PAD - 24, bottom: PAD, width: this.SET_W + 48,
+      height: `calc(${setHeight} + 40px)`,
+      paddingTop: 40, paddingLeft: 24, paddingRight: 24, boxSizing: 'border-box', zIndex: 15,
+      transition: 'height .36s var(--ease-out)',
+    };
+    const settingsPanelStyle = this.glassGloss({
+      position: 'relative', width: '100%', height: '100%',
+      borderRadius: ss === 1 ? 'var(--radius-pill)' : 'var(--radius-lg)',
+      display: 'flex', flexDirection: 'column', overflow: 'hidden',
+      transition: 'border-radius .3s var(--ease-standard)',
+    });
+    const settingsExpandBtnStyle = this.glassGloss({
+      position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)',
+      display: 'flex', alignItems: 'center', gap: 2,
+      borderRadius: 'var(--radius-pill)', padding: '3px 4px',
+      color: 'var(--purple-800)',
+      opacity: s.settingsHovered ? 1 : 0,
+      pointerEvents: s.settingsHovered ? 'auto' : 'none',
+      transition: 'opacity .2s ease', zIndex: 5,
+    });
+
+    // ---- dimensions chip (pinned top-right, always static) ----
+    const dimsChipStyle = this.glassGloss({
+      position: 'absolute', right: PAD, top: PAD, width: this.SET_W,
+      borderRadius: 'var(--radius-lg)', padding: '16px 20px', zIndex: 20,
+    });
+    const unitPill = (active) => ({
+      display: 'inline-flex', alignItems: 'center', justifyContent: 'center', border: 'none',
+      cursor: 'pointer', padding: '5px 12px', borderRadius: 'var(--radius-pill)',
+      fontFamily: 'var(--font-sans)', fontSize: '11px', fontWeight: 800,
+      background: active ? 'var(--color-primary)' : 'transparent',
+      color: active ? '#fff' : 'var(--text-tertiary)',
+    });
+
+    // ---- toolbox ----
+    const onToolEnter = () => { this.clearToolTimer(); this.setState({ toolboxOpen: true }); };
+    const onToolLeave = () => {
+      if (s.toolboxMode === 'bubble') { this.clearToolTimer(); this._t = setTimeout(() => this.setState({ toolboxOpen: false }), 2200); }
+      else { this.setState({ toolboxOpen: false }); }
+    };
+    const onToolClick = () => {
+      this.clearToolTimer(); this.setState({ toolboxOpen: true });
+      this._t = setTimeout(() => this.setState({ toolboxOpen: false }), 2600);
+    };
+
+    const modePill = (active) => ({
+      display: 'inline-flex', alignItems: 'center', gap: 4, border: 'none', cursor: 'pointer',
+      padding: '5px 10px', borderRadius: 'var(--radius-pill)', fontFamily: 'var(--font-sans)',
+      fontSize: '11px', fontWeight: 700,
+      background: active ? 'var(--gray-0)' : 'transparent',
+      color: active ? 'var(--purple-800)' : 'var(--text-tertiary)',
+      boxShadow: active ? 'var(--shadow-sm)' : 'none',
+    });
+
+    return {
+      goToDark: () => { window.location.href = 'Manifest Interface Bubble Dark.dc.html'; },
+
+      // model — parts dim when not on the active print plate
+      shapeStyleA: this.shade(filament) + this.partDim('body', s.plate),
+      shapeStyleB: this.shade(filament) + this.partDim('body', s.plate),
+      shapeStyleC: this.shade(filament) + this.partDim('body', s.plate),
+      shapeStyleD: this.shade(filament) + this.partDim('head', s.plate),
+      shapeStyleE: this.shade(filament) + this.partDim('head', s.plate),
+      plate: s.plate,
+      plateMenuOpen: s.plateMenuOpen,
+      plateLabel: ['All plates', 'Body & legs', 'Head & spikes'][s.plate],
+      plateCaret: s.plateMenuOpen ? 'ph ph-caret-up' : 'ph ph-caret-down',
+      togglePlateMenu: () => this.setState(st => ({ plateMenuOpen: !st.plateMenuOpen })),
+      closePlateMenu: () => this.setState({ plateMenuOpen: false }),
+      plateAll: s.plate === 0,
+      plateSingle: s.plate !== 0,
+      plates: [
+        { label: 'All parts', icon: 'ph ph-stack', n: '5' },
+        { label: 'Body & legs', icon: 'ph ph-circles-three', n: '3' },
+        { label: 'Head & spikes', icon: 'ph ph-triangle', n: '2' },
+      ],
+      plate0Style: this.plateChip(s.plate === 0),
+      plate1Style: this.plateChip(s.plate === 1),
+      plate2Style: this.plateChip(s.plate === 2),
+      setPlate0: () => this.setState({ plate: 0, plateMenuOpen: false }),
+      setPlate1: () => this.setState({ plate: 1, plateMenuOpen: false }),
+      setPlate2: () => this.setState({ plate: 2, plateMenuOpen: false }),
+      modelScale: ((0.85 + f * 0.15) * s.viewZoom).toFixed(3),
+
+      // dims
+      dimW, dimL, dimH, unitLabel: s.unit, dimsChipStyle,
+
+      // ruler
+      rulerOn: s.rulerOn,
+      toggleRuler: () => this.setState(st => ({ rulerOn: !st.rulerOn })),
+      rulerBtnStyle: s.rulerOn ? { background: 'var(--color-primary-soft)', color: 'var(--purple-800)' } : {},
+
+      // toolbox
+      toolboxOpen: s.toolboxOpen,
+      showToolBubble: !s.toolboxOpen && s.toolboxMode === 'bubble',
+      showToolHint: !s.toolboxOpen && s.toolboxMode === 'proximity',
+      onToolEnter, onToolLeave, onToolClick,
+      versionLabel: 'v' + s.version,
+      undo: () => this.setState(st => ({ version: Math.max(1, st.version - 1) })),
+      redo: () => this.setState(st => ({ version: Math.min(this.MAX_VERSION, st.version + 1) })),
+      setBubbleMode: () => this.setState({ toolboxMode: 'bubble' }),
+      setProximityMode: () => this.setState({ toolboxMode: 'proximity', toolboxOpen: false }),
+      modeBubbleStyle: modePill(s.toolboxMode === 'bubble'),
+      modeProxStyle: modePill(s.toolboxMode === 'proximity'),
+
+      // chat
+      chatExpanded: cs >= 2,
+      chatIsBar: cs === 1,
+      chatFull: cs === 3,
+      chatContainerStyle,
+      chatOuterStyle,
+      onChatEnter: () => this.setState({ chatHovered: true }),
+      onChatLeave: () => this.setState({ chatHovered: false }),
+      chatExpandBtnStyle: this.glassGloss({
+        position: 'absolute', top: -16, left: '50%', transform: 'translateX(-50%)',
+        display: 'flex', alignItems: 'center', gap: 2,
+        borderRadius: 'var(--radius-pill)', padding: '3px 4px', cursor: 'default',
+        color: 'var(--purple-800)',
+        opacity: s.chatHovered ? 1 : 0,
+        pointerEvents: s.chatHovered ? 'auto' : 'none',
+        transition: 'opacity .2s ease', zIndex: 5,
+      }),
+      chatCanUp: cs < 3,
+      chatCanDown: cs > 2,
+      chatStepUp: () => this.setState(st => ({ chatStage: Math.min(3, st.chatStage + 1) })),
+      chatStepDown: () => this.setState(st => ({ chatStage: Math.max(2, st.chatStage - 1) })),
+      chatInputBorderStyle: 'border-top:1px solid var(--surface-glass-border-soft);',
+      chatUp: () => this.setState(st => ({ chatStage: Math.min(3, st.chatStage + 1) })),
+      chatDown: () => this.setState({ chatStage: 2 }),
+      chatUpStyle: cs === 3 ? { opacity: 0.35, pointerEvents: 'none' } : {},
+      toggleMic: () => this.setState(st => ({ micOn: !st.micOn })),
+      micBtnStyle: s.micOn
+        ? { flex: 'none', width: 40, height: 40, background: 'var(--color-error-soft)', color: 'var(--color-error-text)' }
+        : { flex: 'none', width: 40, height: 40, color: 'var(--text-secondary)' },
+      sendBtnStyle: { flex: 'none', width: 40, height: 40, background: 'var(--color-primary)', color: '#fff' },
+
+      // dims quick controls
+      unitDimOptions: [
+        { label: 'mm', value: 'mm' },
+        { label: 'cm', value: 'cm' },
+        { label: 'in', value: 'in' },
+      ],
+
+      // toolbox wrap (true bottom-center of the screen)
+      toolboxWrapStyle: {
+        position: 'absolute', bottom: 0, left: '50%', transform: 'translateX(-50%)',
+        height: 92, zIndex: 18,
+        display: 'flex', alignItems: 'flex-end', justifyContent: 'center', paddingBottom: PAD,
+      },
+
+      // move tool
+      // axis cube (orbit gizmo, right of chat)
+      cubeWrapStyle: this.glassGloss({
+        position: 'absolute', left: PAD + this.CHAT_W + 12, bottom: PAD,
+        width: 88, height: 88, borderRadius: 'var(--radius-lg)', zIndex: 16,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        perspective: '560px', cursor: s.dragging ? 'grabbing' : 'grab',
+      }),
+      cubeInnerStyle: {
+        width: 52, height: 52, position: 'relative', transformStyle: 'preserve-3d',
+        transform: `rotateX(${s.orbitX}deg) rotateY(${s.orbitY}deg)`,
+        transition: s.dragging ? 'none' : 'transform .4s var(--ease-out)',
+      },
+      startOrbit: (e) => {
+        const sx = e.clientX, sy = e.clientY, ox = this.state.orbitX, oy = this.state.orbitY;
+        this.setState({ dragging: true });
+        const move = (ev) => this.setState({
+          orbitX: Math.max(-80, Math.min(80, ox - (ev.clientY - sy) * 0.6)),
+          orbitY: oy + (ev.clientX - sx) * 0.6,
+        });
+        const upH = () => {
+          this.setState({ dragging: false });
+          window.removeEventListener('pointermove', move);
+          window.removeEventListener('pointerup', upH);
+        };
+        window.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', upH);
+      },
+      snapFront: () => this.setState({ orbitX: -8, orbitY: 0 }),
+      snapTop: () => this.setState({ orbitX: -78, orbitY: 0 }),
+      snapRight: () => this.setState({ orbitX: -8, orbitY: -82 }),
+      snapIso: () => this.setState({ orbitX: -18, orbitY: -30 }),
+
+      // viewport controls
+      zoomIn: () => this.setState(st => ({ viewZoom: Math.min(1.8, st.viewZoom * 1.12) })),
+      zoomOut: () => this.setState(st => ({ viewZoom: Math.max(0.6, st.viewZoom / 1.12) })),
+
+      // settings
+      settingsClosed: ss === 1,
+      settingsPanelOpen: ss >= 2,
+      settingsPanelStyle,
+      settingsOuterStyle,
+      settingsExpandBtnStyle,
+      onSettingsEnter: () => { if (this._st) { clearTimeout(this._st); this._st = null; } this.setState({ settingsHovered: true }); },
+      onSettingsLeave: () => { if (this._st) clearTimeout(this._st); this._st = setTimeout(() => this.setState({ settingsHovered: false }), 450); },
+      settingsCanUp: ss < 2,
+      settingsCanDown: ss > 1,
+      settingsFull: ss === 2,
+      settingsUp: () => this.setState({ settingsStage: 2 }),
+      settingsDown: () => this.setState({ settingsStage: 1 }),
+      settingsUpStyle: ss === 2 ? { opacity: 0.35, pointerEvents: 'none' } : {},
+      settingsTab: s.settingsTab,
+      settingsTabs: [
+        { label: 'Material', value: 'material' },
+        { label: 'Size', value: 'size' },
+        { label: 'Quality', value: 'quality' },
+      ],
+      onSettingsTabChange: (v) => this.setState({ settingsTab: v }),
+      tabMaterial: s.settingsTab === 'material',
+      tabSize: s.settingsTab === 'size',
+      tabQuality: s.settingsTab === 'quality',
+
+      // material
+      filamentType: s.filamentType,
+      filamentTypeOptions: [
+        { label: 'PLA — easy & eco', value: 'PLA' },
+        { label: 'PETG — tough', value: 'PETG' },
+        { label: 'TPU — bendy', value: 'TPU' },
+        { label: 'Silk — shiny', value: 'Silk' },
+      ],
+      onFilamentTypeChange: (e) => this.setState({ filamentType: e.target.value }),
+      filamentName: filamentNames[filament] ?? 'Custom',
+      setFilamentWhite: () => this.setState({ filament: '#F2F2F0' }),
+      setFilamentBlack: () => this.setState({ filament: '#2B2B2E' }),
+      setFilamentPurple: () => this.setState({ filament: '#9F87E0' }),
+      setFilamentOrange: () => this.setState({ filament: '#F2A868' }),
+      setFilamentGray: () => this.setState({ filament: '#B9AFD1' }),
+      ringWhite: this.ring(filament === '#F2F2F0'),
+      ringBlack: this.ring(filament === '#2B2B2E'),
+      ringPurple: this.ring(filament === '#9F87E0'),
+      ringOrange: this.ring(filament === '#F2A868'),
+      ringGray: this.ring(filament === '#B9AFD1'),
+
+      // size + unit
+      scalePct: s.scalePct,
+      onScaleChange: (e) => this.setState({ scalePct: parseInt(e.target.value, 10) }),
+      unit: s.unit,
+      unitOptions: [
+        { label: 'Millimeters (mm)', value: 'mm' },
+        { label: 'Centimeters (cm)', value: 'cm' },
+        { label: 'Inches (in)', value: 'in' },
+      ],
+      onUnitChange: (e) => this.setState({ unit: e.target.value }),
+
+      // quality
+      infill,
+      onInfillChange: (e) => this.setState({ infill: parseInt(e.target.value, 10) }),
+      layerHeightStr: String(s.layerHeight),
+      layerTabs: [
+        { label: 'Rough', value: '0.3' },
+        { label: 'Normal', value: '0.2' },
+        { label: 'Fine', value: '0.1' },
+      ],
+      onLayerTabChange: (v) => this.setState({ layerHeight: parseFloat(v) }),
+      supportsOn: s.supportsOn,
+      toggleSupports: () => this.setState(st => ({ supportsOn: !st.supportsOn })),
+
+      printTimeLabel, weightLabel,
+    };
+  }
+}
+</script>
+</body>
+</html>

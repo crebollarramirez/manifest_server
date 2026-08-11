@@ -1,0 +1,46 @@
+.wrap {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  height: 92px;
+  z-index: 18;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 24px;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: var(--radius-pill);
+  padding: 6px;
+}
+
+.versionPill {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--surface-card-tint);
+  border-radius: var(--radius-pill);
+  padding: 8px 14px;
+}
+
+.versionIcon { font-size: 14px; color: var(--text-tertiary); }
+
+.versionLabel {
+  font-family: var(--font-mono);
+  font-weight: var(--weight-display);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.divider {
+  width: 1px;
+  height: 26px;
+  background: var(--surface-glass-border-soft);
+  margin: 0 4px;
+}

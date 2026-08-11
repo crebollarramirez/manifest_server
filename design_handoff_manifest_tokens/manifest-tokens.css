@@ -3,37 +3,24 @@
    Direction: "Lavender Mist" — pastel purple + mint + peach, warm-neutral grays.
    Value-driven, dual-theme. Purple is an ACCENT, never the default surface.
 
-   SOURCE: adapted from ../../../design_handoff_manifest_tokens/manifest-tokens.css
-   Treat that folder as the design team's handoff of record; this file is the
-   integration copy the app actually imports. Deviations from the handoff are
-   marked inline with DEVIATION and summarized in ../../DESIGN_SYSTEM.md.
-
-   - Light theme  : :root (default) and the OS-preference media query
-   - Dark theme   : @media (prefers-color-scheme: dark), overridden by
-                    [data-theme="dark"] — ThemeProvider stamps data-theme on
-                    <html>, which always wins over the OS default in both
-                    directions.
+   Single self-contained token sheet. Drop into a codebase and consume via var(--*).
+   - Light theme  : :root
+   - Dark theme   : [data-theme="dark"]  (set data-theme="dark" on <html> or a root node)
    - Glass gloss  : .glass / .glass--gloss primitives (the signature surface)
 
-   All color pairings meet WCAG AA for body text in both themes (per handoff).
+   All color pairings meet WCAG AA for body text in both themes.
    ============================================================================= */
 
-/* DEVIATION: the handoff's @import for Nunito/JetBrains Mono from Google Fonts
-   is blocked by this app's CSP (style-src/font-src are 'self'-only — no CDN).
-   Resolved via Fontsource (see ./fonts.css, imported once from main.tsx) —
-   self-hosted, npm-packaged, no CDN, so the strict CSP needs no changes.
-   Swapping to real brand font files later only ever means editing
-   fonts.css — the family names below stay the single source of truth for
-   every component, and 'Nunito'/'JetBrains Mono' remain in the stacks as a
-   fallback if the variable-font package is ever removed without replacement. */
+/* ---- Fonts (Google Fonts substitution — swap for brand fonts if provided) ---- */
+@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
 
 /* =============================================================================
    1. THEME-INVARIANT TOKENS  (type, spacing, radius, motion, base color ramps)
    ============================================================================= */
 :root {
-  /* ---- Type families (registered by fonts.css's Fontsource imports) ---- */
-  --font-sans: 'Nunito Variable', 'Nunito', system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --font-mono: 'JetBrains Mono Variable', 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  /* ---- Type families ---- */
+  --font-sans: 'Nunito', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
 
   /* ---- Type scale (base 17px for all-ages legibility) ---- */
   --text-xs:   13px;
@@ -138,29 +125,42 @@
   --gray-600: #7C7196;
   --gray-800: #4A3B78;
   --gray-900: #2E2547;
+}
 
-  /* ---- Light semantic tokens: the default (also the base :root value,
-     so an unstyled root — before ThemeProvider mounts — still renders
-     correctly rather than flashing unstyled). ---- */
+/* =============================================================================
+   2. LIGHT THEME  (default)
+   ============================================================================= */
+:root,
+[data-theme="light"] {
   color-scheme: light;
+
+  /* Surfaces */
   --bg-page: linear-gradient(160deg, #EFE9FB 0%, #F7F3FD 50%, #EAF6F0 100%);
   --bg-page-flat: #F7F3FD;
   --surface-card: #FFFFFF;
   --surface-card-tint: var(--purple-50);
   --surface-sunken: var(--gray-100);
+
+  /* 3D preview / canvas field — off-white with a barely-there dotted grid */
   --canvas-bg: #EFEAF9;
   --canvas-glow: rgba(159, 135, 224, 0.20);
   --canvas-dot: rgba(107, 88, 168, 0.20);
+
+  /* Glass fills (see .glass primitives in section 4) */
   --surface-glass: rgba(255, 255, 255, 0.55);
   --surface-glass-strong: rgba(255, 255, 255, 0.75);
   --surface-glass-subtle: rgba(255, 255, 255, 0.35);
   --surface-glass-border: rgba(255, 255, 255, 0.60);
   --surface-glass-border-soft: rgba(78, 58, 130, 0.08);
+
+  /* Glossy-glass specular tokens (the "more see-through" workspace bubble look) */
   --glass-fill: rgba(255, 255, 255, 0.12);
-  --glass-shine: rgba(255, 255, 255, 0.30);
-  --glass-gloss: rgba(255, 255, 255, 0.04);
-  --glass-shine-edge: rgba(255, 255, 255, 0.60);
+  --glass-shine: rgba(255, 255, 255, 0.30);   /* top edge of the gloss gradient */
+  --glass-gloss: rgba(255, 255, 255, 0.04);   /* gloss falloff toward middle */
+  --glass-shine-edge: rgba(255, 255, 255, 0.60); /* inset top highlight */
   --glass-gloss-border: rgba(255, 255, 255, 0.45);
+
+  /* Text ramp */
   --text-primary: var(--purple-900);
   --text-secondary: var(--purple-800);
   --text-tertiary: var(--gray-600);
@@ -168,14 +168,19 @@
   --text-disabled: var(--gray-400);
   --text-link: var(--purple-700);
   --text-link-hover: var(--purple-800);
+
+  /* Actions */
   --color-primary: var(--purple-500);
   --color-primary-hover: var(--purple-600);
   --color-primary-active: var(--purple-700);
   --color-primary-soft: var(--purple-100);
+
   --color-secondary: var(--mint-500);
   --color-secondary-soft: var(--mint-100);
   --color-accent: var(--peach-500);
   --color-accent-soft: var(--peach-100);
+
+  /* Status */
   --color-success: var(--mint-500);
   --color-success-soft: var(--mint-100);
   --color-success-text: var(--mint-700);
@@ -188,10 +193,14 @@
   --color-info: var(--purple-500);
   --color-info-soft: var(--purple-100);
   --color-info-text: var(--purple-800);
+
+  /* Borders */
   --border-subtle: var(--gray-200);
   --border-default: var(--gray-300);
   --border-strong: var(--purple-400);
   --border-focus: var(--purple-500);
+
+  /* Shadows — soft, purple-tinted, never harsh black */
   --shadow-xs: 0 1px 2px rgba(74, 59, 120, 0.06);
   --shadow-sm: 0 2px 8px rgba(74, 59, 120, 0.08);
   --shadow-md: 0 8px 24px rgba(74, 59, 120, 0.12);
@@ -200,96 +209,40 @@
 }
 
 /* =============================================================================
-   2. DARK THEME — OS default, then explicit override
-   DEVIATION: the handoff only defined dark via [data-theme="dark"], which
-   means a first-time visitor with a dark OS would see the light theme flash
-   until JS ran. Token-level pattern per the studio's design guidance: the
-   media query supplies the OS-preference default, then [data-theme] always
-   wins in both directions so ThemeProvider's explicit toggle is authoritative.
+   3. DARK THEME  ([data-theme="dark"])
+   Same hue families, recomposed for dark glass. Ramp inverts so token-driven
+   components adapt automatically.
    ============================================================================= */
-@media (prefers-color-scheme: dark) {
-  :root {
-    color-scheme: dark;
-    --bg-page: linear-gradient(160deg, #211A38 0%, #2A2147 50%, #1D2A26 100%);
-    --bg-page-flat: #1D1730;
-    --surface-card: #241D3C;
-    --surface-card-tint: #2C2449;
-    --surface-sunken: #191430;
-    --canvas-bg: #0C0D12;
-    --canvas-glow: rgba(107, 88, 168, 0.22);
-    --canvas-dot: rgba(159, 135, 224, 0.16);
-    --surface-glass: rgba(74, 59, 120, 0.45);
-    --surface-glass-strong: rgba(74, 59, 120, 0.68);
-    --surface-glass-subtle: rgba(74, 59, 120, 0.30);
-    --surface-glass-border: rgba(255, 255, 255, 0.16);
-    --surface-glass-border-soft: rgba(255, 255, 255, 0.08);
-    --glass-fill: rgba(74, 59, 120, 0.30);
-    --glass-shine: rgba(255, 255, 255, 0.13);
-    --glass-gloss: rgba(255, 255, 255, 0.02);
-    --glass-shine-edge: rgba(255, 255, 255, 0.16);
-    --glass-gloss-border: rgba(255, 255, 255, 0.16);
-    --text-primary: #F4F1FB;
-    --text-secondary: #D8D0EA;
-    --text-tertiary: #AFA3CB;
-    --text-on-primary: #FFFFFF;
-    --text-disabled: #6B6088;
-    --text-link: var(--purple-300);
-    --text-link-hover: var(--purple-200);
-    --color-primary: var(--purple-500);
-    --color-primary-hover: var(--purple-400);
-    --color-primary-active: var(--purple-300);
-    --color-primary-soft: rgba(159, 135, 224, 0.22);
-    --color-secondary: var(--mint-500);
-    --color-secondary-soft: rgba(95, 190, 151, 0.18);
-    --color-accent: var(--peach-500);
-    --color-accent-soft: rgba(242, 168, 104, 0.18);
-    --color-success: var(--mint-500);
-    --color-success-soft: rgba(95, 190, 151, 0.18);
-    --color-success-text: var(--mint-300);
-    --color-warning: var(--peach-500);
-    --color-warning-soft: rgba(242, 168, 104, 0.18);
-    --color-warning-text: var(--peach-300);
-    --color-error: var(--coral-500);
-    --color-error-soft: rgba(219, 91, 118, 0.18);
-    --color-error-text: var(--coral-300);
-    --color-info: var(--purple-500);
-    --color-info-soft: rgba(159, 135, 224, 0.18);
-    --color-info-text: var(--purple-300);
-    --border-subtle: #362C54;
-    --border-default: #4A3D6E;
-    --border-strong: var(--purple-400);
-    --border-focus: var(--purple-400);
-    --gray-0: #332A54;
-    --gray-100: #1B1530;
-    --purple-800: #F0EAFC;
-    --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.30);
-    --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.35);
-    --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
-    --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.55);
-    --shadow-focus: 0 0 0 4px rgba(159, 135, 224, 0.45);
-  }
-}
-
 [data-theme="dark"] {
   color-scheme: dark;
+
+  /* Surfaces */
   --bg-page: linear-gradient(160deg, #211A38 0%, #2A2147 50%, #1D2A26 100%);
   --bg-page-flat: #1D1730;
   --surface-card: #241D3C;
   --surface-card-tint: #2C2449;
   --surface-sunken: #191430;
+
+  /* 3D preview / canvas field — near-black with a faint purple dotted grid */
   --canvas-bg: #0C0D12;
   --canvas-glow: rgba(107, 88, 168, 0.22);
   --canvas-dot: rgba(159, 135, 224, 0.16);
+
+  /* Glass fills */
   --surface-glass: rgba(74, 59, 120, 0.45);
   --surface-glass-strong: rgba(74, 59, 120, 0.68);
   --surface-glass-subtle: rgba(74, 59, 120, 0.30);
   --surface-glass-border: rgba(255, 255, 255, 0.16);
   --surface-glass-border-soft: rgba(255, 255, 255, 0.08);
-  --glass-fill: rgba(74, 59, 120, 0.30);
+
+  /* Glossy-glass specular tokens */
+  --glass-fill: var(--surface-glass-subtle);
   --glass-shine: rgba(255, 255, 255, 0.13);
   --glass-gloss: rgba(255, 255, 255, 0.02);
   --glass-shine-edge: rgba(255, 255, 255, 0.16);
-  --glass-gloss-border: rgba(255, 255, 255, 0.16);
+  --glass-gloss-border: var(--surface-glass-border);
+
+  /* Text ramp */
   --text-primary: #F4F1FB;
   --text-secondary: #D8D0EA;
   --text-tertiary: #AFA3CB;
@@ -297,14 +250,19 @@
   --text-disabled: #6B6088;
   --text-link: var(--purple-300);
   --text-link-hover: var(--purple-200);
+
+  /* Actions */
   --color-primary: var(--purple-500);
   --color-primary-hover: var(--purple-400);
   --color-primary-active: var(--purple-300);
   --color-primary-soft: rgba(159, 135, 224, 0.22);
+
   --color-secondary: var(--mint-500);
   --color-secondary-soft: rgba(95, 190, 151, 0.18);
   --color-accent: var(--peach-500);
   --color-accent-soft: rgba(242, 168, 104, 0.18);
+
+  /* Status */
   --color-success: var(--mint-500);
   --color-success-soft: rgba(95, 190, 151, 0.18);
   --color-success-text: var(--mint-300);
@@ -317,13 +275,19 @@
   --color-info: var(--purple-500);
   --color-info-soft: rgba(159, 135, 224, 0.18);
   --color-info-text: var(--purple-300);
+
+  /* Borders */
   --border-subtle: #362C54;
   --border-default: #4A3D6E;
   --border-strong: var(--purple-400);
   --border-focus: var(--purple-400);
-  --gray-0: #332A54;
+
+  /* Neutral inversions used by token-driven components */
+  --gray-0: #332A54;    /* raised field / selected-pill surface in dark */
   --gray-100: #1B1530;
-  --purple-800: #F0EAFC;
+  --purple-800: #F0EAFC; /* "ink on soft" flips light in dark */
+
+  /* Shadows — deeper on dark */
   --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.30);
   --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.35);
   --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
@@ -331,69 +295,10 @@
   --shadow-focus: 0 0 0 4px rgba(159, 135, 224, 0.45);
 }
 
-/* Explicit light override — wins even when the OS is dark. */
-[data-theme="light"] {
-  color-scheme: light;
-  --bg-page: linear-gradient(160deg, #EFE9FB 0%, #F7F3FD 50%, #EAF6F0 100%);
-  --bg-page-flat: #F7F3FD;
-  --surface-card: #FFFFFF;
-  --surface-card-tint: var(--purple-50);
-  --surface-sunken: var(--gray-100);
-  --canvas-bg: #EFEAF9;
-  --canvas-glow: rgba(159, 135, 224, 0.20);
-  --canvas-dot: rgba(107, 88, 168, 0.20);
-  --surface-glass: rgba(255, 255, 255, 0.55);
-  --surface-glass-strong: rgba(255, 255, 255, 0.75);
-  --surface-glass-subtle: rgba(255, 255, 255, 0.35);
-  --surface-glass-border: rgba(255, 255, 255, 0.60);
-  --surface-glass-border-soft: rgba(78, 58, 130, 0.08);
-  --glass-fill: rgba(255, 255, 255, 0.12);
-  --glass-shine: rgba(255, 255, 255, 0.30);
-  --glass-gloss: rgba(255, 255, 255, 0.04);
-  --glass-shine-edge: rgba(255, 255, 255, 0.60);
-  --glass-gloss-border: rgba(255, 255, 255, 0.45);
-  --text-primary: var(--purple-900);
-  --text-secondary: var(--purple-800);
-  --text-tertiary: var(--gray-600);
-  --text-on-primary: #FFFFFF;
-  --text-disabled: var(--gray-400);
-  --text-link: var(--purple-700);
-  --text-link-hover: var(--purple-800);
-  --color-primary: var(--purple-500);
-  --color-primary-hover: var(--purple-600);
-  --color-primary-active: var(--purple-700);
-  --color-primary-soft: var(--purple-100);
-  --color-secondary: var(--mint-500);
-  --color-secondary-soft: var(--mint-100);
-  --color-accent: var(--peach-500);
-  --color-accent-soft: var(--peach-100);
-  --color-success: var(--mint-500);
-  --color-success-soft: var(--mint-100);
-  --color-success-text: var(--mint-700);
-  --color-warning: var(--peach-500);
-  --color-warning-soft: var(--peach-100);
-  --color-warning-text: var(--peach-700);
-  --color-error: var(--coral-500);
-  --color-error-soft: var(--coral-100);
-  --color-error-text: var(--coral-700);
-  --color-info: var(--purple-500);
-  --color-info-soft: var(--purple-100);
-  --color-info-text: var(--purple-800);
-  --border-subtle: var(--gray-200);
-  --border-default: var(--gray-300);
-  --border-strong: var(--purple-400);
-  --border-focus: var(--purple-500);
-  --shadow-xs: 0 1px 2px rgba(74, 59, 120, 0.06);
-  --shadow-sm: 0 2px 8px rgba(74, 59, 120, 0.08);
-  --shadow-md: 0 8px 24px rgba(74, 59, 120, 0.12);
-  --shadow-lg: 0 16px 48px rgba(74, 59, 120, 0.16);
-  --shadow-focus: 0 0 0 4px rgba(159, 135, 224, 0.35);
-}
-
 /* =============================================================================
-   3. PRIMITIVES  (base reset + the signature glass surfaces)
+   4. PRIMITIVES  (base reset + the signature glass surfaces)
    ============================================================================= */
-*, *::before, *::after { box-sizing: border-box; }
+* { box-sizing: border-box; }
 
 body {
   margin: 0;
@@ -424,7 +329,7 @@ a:hover { color: var(--text-link-hover); text-decoration: underline; }
 
 /* Glossy see-through glass — the workspace-bubble treatment (chat, settings,
    toolbars, plate menu). Stronger blur + saturation, a specular top edge, and
-   an inset highlight. */
+   an inset highlight. This is what "more transparent, glossy glass" refers to. */
 .glass--gloss {
   background-color: var(--glass-fill);
   background-image: linear-gradient(
@@ -440,26 +345,10 @@ a:hover { color: var(--text-link-hover); text-decoration: underline; }
   box-shadow: var(--shadow-md), inset 0 1px 0 var(--glass-shine-edge);
 }
 
+/* Navbar pill glass */
 .glass-pill { border-radius: var(--radius-pill); }
 
-/* Full-width glass bar (top nav) — the identical gloss formula as
-   .glass--gloss, flattened to a border-bottom strip instead of a floating
-   panel border. Verified against the reference screens' top-bar treatment
-   (design_handoff_manifest_tokens/reference-screens/): its inline
-   rgba(255,255,255,.12)/.30/.04/.60 values are exactly --glass-fill/
-   -shine/-gloss/-shine-edge below, so this reuses those tokens rather than
-   redeclaring the gradient. */
-.glass-bar {
-  background-color: var(--glass-fill);
-  background-image: linear-gradient(to bottom, var(--glass-shine) 0%, var(--glass-gloss) 40%, transparent 100%);
-  border-bottom: 1px solid var(--surface-glass-border-soft);
-  box-shadow: inset 0 1px 0 var(--glass-shine-edge);
-  backdrop-filter: blur(var(--blur-lg)) saturate(1.4);
-  -webkit-backdrop-filter: blur(var(--blur-lg)) saturate(1.4);
-}
-
-/* 3D preview / build-plate canvas field — now wired to the R3F viewer's
-   PreviewLayer (see viewer/PreviewLayer.tsx). */
+/* 3D preview / build-plate canvas field */
 .canvas-field {
   background-color: var(--canvas-bg);
   background-image:

@@ -1,0 +1,43 @@
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  color: var(--text-secondary);
+  background: transparent;
+  transition:
+    background-color var(--duration-base) var(--ease-standard),
+    color var(--duration-base) var(--ease-standard),
+    transform var(--duration-fast) var(--ease-out);
+}
+.button:active:not(:disabled) { transform: scale(0.94); }
+.button:disabled { cursor: not-allowed; opacity: 0.4; }
+
+.sm { width: 32px; height: 32px; font-size: 15px; }
+.md { width: 40px; height: 40px; font-size: 18px; }
+
+/* Default state. Toggled-on state is a variant choice made by the caller
+   (e.g. ruler-on -> "soft", mic-on -> "danger-soft") since the mockup uses
+   different tones for different toggles, not one universal "active" look. */
+.ghost:hover:not(:disabled) {
+  background: var(--surface-card-tint);
+  color: var(--text-primary);
+}
+
+.soft {
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+}
+.soft:hover:not(:disabled) { background: var(--purple-200); }
+
+.dangerSoft {
+  background: var(--color-error-soft);
+  color: var(--color-error-text);
+}
+.dangerSoft:hover:not(:disabled) { filter: brightness(0.96); }
+
+.primary { background: var(--color-primary); color: var(--text-on-primary); }
+.primary:hover:not(:disabled) { background: var(--color-primary-hover); }

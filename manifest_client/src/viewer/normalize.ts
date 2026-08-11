@@ -46,3 +46,19 @@ export function formatDimensions(size: [number, number, number]): string {
     value >= 100 ? value.toFixed(0) : value.toFixed(1);
   return `${fmt(size[0])} × ${fmt(size[1])} × ${fmt(size[2])} mm`;
 }
+
+/** Source geometry is mm by repo convention (CadQuery/Blender both export mm). */
+export type DimensionUnit = "mm" | "cm" | "in";
+
+export const DIMENSION_UNIT_OPTIONS: { label: string; value: DimensionUnit }[] = [
+  { label: "mm", value: "mm" },
+  { label: "cm", value: "cm" },
+  { label: "in", value: "in" },
+];
+
+/** Converts a millimeter length for display in the given unit. */
+export function convertLength(mm: number, unit: DimensionUnit): string {
+  if (unit === "cm") return (mm / 10).toFixed(1);
+  if (unit === "in") return (mm / 25.4).toFixed(2);
+  return String(Math.round(mm));
+}

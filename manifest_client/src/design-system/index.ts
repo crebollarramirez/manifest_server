@@ -17,3 +17,18 @@ export type { CardProps } from "./Card";
 
 export { Badge, statusToBadgeVariant } from "./Badge";
 export type { BadgeProps, BadgeVariant } from "./Badge";
+
+export { IconButton } from "./IconButton";
+export type { IconButtonProps, IconButtonVariant, IconButtonSize } from "./IconButton";
+
+export { Select } from "./Select";
+export type { SelectProps, SelectOption } from "./Select";
+
+export { Switch } from "./Switch";
+export type { SwitchProps } from "./Switch";
+
+export { Slider } from "./Slider";
+export type { SliderProps } from "./Slider";
+
+export { Tabs } from "./Tabs";
+export type { TabsProps, TabOption } from "./Tabs";

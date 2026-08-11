@@ -1,0 +1,70 @@
+.bar {
+  height: 72px;
+  flex: none;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  z-index: 30;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.logo {
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius-md);
+  background: linear-gradient(155deg, var(--purple-300), var(--purple-500));
+  box-shadow: var(--shadow-sm);
+  flex: none;
+}
+
+.wordmark {
+  font-family: var(--font-sans);
+  font-weight: var(--weight-display);
+  font-size: var(--text-xl);
+  color: var(--text-primary);
+  letter-spacing: var(--tracking-tight);
+}
+
+.projectPill {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  font-family: var(--font-sans);
+  font-weight: var(--weight-bold);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  background: var(--surface-glass);
+  border: 1px solid var(--surface-glass-border-soft);
+  padding: 8px 16px;
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: linear-gradient(155deg, var(--purple-300), var(--purple-500));
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  flex: none;
+  color: #fff;
+  font-size: 22px;
+}

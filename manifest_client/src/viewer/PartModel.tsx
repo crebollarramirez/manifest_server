@@ -3,8 +3,10 @@ import { useFrame, useThree } from "@react-three/fiber";
 import {
   BufferAttribute,
   BufferGeometry,
+  Color,
   type MeshStandardMaterial,
 } from "three";
+import { attachBoundsTree, detachBoundsTree } from "./bvh";
 import { Crossfade } from "./gpu/crossfade";
 import {
   applyInteractionState,
@@ -29,6 +31,8 @@ type Layer = {
   decoded: DecodedGeometry;
   geometry: BufferGeometry;
   material: MeshStandardMaterial;
+  /** Captured at construction so a colorPreview override can be reverted exactly. */
+  baseColor: Color;
 };
 
 let nextLayerKey = 1;
@@ -38,14 +42,19 @@ function buildLayer(partId: string, decoded: DecodedGeometry): Layer {
   geometry.setAttribute("position", new BufferAttribute(decoded.positions, 3));
   geometry.setAttribute("normal", new BufferAttribute(decoded.normals, 3));
   if (decoded.indices) geometry.setIndex(new BufferAttribute(decoded.indices, 1));
+  // One-time cost, paid once per part at construction (not per hover/frame):
+  // builds a BVH so pointer raycasting against large meshes doesn't brute-
+  // force every triangle. See bvh.ts for why this exists.
+  attachBoundsTree(geometry, decoded.triangleCount);
   // Material system lives in materials/useMaterial.ts: palette for STL,
   // authored GLB factors passed through untouched.
   const material = createPartMaterial(partId, decoded);
   nextLayerKey += 1;
-  return { key: nextLayerKey, decoded, geometry, material };
+  return { key: nextLayerKey, decoded, geometry, material, baseColor: material.color.clone() };
 }
 
 function disposeLayer(layer: Layer): void {
+  detachBoundsTree(layer.geometry);
   layer.geometry.dispose();
   layer.material.dispose();
 }
@@ -55,11 +64,16 @@ export function PartModel({
   decoded,
   hovered,
   selected,
+  scaleOverride,
+  colorOverride,
 }: {
   partId: string;
   decoded: DecodedGeometry;
   hovered: boolean;
   selected: boolean;
+  /** Live preview overrides from SettingsPanel — visual-only, no backend effect. */
+  scaleOverride?: number;
+  colorOverride?: string | null;
 }) {
   const invalidate = useThree((state) => state.invalidate);
   const fade = useRef(new Crossfade()).current;
@@ -99,6 +113,20 @@ export function PartModel({
     if (changed) invalidate();
   }, [hovered, selected, layers, invalidate]);
 
+  // Filament color preview (Settings > Material): tints the mesh directly,
+  // never claims to change an actual print material. Reverts to each
+  // layer's captured baseColor when cleared, so authored GLB colors and the
+  // palette are never permanently lost.
+  useEffect(() => {
+    const { current, previous } = layersRef.current;
+    for (const layer of [current, previous]) {
+      if (!layer) continue;
+      if (colorOverride) layer.material.color.set(colorOverride);
+      else layer.material.color.copy(layer.baseColor);
+    }
+    invalidate();
+  }, [colorOverride, layers, invalidate]);
+
   // Dispose everything on unmount.
   useEffect(() => {
     return () => {
@@ -129,20 +157,21 @@ export function PartModel({
       {[layers.previous, layers.current].map((layer) => {
         if (!layer) return null;
         const transform = plateTransform(layer.decoded.bounds);
+        const scale = transform.scale * (scaleOverride ?? 1);
         return (
           <group
             key={layer.key}
-            position={[0, transform.seatHeight, 0]}
+            position={[0, transform.seatHeight * (scaleOverride ?? 1), 0]}
             rotation={[-Math.PI / 2, 0, 0]}
           >
             <mesh
               geometry={layer.geometry}
               material={layer.material}
-              scale={transform.scale}
+              scale={scale}
               position={[
-                -transform.center[0] * transform.scale,
-                -transform.center[1] * transform.scale,
-                -transform.center[2] * transform.scale,
+                -transform.center[0] * scale,
+                -transform.center[1] * scale,
+                -transform.center[2] * scale,
               ]}
             />
           </group>

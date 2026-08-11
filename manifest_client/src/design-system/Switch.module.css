@@ -1,0 +1,31 @@
+.track {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  width: 46px;
+  height: 26px;
+  border-radius: var(--radius-pill);
+  border: none;
+  background: var(--border-default);
+  cursor: pointer;
+  padding: 3px;
+  transition: background-color var(--duration-base) var(--ease-standard);
+}
+.track:checked { background: var(--color-primary); }
+.track:disabled { cursor: not-allowed; opacity: 0.5; }
+.track:focus-visible { outline: none; box-shadow: var(--shadow-focus); }
+
+.track::before {
+  content: "";
+  display: block;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--gray-0);
+  box-shadow: var(--shadow-sm);
+  transform: translateX(0);
+  transition: transform var(--duration-base) var(--ease-standard);
+}
+.track:checked::before { transform: translateX(20px); }

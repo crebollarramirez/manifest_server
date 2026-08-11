@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatDimensions, plateTransform, PLATE_FIT_UNITS } from "./normalize";
+import { convertLength, formatDimensions, plateTransform, PLATE_FIT_UNITS } from "./normalize";
 
 describe("plateTransform", () => {
   it("scales the longest axis to the plate fit and recenters", () => {
@@ -30,5 +30,25 @@ describe("formatDimensions", () => {
   it("shows one decimal under 100mm, none above", () => {
     expect(formatDimensions([60, 48.25, 66])).toBe("60.0 × 48.3 × 66.0 mm");
     expect(formatDimensions([300, 4.9, 120])).toBe("300 × 4.9 × 120 mm");
+  });
+});
+
+describe("convertLength", () => {
+  it("rounds to whole millimeters", () => {
+    expect(convertLength(142.6, "mm")).toBe("143");
+  });
+
+  it("converts to centimeters with one decimal", () => {
+    expect(convertLength(142, "cm")).toBe("14.2");
+  });
+
+  it("converts to inches with two decimals", () => {
+    expect(convertLength(25.4, "in")).toBe("1.00");
+  });
+
+  it("handles zero", () => {
+    expect(convertLength(0, "mm")).toBe("0");
+    expect(convertLength(0, "cm")).toBe("0.0");
+    expect(convertLength(0, "in")).toBe("0.00");
   });
 });

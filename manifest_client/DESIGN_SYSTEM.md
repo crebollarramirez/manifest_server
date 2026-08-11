@@ -10,8 +10,20 @@ src/design-system/
   fonts.css        # single source for font loading (Fontsource, self-hosted)
   tailwind.css     # Tailwind v4 @theme wiring over tokens.css
   ThemeProvider.tsx / useTheme()
-  Button.tsx / GlassPanel.tsx / Card.tsx / Badge.tsx  (+ .module.css + .test.tsx each)
+  Button.tsx / IconButton.tsx / GlassPanel.tsx / Card.tsx / Badge.tsx
+  Select.tsx / Switch.tsx / Slider.tsx / Tabs.tsx      (+ .module.css + .test.tsx each)
   index.ts         # the only import path — see "Scalability" below
+
+src/shell/          # the main interface — replicates
+                     # design_handoff_manifest_tokens/reference-screens/
+  AppShell.tsx       # composition + shared state (focus, unit, camera, settings)
+  TopBar.tsx / PlateSelector.tsx / DimensionsChip.tsx / CenterToolbar.tsx
+  ChatPanel.tsx / AxisCube.tsx / SettingsPanel.tsx / RulerOverlay.tsx
+
+src/viewer/
+  PreviewLayer.tsx   # the R3F canvas — canvas-field backdrop, focused/all-parts mode
+  cameraApi.ts       # imperative camera control shared between DOM chrome and OrbitControls
+  useProjectData.ts  # single real data source (parts + geometry), shared by 3D + chrome
 ```
 
 ## Deviations from the handoff, and why
@@ -45,15 +57,22 @@ Everything else (ramps, surfaces, borders, type scale, radius, shadow, motion) k
 - **Status colors, not hardcoded per-caller logic.** `statusToBadgeVariant()` centralizes the `JobStatus -> BadgeVariant` mapping (typed against the real Zod enum in `schemas.ts`, not a re-declared union) so Phase 4's job-status UI — and anything else that ever shows a status — never re-derives it.
 - **The naming-collision class of bug is now a test, not a surprise.** `tailwind-theme.test.ts` asserts the renamed keys stay renamed and that no future `@theme` key silently collides with a tokens.css name of different intent — catches the exact bug found while building this at review time, not at runtime.
 
-## Component inventory (Phase 0 pass)
+## Component inventory
 
-`Button` (primary/secondary/ghost/danger, sm/md), `GlassPanel` (default/strong/subtle/gloss — floating UI only, per the handoff: "blur is for floating surfaces only"), `Card` (solid surface, dense/long-form content), `Badge` (neutral/info/success/warning/error + `statusToBadgeVariant`), `ThemeProvider`/`useTheme` (system/light/dark, persisted, OS-reactive).
+Primitives: `Button`, `IconButton`, `GlassPanel` (default/strong/subtle/gloss — floating UI only, per the handoff: "blur is for floating surfaces only"), `Card` (solid surface, dense/long-form content), `Badge` (+ `statusToBadgeVariant`), `Select`, `Switch`, `Slider`, `Tabs`, `ThemeProvider`/`useTheme` (system/light/dark, persisted, OS-reactive).
 
-**Not yet built** — left for the phase that actually needs them: chat message/bubble, text input, project/part list item, toast/inline banner (Phase 4–7 territory).
+Shell (the main interface, replicating `design_handoff_manifest_tokens/reference-screens/`): `TopBar`, `PlateSelector`, `DimensionsChip`, `CenterToolbar`, `ChatPanel`, `AxisCube`, `SettingsPanel`, `RulerOverlay`, composed in `AppShell`.
 
-## Scope boundary
+## The main interface — decisions made replicating the reference screens
 
-The R3F viewer (`ProjectView`, `PartPlate`, etc.) is **not** reskinned to the token system yet — it keeps its existing dark, techy background. `tokens.css` ships a `.canvas-field` primitive intended for exactly this (a soft dotted-grid backdrop for the 3D stage), but wiring it in is a deliberate follow-up, not part of this pass. `tokens.css`/`fonts.css` are imported globally now so nothing blocks that work later, but no visual change was made to the viewer itself.
+The reference screens (`design_handoff_manifest_tokens/reference-screens/*.dc.html`) are a richer, fictional demo (a print-ordering flow, a "friendly dinosaur" model split into named part groups). Four decisions on how to ground that in what this app actually has:
+
+- **No fabricated part grouping.** The mockup's "Body & legs" / "Head & spikes" plates don't correspond to anything in the data model — every `Part` today is independent, with no group or placement data. `PlateSelector` instead lists real parts one-for-one; "All parts" shows the full grid (`PlateGrid`), selecting one focuses just its plate. The mockup's single-"assembled" toggle is deliberately absent — it would need real multi-part placement data this app doesn't have yet (the open question from the earlier assembly-architecture discussion).
+- **Print settings are visual, not fake.** Filament type, infill, layer height, and supports are local UI state only — there is no print-ordering concept anywhere in `cad-agent`. The **Order** button in `TopBar` renders permanently disabled with a "coming soon" title rather than implying it queues anything.
+- **Two exceptions that are genuinely functional, not fake:** the Material tab's color swatches live-tint the focused part's actual mesh, and the Size tab's scale slider live-scales it — both flow through `AppShell`'s `scalePreview`/`colorPreview` state into `PreviewLayer` → `PartModel`. Real visual effect, explicitly a preview, no claim about an actual print material or size.
+- **"Manny" (name, avatar, "your buddy" tagline) kept exactly** — the only piece of the mockup's content, rather than structure, carried over as-is. Chat *messages* themselves are real (`ChatPanel` calls the fixture client's `chat()`/`getEditJob()`/`getExportJob()` — sending a message really submits an edit and, once it completes, calls `useProjectData`'s `refreshPart` to pull in the new geometry), not the mockup's scripted dinosaur copy.
+
+Also genuinely wired, not decorative: `CenterToolbar`'s zoom (`cameraApi.ts`, real `OrbitControls` distance), `AxisCube`'s click-to-snap and drag-to-orbit (same camera API — pure CSS 3D transforms for the cube itself, not WebGL), `TopBar`'s theme toggle (`ThemeProvider`) and Export button (`client.exportPart()`), `DimensionsChip`/`RulerOverlay`'s numbers (the focused part's real decoded bounds). `CenterToolbar`'s undo/redo/version are the one place restraint went the other way: rendered, but honestly disabled — there's no edit-history stack to back them, so they don't pretend to work.
 
 ## Open item for the design team
 
