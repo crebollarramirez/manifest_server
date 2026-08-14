@@ -10,6 +10,22 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 LOGGER = logging.getLogger(__name__)
 
 
+# Read-only lookups. Their results depend only on their arguments and on the
+# persisted semantic index, which does not change while a job runs.
+BATCH_GROUP_READ = "read"
+
+# ModelParams field creation. Safe together because each call re-reads the
+# candidate before splicing its own field, so calls apply cleanly in the order
+# they were issued, and because distinct field names cannot conflict.
+BATCH_GROUP_PARAMETER_CREATE = "parameter_create"
+
+# Closed on purpose. Which tools may share a round is a global batching policy
+# decision, not something an individual tool gets to invent -- and a closed set
+# turns a typo'd group name into a registration error rather than a tool that
+# silently never batches with anything.
+BATCH_GROUPS = frozenset({BATCH_GROUP_READ, BATCH_GROUP_PARAMETER_CREATE})
+
+
 class StrictToolModel(BaseModel):
     """Immutable base schema for every value accepted or returned by a tool.
 
@@ -190,6 +206,33 @@ class ToolInputRejected(Exception):
         self.details = details
 
 
+class ToolExecutionRejected(Exception):
+    """Signals an expected execution outcome that is not a success.
+
+    The counterpart of :class:`ToolInputRejected` for the execute stage. An
+    unexpected exception out of ``execute`` has its message sanitized before
+    it reaches the model, which is right for a bug and wrong for a reportable
+    outcome -- so a tool that ran correctly but could not produce the result
+    it exists to produce raises this instead, and its ``code`` and message
+    are what the agent sees.
+    """
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        details: dict[str, Any] | None = None,
+    ):
+        """Create a reportable execution failure with an agent-facing code."""
+
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+        self.details = details
+
+
 def _validation_details(error: ValidationError) -> dict[str, Any]:
     """Convert a Pydantic validation error into a stable, agent-safe payload.
 
@@ -249,8 +292,17 @@ class AgentTool(ABC, Generic[InputT, OutputT]):
     description: ClassVar[str]
     input_model: ClassVar[type[InputT]]
     output_model: ClassVar[type[OutputT]]
-    batchable: ClassVar[bool]
-    parallel_safe: ClassVar[bool]
+    # Which multi-call batch this tool may join, or None when it must be the
+    # only call in its round.
+    #
+    # A batch is dispatched strictly sequentially, never concurrently, so a
+    # group claims exactly two things: the model can decide every call in it
+    # without seeing any of their results, and a call cannot be invalidated
+    # by another call of the same group running immediately before it. It is
+    # a permission for these *tools* to share a round -- it does not assert
+    # that any particular set of arguments is independent, which is the
+    # reasoning policy's job.
+    batch_group: ClassVar[str | None]
 
     @final
     async def run(
@@ -312,6 +364,13 @@ class AgentTool(ABC, Generic[InputT, OutputT]):
 
         try:
             raw_output = await self.execute(normalized_input, context)
+        except ToolExecutionRejected as exc:
+            return tool_failure(
+                exc.code,
+                str(exc) or "Tool execution could not produce a result.",
+                retryable=exc.retryable,
+                details=exc.details,
+            )
         except Exception as exc:
             LOGGER.exception(
                 "tool execution failed tool_id=%s version=%s run_id=%s "

@@ -219,6 +219,12 @@ export class CadAgentRepository {
 
   async deleteProject(projectId: string): Promise<void> {
     const { error } = await this.client.from('projects').delete().eq('id', projectId);
+    if (error?.code === '23503') {
+      throw new WorkflowError(
+        'PROJECT_HAS_PUBLISHED_ASSEMBLIES',
+        'This project has published assembly revisions and cannot be deleted while they exist.',
+      );
+    }
     if (error) throw new Error(`Could not delete project: ${error.message}`);
   }
 
@@ -338,6 +344,137 @@ export class CadAgentRepository {
     if (error) throw new Error(`Could not inspect index job: ${error.message}`);
     if (!data) throw new WorkflowError('INDEX_JOB_NOT_FOUND', `No index job was found with id "${jobId}".`);
     return data;
+  }
+
+  async queueProjectPlanningJob(
+    projectId: string,
+    requestText: string,
+    options: { autoPublish?: boolean; assemblyId?: string } = {},
+  ): Promise<{ id: string; status: string }> {
+    const { data, error } = await this.client
+      .from('project_planning_jobs')
+      .insert({
+        project_id: projectId,
+        request_text: requestText,
+        status: 'queued',
+        auto_publish: options.autoPublish ?? false,
+        target_assembly_id: options.assemblyId ?? null,
+      })
+      .select('id, status')
+      .single();
+    if (error || !data?.id) {
+      throw new Error(`Could not queue project planning job: ${error?.message ?? 'missing job id'}`);
+    }
+    return { id: String(data.id), status: String(data.status) };
+  }
+
+  async projectPlanningJobInProject(projectId: string, jobId: string): Promise<Record<string, unknown>> {
+    const { data, error } = await this.client
+      .from('project_planning_jobs')
+      .select('id, project_id, request_text, status, auto_publish, target_assembly_id, project_plan, assembly_spec, error_code, error_message, error_details, created_at, started_at, completed_at')
+      .eq('project_id', projectId)
+      .eq('id', jobId)
+      .maybeSingle();
+    if (error) throw new Error(`Could not inspect project planning job: ${error.message}`);
+    if (!data) {
+      throw new WorkflowError(
+        'PROJECT_PLANNING_JOB_NOT_FOUND',
+        `No project planning job was found with id "${jobId}".`,
+      );
+    }
+    return data;
+  }
+
+  // Unlike assemblyPublishJobInProject, this must not throw NOT_FOUND -- a
+  // plan with auto_publish=false legitimately never has a matching publish
+  // job, and getProjectPlan uses this to "peek" at the auto-publish outcome
+  // without a separate get_assembly_publish_job round trip.
+  async publishJobForDesignRequest(
+    projectId: string,
+    designRequestId: string,
+  ): Promise<Record<string, unknown> | null> {
+    const { data, error } = await this.client
+      .from('assembly_publish_jobs')
+      .select('id, project_id, design_request_id, target_assembly_id, status, assembly_revision, error_code, error_message, error_details, created_at, started_at, completed_at')
+      .eq('project_id', projectId)
+      .eq('design_request_id', designRequestId)
+      .maybeSingle();
+    if (error) throw new Error(`Could not inspect assembly publish job: ${error.message}`);
+    return data ?? null;
+  }
+
+  async queueAssemblyPublishJob(
+    projectId: string,
+    designRequestId: string,
+    assemblyId?: string,
+  ): Promise<{ id: string; status: string }> {
+    const { data, error } = await this.client
+      .from('assembly_publish_jobs')
+      .insert({
+        project_id: projectId,
+        design_request_id: designRequestId,
+        target_assembly_id: assemblyId ?? null,
+        status: 'queued',
+      })
+      .select('id, status')
+      .single();
+    if (error?.code === '23505') {
+      throw new WorkflowError(
+        'ASSEMBLY_PUBLISH_ALREADY_IN_PROGRESS',
+        'A publish job is already queued or running for this assembly or design request.',
+      );
+    }
+    if (error || !data?.id) {
+      throw new Error(`Could not queue assembly publish job: ${error?.message ?? 'missing job id'}`);
+    }
+    return { id: String(data.id), status: String(data.status) };
+  }
+
+  async assemblyPublishJobInProject(projectId: string, jobId: string): Promise<Record<string, unknown>> {
+    const { data, error } = await this.client
+      .from('assembly_publish_jobs')
+      .select('id, project_id, design_request_id, target_assembly_id, status, assembly_revision, error_code, error_message, error_details, created_at, started_at, completed_at')
+      .eq('project_id', projectId)
+      .eq('id', jobId)
+      .maybeSingle();
+    if (error) throw new Error(`Could not inspect assembly publish job: ${error.message}`);
+    if (!data) {
+      throw new WorkflowError(
+        'ASSEMBLY_PUBLISH_JOB_NOT_FOUND',
+        `No assembly publish job was found with id "${jobId}".`,
+      );
+    }
+    return data;
+  }
+
+  async assemblyRevisions(projectId: string, assemblyId: string): Promise<Record<string, unknown>[]> {
+    const { data: assembly, error: assemblyError } = await this.client
+      .from('assemblies')
+      .select('id, project_id, head_revision, created_at')
+      .eq('project_id', projectId)
+      .eq('id', assemblyId)
+      .maybeSingle();
+    if (assemblyError) throw new Error(`Could not inspect assembly: ${assemblyError.message}`);
+    if (!assembly) {
+      throw new WorkflowError('ASSEMBLY_NOT_FOUND', `No assembly was found with id "${assemblyId}".`);
+    }
+    const { data, error } = await this.client
+      .from('assembly_revisions')
+      .select('id, assembly_id, revision, parent_revision, design_request_id, schema_version, definition_digest, definition_json, created_at')
+      .eq('assembly_id', assemblyId)
+      .order('revision', { ascending: true });
+    if (error) throw new Error(`Could not list assembly revisions: ${error.message}`);
+    return data ?? [];
+  }
+
+  async assembliesInProject(projectId: string): Promise<Record<string, unknown>[]> {
+    const { data, error } = await this.client
+      .from('assemblies')
+      .select('id, project_id, head_revision, created_at')
+      .eq('project_id', projectId)
+      .order('created_at', { ascending: true });
+    if (error) throw new Error(`Could not list assemblies: ${error.message}`);
+    return data ?? [];
   }
 
   async hasCadParts(projectId: string): Promise<boolean> {

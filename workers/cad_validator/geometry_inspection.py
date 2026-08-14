@@ -39,9 +39,11 @@ def measure_geometry(model: object) -> dict[str, Any]:
 
     Returns a dict with ``execution_ok`` always ``True`` (the caller is
     expected to have already confirmed the model built without raising), plus
-    ``geometry_valid``, ``error_message``, and -- when a usable result was
-    produced -- ``volume_mm3``, ``bounding_box``, ``center_of_mass``,
-    ``solid_count``, ``face_count``, ``edge_count``. Measurement failure
+    ``geometry_valid``, ``error_message``, ``diagnostics`` (always empty here
+    -- measurement locates nothing; see ``execution_failed_geometry``), and
+    -- when a usable result was produced -- ``volume_mm3``, ``bounding_box``,
+    ``center_of_mass``, ``solid_count``, ``face_count``, ``edge_count``.
+    Measurement failure
     (wrong return type, no solids) is reported as ``geometry_valid: False``
     with every measurement field ``None``, never raised, since a build that
     returns unusable geometry is a normal, expected outcome to report on.
@@ -56,6 +58,7 @@ def measure_geometry(model: object) -> dict[str, Any]:
                 "build_model must return a CadQuery Workplane or Shape; "
                 f"received {type(model).__name__}."
             ),
+            "diagnostics": [],
             "volume_mm3": None,
             "bounding_box": None,
             "center_of_mass": None,
@@ -70,6 +73,7 @@ def measure_geometry(model: object) -> dict[str, Any]:
             "execution_ok": True,
             "geometry_valid": False,
             "error_message": "build_model returned geometry with no solids.",
+            "diagnostics": [],
             "volume_mm3": None,
             "bounding_box": None,
             "center_of_mass": None,
@@ -100,6 +104,7 @@ def measure_geometry(model: object) -> dict[str, Any]:
         "execution_ok": True,
         "geometry_valid": geometry_valid,
         "error_message": error_message,
+        "diagnostics": [],
         "volume_mm3": volume_mm3,
         "bounding_box": {
             "min": [bbox.xmin, bbox.ymin, bbox.zmin],
@@ -113,13 +118,24 @@ def measure_geometry(model: object) -> dict[str, Any]:
     }
 
 
-def execution_failed_geometry(error_message: str) -> dict[str, Any]:
-    """Build the geometry-facts dict for a source that failed to execute."""
+def execution_failed_geometry(
+    error_message: str,
+    diagnostics: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build the geometry-facts dict for a source that failed to execute.
+
+    ``diagnostics`` carries structured findings when the caller already has
+    them -- notably the static-safety rejection, where the full AST report
+    names the rule, the function, and the line. Passing them through is the
+    difference between telling the agent "something is wrong" and telling it
+    what to fix; a caller with nothing structured to add omits it.
+    """
 
     return {
         "execution_ok": False,
         "geometry_valid": None,
         "error_message": error_message,
+        "diagnostics": list(diagnostics or []),
         "volume_mm3": None,
         "bounding_box": None,
         "center_of_mass": None,

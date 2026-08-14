@@ -76,7 +76,7 @@ produce a structured `TOOL_INPUT_INVALID` failure rather than being coerced.
 
 | Tool | Params | Summary |
 | --- | --- | --- |
-| `check_geometry` | none — identity comes from `ToolExecutionContext` | Inspect the candidate's actual executed geometry (volume, bounding box, center of mass, solid/face/edge counts) against the immediately preceding candidate. Deterministic evidence only — never modifies source, never gates anything. See [`workers/cad_validator/GEOMETRY_CHECK.md`](../../cad_validator/GEOMETRY_CHECK.md). |
+| `check_geometry` | none — identity comes from `ToolExecutionContext` | Inspect the candidate's actual executed geometry (volume, bounding box, center of mass, solid/face/edge counts) against the immediately preceding candidate. Deterministic evidence only — never modifies source, never gates anything. A check that measured nothing (unreadable candidate, failed check job, timeout) returns a `GEOMETRY_CHECK_FAILED` failure rather than a success carrying no geometry. See [`workers/cad_validator/GEOMETRY_CHECK.md`](../../cad_validator/GEOMETRY_CHECK.md). |
 
 ### step
 

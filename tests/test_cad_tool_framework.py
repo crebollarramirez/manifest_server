@@ -10,6 +10,11 @@ from pydantic import ConfigDict
 
 from workers.agent_3d.failures import WorkflowFailure
 from workers.agent_3d.planning.resolver import resolve_deterministic_edit_target
+from workers.agent_3d.tools.base import (
+    BATCH_GROUP_PARAMETER_CREATE,
+    BATCH_GROUP_READ,
+)
+from workers.agent_3d.tools.tool_harness import build_registry
 from workers.agent_3d.tools import (
     AgentTool,
     DuplicateToolError,
@@ -97,8 +102,7 @@ class ExampleTool(AgentTool[ExampleInput, ExampleOutput]):
     description = "Double one validated integer without changing server state."
     input_model = ExampleInput
     output_model = ExampleOutput
-    batchable = True
-    parallel_safe = True
+    batch_group = BATCH_GROUP_READ
 
     def __init__(self):
         self.trace: list[str] = []
@@ -235,14 +239,22 @@ class ToolFrameworkTests(unittest.IsolatedAsyncioTestCase):
             async def run(self, raw_arguments, tool_context):  # type: ignore[override]
                 return await super().run(raw_arguments, tool_context)
 
-        class BadBatchableTool(ExampleTool):
-            tool_id = "example_bad_batchable"
-            batchable = "yes"  # type: ignore[assignment]
+        class BadBatchGroupTool(ExampleTool):
+            tool_id = "example_bad_batch_group"
+            batch_group = 3  # type: ignore[assignment]
+
+        class UnknownBatchGroupTool(ExampleTool):
+            # A plausible typo. Without the closed BATCH_GROUPS set this would
+            # register happily and form a silent singleton group that never
+            # batches with anything -- the exact failure the set exists to
+            # turn into a registration error.
+            tool_id = "example_unknown_batch_group"
+            batch_group = "parameter_creation"  # type: ignore[assignment]
 
         class MissingBatchMetadataTool(AgentTool[ExampleInput, ExampleOutput]):
             tool_id = "example_missing_batch_metadata"
             version = 1
-            description = "Missing batchable/parallel_safe metadata."
+            description = "Declares no batch_group at all."
             input_model = ExampleInput
             output_model = ExampleOutput
 
@@ -261,7 +273,8 @@ class ToolFrameworkTests(unittest.IsolatedAsyncioTestCase):
             BadConfigTool(),
             MissingExecuteTool(),
             OverrideRunTool(),
-            BadBatchableTool(),
+            BadBatchGroupTool(),
+            UnknownBatchGroupTool(),
             MissingBatchMetadataTool(),
         ):
             with self.subTest(tool=type(malformed).__name__):
@@ -470,32 +483,72 @@ class ToolExecutorSyncBridgeTests(unittest.TestCase):
         asyncio.run(invoke())
 
 
-class NonBatchableExampleTool(ExampleTool):
-    tool_id = "example_non_batchable"
-    batchable = False
-    parallel_safe = False
+class SoloExampleTool(ExampleTool):
+    tool_id = "example_solo"
+    batch_group = None
 
 
 class ToolExecutorBatchMetadataTests(unittest.TestCase):
-    def test_is_batchable_reflects_a_batchable_tool(self):
+    def test_batch_group_reflects_a_batchable_tool(self):
         registry = ToolRegistry()
         registry.register(ExampleTool())
         executor = ToolExecutor(registry)
 
-        self.assertTrue(executor.is_batchable("example_double"))
+        self.assertEqual(executor.batch_group("example_double"), BATCH_GROUP_READ)
 
-    def test_is_batchable_reflects_a_non_batchable_tool(self):
+    def test_batch_group_is_none_for_a_solo_tool(self):
         registry = ToolRegistry()
-        registry.register(NonBatchableExampleTool())
+        registry.register(SoloExampleTool())
         executor = ToolExecutor(registry)
 
-        self.assertFalse(executor.is_batchable("example_non_batchable"))
+        self.assertIsNone(executor.batch_group("example_solo"))
 
-    def test_is_batchable_fails_closed_for_an_unknown_tool(self):
+    def test_a_declared_none_batch_group_registers_successfully(self):
+        # None is a legal declared value, distinct from never declaring one --
+        # which is why registration uses a sentinel rather than a getattr
+        # default.
+        registry = ToolRegistry()
+
+        registry.register(SoloExampleTool())
+
+        self.assertIsNone(registry.get("example_solo").batch_group)
+
+    def test_batch_group_fails_closed_for_an_unknown_tool(self):
         registry = ToolRegistry()
         executor = ToolExecutor(registry)
 
-        self.assertFalse(executor.is_batchable("not_a_real_tool"))
+        self.assertIsNone(executor.batch_group("not_a_real_tool"))
+
+
+class ProductionBatchGroupTests(unittest.TestCase):
+    """The exact batch group of every tool the worker registers.
+
+    A table rather than per-tool assertions: this is the one test that
+    catches BATCH_GROUP_PARAMETER_CREATE pasted onto delete_parameter, or a
+    tool quietly gaining the ability to share a round with another.
+    """
+
+    def test_only_reads_and_parameter_creates_may_share_a_round(self):
+        registry = build_registry()
+        executor = ToolExecutor(registry)
+        expected = {
+            "index_search": BATCH_GROUP_READ,
+            "index_get_feature": BATCH_GROUP_READ,
+            "create_parameter": BATCH_GROUP_PARAMETER_CREATE,
+            "edit_parameter": None,
+            "delete_parameter": None,
+            "create_feature": None,
+            "edit_feature": None,
+            "delete_feature": None,
+            "create_cad_part": None,
+            "edit_cad_build_model": None,
+        }
+
+        actual = {
+            tool_id: executor.batch_group(tool_id) for tool_id in expected
+        }
+
+        self.assertEqual(actual, expected)
 
 
 class PlanningTargetResolutionTests(unittest.TestCase):

@@ -5,39 +5,38 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MIGRATION = (
-    ROOT
-    / "supabase"
-    / "migrations"
-    / "20260727000000_add_cad_agent_progress_and_tools.sql"
+MIGRATIONS = ROOT / "supabase" / "migrations"
+EDIT_JOBS = (MIGRATIONS / "20260712040000_edit_jobs.sql").read_text(encoding="utf-8")
+EDIT_JOB_EVENTS = (
+    MIGRATIONS / "20260712060000_edit_job_events.sql"
 ).read_text(encoding="utf-8")
 
 
 class CadAgentMigrationContractTests(unittest.TestCase):
     def test_submission_is_idempotent_and_creates_the_first_progress_event(self):
-        self.assertIn("create unique index edit_jobs_client_request_id_idx", MIGRATION)
-        self.assertIn("create function public.submit_cad_edit_job", MIGRATION)
-        self.assertIn("CLIENT_REQUEST_ID_CONFLICT", MIGRATION)
-        self.assertIn("'job.queued'", MIGRATION)
-        self.assertIn("last_event_sequence", MIGRATION)
+        self.assertIn("create unique index edit_jobs_client_request_id_idx", EDIT_JOBS)
+        self.assertIn("create function public.submit_cad_edit_job", EDIT_JOBS)
+        self.assertIn("CLIENT_REQUEST_ID_CONFLICT", EDIT_JOBS)
+        self.assertIn("'job.queued'", EDIT_JOBS)
+        self.assertIn("last_event_sequence", EDIT_JOBS)
 
     def test_progress_events_are_ordered_and_replayable(self):
-        self.assertIn("create table public.edit_job_events", MIGRATION)
-        self.assertIn("unique (edit_job_id, sequence)", MIGRATION)
-        self.assertIn("edit_job_events_replay_idx", MIGRATION)
-        self.assertIn("create function public.append_edit_job_event", MIGRATION)
+        self.assertIn("create table public.edit_job_events", EDIT_JOB_EVENTS)
+        self.assertIn("unique (edit_job_id, sequence)", EDIT_JOB_EVENTS)
+        self.assertIn("edit_job_events_replay_idx", EDIT_JOB_EVENTS)
+        # append_edit_job_event (the plain, non-lease-checked RPC this
+        # migration originally introduced) does not exist in the final
+        # schema -- it was superseded by append_edit_job_event_owned before
+        # any production database existed. See
+        # test_cad_editor_cutover_migration.py for the assertion that it
+        # never appears anywhere in supabase/migrations/.
+        self.assertIn("create function public.append_edit_job_event_owned", EDIT_JOB_EVENTS)
 
-    def test_tool_queue_is_typed_leased_and_service_role_only(self):
-        self.assertIn("create table public.cad_tool_jobs", MIGRATION)
-        self.assertIn("'prepare_context'", MIGRATION)
-        self.assertIn("'apply_plan'", MIGRATION)
-        self.assertIn("'prepare_repair_context'", MIGRATION)
-        self.assertIn("unique (edit_job_id, attempt, kind)", MIGRATION)
-        self.assertIn("for update skip locked", MIGRATION)
-        self.assertIn("create function public.heartbeat_cad_tool_job", MIGRATION)
-        self.assertIn("enable row level security", MIGRATION)
-        self.assertIn("to service_role", MIGRATION)
-        self.assertIn("from public, anon, authenticated", MIGRATION)
+    # The nested Nest-to-Python cad_tool_jobs execution queue this migration
+    # originally introduced never exists in the final schema either -- it was
+    # created and fully dropped again before any production database
+    # existed. See test_cad_editor_cutover_migration.py for the assertion
+    # that it never appears anywhere in supabase/migrations/.
 
 
 if __name__ == "__main__":

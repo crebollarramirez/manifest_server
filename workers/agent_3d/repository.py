@@ -310,24 +310,33 @@ class SupabaseEditRepository:
         )
         return dict(response.data)
 
-    def queue_validation(
+    def queue_validation_run(
         self,
         edit_job_id: str,
         candidate_path: str,
         candidate_sha256: str,
-        attempt_count: int,
+        validation_run: int,
         *,
         worker_id: str,
     ) -> str:
+        """Queue one candidate validation run and return its child job ID.
+
+        Replaces :meth:`queue_validation` for the agent loop. The run counter
+        it allocates against is uncapped, so a job may validate once per plan
+        step rather than only at its commit attempts. Re-queuing the same
+        ``(path, hash)`` pair returns the existing child rather than a
+        duplicate -- including when that child already failed.
+        """
+
         try:
             response = self.supabase.rpc(
-                "queue_edit_candidate_validation_owned",
+                "queue_edit_candidate_validation_run_owned",
                 {
                     "p_edit_job_id": edit_job_id,
                     "p_worker_id": worker_id,
                     "p_candidate_path": candidate_path,
                     "p_candidate_sha256": candidate_sha256,
-                    "p_attempt_count": attempt_count,
+                    "p_validation_run": validation_run,
                 },
             ).execute()
         except Exception as exc:
@@ -374,6 +383,7 @@ class SupabaseEditRepository:
         result: dict[str, Any],
         *,
         worker_id: str,
+        metrics: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         resolved_target = result.get("resolved_target")
         metadata = dict(resolved_target) if isinstance(resolved_target, dict) else {}
@@ -392,6 +402,7 @@ class SupabaseEditRepository:
                     "p_error_message": None,
                     "p_event_message": str(result.get("message") or "CAD edit completed.")[:500],
                     "p_event_metadata": metadata,
+                    "p_metrics": metrics or {},
                 },
             ).execute()
         except Exception as exc:
@@ -408,6 +419,7 @@ class SupabaseEditRepository:
         message: str,
         result: dict[str, Any],
         worker_id: str,
+        metrics: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:
             response = self.supabase.rpc(
@@ -421,6 +433,7 @@ class SupabaseEditRepository:
                     "p_error_message": message[:4000],
                     "p_event_message": message[:500],
                     "p_event_metadata": {"error_code": code},
+                    "p_metrics": metrics or {},
                 },
             ).execute()
         except Exception as exc:

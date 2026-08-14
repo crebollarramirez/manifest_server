@@ -6,14 +6,15 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, TypeVar
 from uuid import uuid4
 
 from workers.commons.storage import cad_source_storage_path
 
+from .diagnostics import bounded_diagnostics, diagnostics_message
 from .failures import WorkflowFailure
-from .planning.agent_contracts import CadGoal, CadPlan, PlanStep
+from .planning.agent_contracts import CadGoal, CadPlan, PlanStep, PlanStepState
 from .planning.agent_trace import AgentTraceContext, AgentTraceWriter
 from .planning.planning_log import PlanningLogWriter
 from .planning.resolver import resolve_deterministic_edit_target
@@ -29,11 +30,63 @@ TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
 RECENT_MESSAGE_LIMIT = 8
 ACTIVE_STEP_STATUSES = ("pending", "in_progress")
 STEP_COMPLETION_TOOL_ID = "request_step_completion"
-MAX_AGENT_TURNS = 32
+MAX_AGENT_TURNS = 60
 MAX_STEP_TURNS = 20
 MAX_TOOL_CALLS_PER_BATCH = 5
+
+# How many times a single step's completion may be rejected by candidate
+# validation before the gate stops validating that step and lets the
+# completion through.
+#
+# Without this cap, step validation would be a regression: a step whose
+# candidate keeps failing would stay in_progress until it burned
+# MAX_STEP_TURNS and then fail the whole job mid-plan with AGENT_STEP_TURN_-
+# LIMIT -- never reaching the final validation boundary, which is where the
+# repair machinery lives. Step validation is early feedback, not a second
+# wall; the final gate is the authoritative one.
+MAX_STEP_VALIDATION_REJECTIONS = 2
+
+# CadPlanContent caps `steps` at 64. Appending past it raises a bare
+# pydantic ValidationError, so the repair path checks this first and fails
+# with a real workflow code instead.
+MAX_PLAN_STEPS = 64
+
+# How many times the repair step's own validation may fail before the job
+# gives up. One repair step contains many attempts -- a failed repair does
+# not append another step -- so this counts rejections within that step, not
+# steps. It needs no column: `_seed_validation_state` rebuilds the count from
+# the durable `candidate_validation` history, so it survives a worker
+# restart and cannot drift from what actually happened.
+#
+# It also bounds how many repair steps a job may append, as a safety net for
+# the case where a repair step somehow completes unproven.
+MAX_REPAIR_ATTEMPTS = 3
+
+# A repair step's own reasoning budget, counted separately from
+# MAX_AGENT_TURNS. Re-entering the loop already resets the turn counter; what
+# this prevents is a normal plan that consumed 31 of 32 turns leaving repair
+# with effectively none. Smaller than MAX_STEP_TURNS so it binds first --
+# repair works from an already-diagnosed problem, not an open-ended one.
+MAX_REPAIR_TURNS = 12
+
 T = TypeVar("T")
 LOGGER = logging.getLogger(__name__)
+
+
+def _step_validation_enabled() -> bool:
+    """Whether a normal plan step's completion is gated on validation.
+
+    Read per call rather than cached at import so tests and operators can
+    flip it without a process restart. Only the *step* gate is optional --
+    the final candidate gate and the repair loop are unconditional, so
+    turning this off degrades to the pre-step-validation behavior rather
+    than skipping validation entirely.
+    """
+
+    return (
+        os.environ.get("CAD_EDITOR_STEP_VALIDATION", "1").strip().lower()
+        not in {"0", "false", "no", "off"}
+    )
 
 # Read-only tools whose result depends only on their arguments: the semantic
 # index and query semantics do not change mid-step, so an identical repeat
@@ -108,6 +161,258 @@ class ToolCallBatch:
     calls: tuple[ToolCallRequest, ...]
 
 
+@dataclass(frozen=True)
+class ValidationProof:
+    """Proof that one exact candidate hash passed validation.
+
+    ``storage_path`` points at a run-scoped snapshot that is written once and
+    never rewritten -- a later run gets a different path -- so this keeps
+    proving the exact bytes the validator saw even after the agent edits the
+    live candidate again. ``_commit_candidate`` re-verifies every field of it
+    independently before writing canonical source.
+    """
+
+    validation_job: dict[str, Any]
+    storage_path: str
+    source_sha256: str
+    validation_run: int
+
+
+@dataclass(frozen=True)
+class ValidationOutcome:
+    """One validation run's verdict, classified for the caller.
+
+    ``status`` is the whole point: ``passed`` carries a ``proof``,
+    ``repairable`` means the candidate's own source is at fault and the
+    diagnostics are safe to show the model, and ``infrastructure`` means the
+    verdict says nothing actionable about the source (a timeout, a validator
+    crash, or a report that does not describe our bytes) and must fail the
+    job rather than being handed to the agent as if it were a CAD problem.
+    """
+
+    status: str
+    source_sha256: str
+    validation_run: int
+    validation_job_id: str
+    storage_path: str
+    report: dict[str, Any]
+    diagnostics: list[dict[str, Any]]
+    message: str
+    proof: ValidationProof | None
+
+
+@dataclass
+class _StepValidationState:
+    """One active step's validation history, as the agent loop needs it.
+
+    Reset when the active step changes, and re-seeded from durable history
+    on a resume, so a replacement worker does not re-validate a hash the
+    previous worker already got a verdict for.
+    """
+
+    last_failed_sha256: str | None = None
+    feedback: dict[str, Any] | None = None
+    rejections: int = 0
+
+    def record_failure(self, source_sha256: str, outcome: ValidationOutcome) -> None:
+        self.last_failed_sha256 = source_sha256
+        self.feedback = {
+            "stage": outcome.report.get("stage"),
+            "diagnostics": outcome.diagnostics,
+            "source_sha256": source_sha256,
+        }
+        self.rejections += 1
+
+    def reset(self) -> None:
+        self.last_failed_sha256 = None
+        self.feedback = None
+        self.rejections = 0
+
+
+@dataclass
+class _RunMetrics:
+    """Counters for one agent run, written to ``edit_jobs.metrics`` at the end.
+
+    Lives on the orchestrator rather than inside ``_run_agent_loop`` because
+    the repair path re-enters that loop and a run's totals span every entry.
+
+    Only holds what ``edit_job_events`` structurally cannot: facts about
+    individual tool calls and model calls. Per-step turns, validation
+    outcomes, and timings are already durable as events and are not
+    duplicated here.
+    """
+
+    agent_turns: int = 0
+    tool_calls: int = 0
+    batched_rounds: int = 0
+    validation_runs: int = 0
+    repair_steps: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int = 0
+    tool_mix: dict[str, int] = field(default_factory=dict)
+    tool_failures: dict[str, int] = field(default_factory=dict)
+
+    def record_call(self, tool_id: str, result: Any) -> None:
+        self.tool_calls += 1
+        self.tool_mix[tool_id] = self.tool_mix.get(tool_id, 0) + 1
+        if not getattr(result, "ok", True):
+            code = str(getattr(getattr(result, "error", None), "code", "") or "UNKNOWN")
+            self.tool_failures[code] = self.tool_failures.get(code, 0) + 1
+
+    def record_usage(self, response: Any) -> None:
+        usage = _field(response, "usage")
+        details = _field(usage, "output_tokens_details")
+        self.input_tokens += int(_field(usage, "input_tokens", 0) or 0)
+        self.output_tokens += int(_field(usage, "output_tokens", 0) or 0)
+        self.reasoning_tokens += int(_field(details, "reasoning_tokens", 0) or 0)
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "agent_turns": self.agent_turns,
+            "tool_calls": self.tool_calls,
+            "batched_rounds": self.batched_rounds,
+            "validation_runs": self.validation_runs,
+            "repair_steps": self.repair_steps,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+            "tool_mix": dict(self.tool_mix),
+            "tool_failures": dict(self.tool_failures),
+        }
+
+
+@dataclass(frozen=True)
+class AgentLoopOutcome:
+    """What one `_run_agent_loop` call produced.
+
+    ``proof`` is non-None only when the candidate's current bytes are exactly
+    the bytes some validation run already passed -- normally the last step's
+    own gate. It lets the caller skip an immediate, provably redundant final
+    validation of source nothing has touched since.
+    """
+
+    plan: CadPlan
+    proof: ValidationProof | None
+
+
+def _bounded_diagnostics(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """Project a validation report's diagnostics for the agent.
+
+    Shares its projection with ``check_geometry`` so the same defect reads
+    identically whichever path noticed it.
+    """
+
+    return bounded_diagnostics(report.get("diagnostics"))
+
+
+def _build_artifacts(report: dict[str, Any]) -> dict[str, Any]:
+    """Return the validator's geometry measurement, or an empty dict."""
+
+    artifacts = report.get("build_artifacts")
+    return dict(artifacts) if isinstance(artifacts, dict) else {}
+
+
+def _disconnected_solids_diagnostic(
+    report: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Reject a candidate whose ``build_model`` returns disconnected solids.
+
+    Derived from a fact the validator actually measured (``solid_count``),
+    not invented: the report says the model executed to N separate solids,
+    and this turns that measurement into the product rule the validator
+    itself has no opinion about.
+
+    Returns ``None`` when the count is 1, absent, or unmeasured -- a missing
+    measurement must not fail a candidate that otherwise validated, since
+    older reports predate the measurement entirely.
+    """
+
+    solid_count = _build_artifacts(report).get("solid_count")
+    if not isinstance(solid_count, int) or solid_count <= 1:
+        return None
+    return {
+        "error_code": "DISCONNECTED_SOLIDS",
+        "message": (
+            f"build_model returns {solid_count} disconnected solids, but a "
+            "part must be exactly one connected printable solid. Join the "
+            "pieces so they actually intersect before union, or reposition "
+            "them so they touch -- separate physical pieces belong in "
+            "separate parts, not in one part's build_model."
+        ),
+        "stage": "geometry",
+        "file_path": "model.py",
+        "function_name": "build_model",
+        "related_symbols": ["build_model"],
+        "solid_count": solid_count,
+    }
+
+
+def _geometry_summary(report: dict[str, Any]) -> dict[str, Any]:
+    """Project a validation report's measurement into agent-facing geometry.
+
+    This is what lets a step open already knowing what the model measures,
+    rather than spending its first round on ``check_geometry`` to find out.
+    """
+
+    artifacts = _build_artifacts(report)
+    if not artifacts:
+        return {}
+    summary = {
+        key: artifacts.get(key)
+        for key in (
+            "solid_count",
+            "volume_mm3",
+            "bounding_box",
+            "center_of_mass",
+            "face_count",
+            "edge_count",
+        )
+        if artifacts.get(key) is not None
+    }
+    return summary
+
+
+def _repair_step_count(plan: CadPlan) -> int:
+    """How many repair steps this plan already carries."""
+
+    return sum(1 for step in plan.steps if step.kind == "repair")
+
+
+def _repair_objective(outcome: ValidationOutcome) -> str:
+    """Build the repair step's human-readable objective.
+
+    Only a summary lives on the step: the plan is re-serialized into every
+    later ``plan_updated`` entry *and* into every ``start_step`` payload, so
+    full diagnostics stored here would grow history quadratically and be
+    re-sent to the model on every subsequent chain. The full record stays in
+    history, and the repair chain receives it as validation feedback.
+    """
+
+    headline = "; ".join(
+        f"{item['error_code']}: {item['message']}"
+        for item in outcome.diagnostics[:2]
+    )
+    objective = (
+        "Resolve the reported candidate validation failures with the "
+        "smallest corrective changes that fix them, preserving the already "
+        "completed goal criteria and unrelated geometry."
+    )
+    if headline:
+        objective = f"{objective} Reported: {headline}"
+    return objective[:1_000]
+
+
+def _validation_rejection_message(outcome: ValidationOutcome) -> str:
+    """Build the agent-facing message for a repairable validation failure."""
+
+    return diagnostics_message(
+        "The candidate did not pass CAD validation, so this step is not "
+        "complete. Fix the reported problems, then request completion again.",
+        outcome.diagnostics,
+    )
+
+
 def _parse_call(item: Any) -> ToolCallRequest:
     """Build one ToolCallRequest from a raw function_call response item."""
 
@@ -160,7 +465,7 @@ def _recent_messages(
     ]
 
 
-def _active_step(plan: CadPlan) -> PlanStep | None:
+def _active_step(plan: CadPlan) -> PlanStepState | None:
     """Return the step Agent3D should work on, or ``None`` when the plan is done.
 
     The active step is the earliest one still pending or in progress. ``None``
@@ -305,12 +610,16 @@ class EditWorkflowOrchestrator:
 
     This orchestrator is the sole owner of plan state. ``Agent3D`` and the
     tools never mutate the plan, and **the goal is never mutated by anything**.
-    Only step ``status`` changes -- adding, replacing, or reordering steps is
-    plan revision, which is not implemented.
+    Beyond step ``status`` changes, the only revision that exists is appending
+    a single repair step after a repairable final-validation failure --
+    reordering, replacing, and deleting steps are not implemented, and the
+    agent cannot request any of it.
 
     Tool calls run against an edit-scoped candidate copy of the CAD source, so
-    canonical source is never modified while the loop runs. Once every step
-    completes, the candidate is validated by the CAD validator worker,
+    canonical source is never modified while the loop runs. A step completes
+    only once the CAD validator worker passes the candidate; once every step
+    completes, the whole candidate is validated (reusing the last step's proof
+    when nothing changed since), then
     committed to canonical source with a hash-guarded read-verify-write
     (rolling back if the mandatory post-commit reindex fails), and export is
     queued best-effort. A successful edit job completes with
@@ -348,6 +657,9 @@ class EditWorkflowOrchestrator:
             os.environ.get("CAD_EDITOR_DEPENDENCY_TIMEOUT_SECONDS", "300")
         )
         self.lease_seconds = int(os.environ.get("CAD_EDITOR_LEASE_SECONDS", "300"))
+        # Replaced at the start of every run(); initialized here so a caller
+        # that invokes internals directly (as tests do) never sees it unset.
+        self._metrics = _RunMetrics()
 
     def _heartbeat(self, edit_job_id: str) -> None:
         self.repository.heartbeat(
@@ -676,6 +988,11 @@ class EditWorkflowOrchestrator:
                 "PLAN_RESPONSE_INVALID",
                 "Every newly generated planning step must be pending.",
             )
+        # Note: this coverage check only ever runs on a freshly generated
+        # plan -- the resume path returns the checkpoint before reaching
+        # here. That is load-bearing for repair: an appended repair step
+        # carries `addresses_criteria: []` deliberately, so hoisting this
+        # check to also run on resume would fail every job that appended one.
         criterion_ids = {
             criterion.criterion_id for criterion in goal.completion_criteria
         }
@@ -788,6 +1105,155 @@ class EditWorkflowOrchestrator:
         )
         return updated
 
+    def _repair_step_for(
+        self, edit_job_id: str, plan: CadPlan, trigger_sha256: str
+    ) -> str | None:
+        """Return the repair step already appended for this failure, if any.
+
+        Keyed on the failing candidate's hash rather than the validation job
+        ID: the bytes that failed are the failure's identity, and that stays
+        true even if the queueing RPC's reuse rule ever changes.
+
+        This only covers the narrow window between the trigger record and the
+        plan checkpoint. The main protection is structural -- the agent loop
+        runs before final validation, so a resumed worker whose checkpointed
+        plan already carries the repair step never reaches the append path at
+        all.
+        """
+
+        repair_ids = {step.step_id for step in plan.steps if step.kind == "repair"}
+        if not repair_ids:
+            return None
+        job = self.repository.edit_job(edit_job_id)
+        for event in reversed(list(job.get("history") or [])):
+            if not isinstance(event, dict):
+                continue
+            if event.get("event") != "repair_step_appended":
+                continue
+            if event.get("step_id") not in repair_ids:
+                # Trigger recorded, but its plan write never landed.
+                continue
+            if (event.get("trigger") or {}).get("source_sha256") == trigger_sha256:
+                return str(event["step_id"])
+        return None
+
+    def _append_repair_step(
+        self, edit_job_id: str, plan: CadPlan, outcome: ValidationOutcome
+    ) -> CadPlan:
+        """Append exactly one repair step for a repairable final-validation failure.
+
+        This is the only plan mutation other than a step status change, and
+        the agent cannot request it -- deterministic orchestrator code
+        reacting to a failed final validation is the sole author. Nothing is
+        reordered, replaced, or deleted; the step is appended at the end,
+        which is what ``CadPlanContent``'s dense positional step IDs allow.
+        """
+
+        existing = self._repair_step_for(edit_job_id, plan, outcome.source_sha256)
+        if existing is not None:
+            return plan
+        if len(plan.steps) >= MAX_PLAN_STEPS:
+            raise WorkflowFailure(
+                "REPAIR_PLAN_FULL",
+                "The plan has no room for a repair step.",
+                details={"steps": len(plan.steps)},
+            )
+
+        sequence = len(plan.steps) + 1
+        step_id = f"PS-{sequence}"
+        payload = plan.model_dump(mode="json")
+        # Unlike a status change, this genuinely revises the plan, so the
+        # version moves with it.
+        payload["version"] = plan.version + 1
+        payload["steps"].append(
+            {
+                "step_id": step_id,
+                "sequence": sequence,
+                "objective": _repair_objective(outcome),
+                "depends_on": [plan.steps[-1].step_id],
+                # Empty on purpose: the repair step is not a new product
+                # requirement, and the normal plan already covers every goal
+                # criterion. It also keeps the missing-geometry gate, which
+                # keys off required criteria, from treating repair like a
+                # first-feature step.
+                "addresses_criteria": [],
+                "status": "pending",
+                "kind": "repair",
+            }
+        )
+        updated = CadPlan.model_validate(payload)
+        repair_attempt = _repair_step_count(updated)
+        self._metrics.repair_steps = repair_attempt
+
+        # Ordered for crash safety. If the worker dies before the plan
+        # checkpoint lands, the plan has no repair step, so nothing
+        # downstream sees a half-append: the resumed worker re-validates the
+        # same unchanged bytes, gets the same verdict back from the RPC's
+        # reuse branch, and appends cleanly.
+        self._history(
+            edit_job_id,
+            {
+                "event": "repair_step_appended",
+                "step_id": step_id,
+                "repair_attempt": repair_attempt,
+                "plan_version": updated.version,
+                "trigger": {
+                    "validation_job_id": outcome.validation_job_id,
+                    "source_sha256": outcome.source_sha256,
+                    "stage": outcome.report.get("stage"),
+                    "error_codes": sorted(
+                        {
+                            str(item.get("error_code") or "")
+                            for item in outcome.diagnostics
+                        }
+                    ),
+                },
+            },
+        )
+        # Re-scope the failure to the new step so the repair chain opens with
+        # these diagnostics even on a worker that resumes straight into it.
+        self._history(
+            edit_job_id,
+            {
+                "event": "candidate_validation",
+                "purpose": "final",
+                "step_id": step_id,
+                "outcome": "repairable",
+                "validation_run": outcome.validation_run,
+                "validation_job_id": outcome.validation_job_id,
+                "source_sha256": outcome.source_sha256,
+                "storage_path": outcome.storage_path,
+                "stage": outcome.report.get("stage"),
+                "diagnostics": outcome.diagnostics,
+            },
+        )
+        # Commit point, last: once this lands, _active_step returns the repair
+        # step and every resume path follows from the plan alone.
+        self._history(
+            edit_job_id,
+            {"event": "plan_updated", "plan": updated.model_dump(mode="json")},
+        )
+        self._event(
+            edit_job_id,
+            "repair.appended",
+            "applying_repair",
+            f"Repair step {step_id} appended after validation failure.",
+            {"step_id": step_id, "repair_attempt": repair_attempt},
+        )
+        self._trace(
+            "repair.appended",
+            edit_job_id,
+            plan_id=str(updated.plan_id),
+            step_id=step_id,
+            repair_attempt=repair_attempt,
+            source_sha256=outcome.source_sha256,
+            validation_job_id=outcome.validation_job_id,
+            diagnostic_codes=sorted(
+                {str(item.get("error_code") or "") for item in outcome.diagnostics}
+            ),
+        )
+        return updated
+
     @staticmethod
     def _candidate_path(job: dict[str, Any]) -> str:
         """Return this edit job's candidate CAD source path.
@@ -811,15 +1277,18 @@ class EditWorkflowOrchestrator:
         )
 
     @staticmethod
-    def _attempt_candidate_path(job: dict[str, Any], attempt_number: int) -> str:
-        """Return the candidate path ``queue_edit_candidate_validation`` expects.
+    def _validation_run_path(job: dict[str, Any], validation_run: int) -> str:
+        """Return the path ``queue_edit_candidate_validation_run`` expects.
 
-        The RPC recomputes and enforces this exact prefix server-side.
+        The RPC recomputes and enforces this exact string server-side. Each
+        run gets its own snapshot, written once and never rewritten, so a
+        passing verdict keeps proving the exact bytes it saw even after the
+        agent edits the live candidate again.
         """
 
         return (
             f"{job['project_id']}/candidates/cad/"
-            f"{job['resolved_part_id']}/{job['id']}/attempt-{attempt_number}/model.py"
+            f"{job['resolved_part_id']}/{job['id']}/validation-{validation_run}/model.py"
         )
 
     def _prepare_candidate(self, job: dict[str, Any]) -> tuple[str, str]:
@@ -869,9 +1338,10 @@ class EditWorkflowOrchestrator:
                 )
         candidate_sha256 = source_hash(source)
         # current_candidate_path/current_candidate_sha256 are only settable via
-        # queue_edit_candidate_validation, which also queues a validation job --
-        # applied later by _validate_candidate. The candidate path is cheap to
-        # recompute deterministically on resume, so it is not persisted here.
+        # queue_edit_candidate_validation_run, which also queues a validation
+        # job -- applied later by validate_candidate. The candidate path is
+        # cheap to recompute deterministically on resume, so it is not
+        # persisted here.
         return candidate_path, candidate_sha256
 
     def _step_blocked_on_missing_geometry(
@@ -972,6 +1442,11 @@ class EditWorkflowOrchestrator:
         size cap). Returns a ready-to-send function_call_output list, one
         per call, every one carrying the SAME structured rejection,
         otherwise.
+
+        A multi-call batch must additionally be homogeneous: every call
+        declares the same non-None ``batch_group``. Reads may share a round
+        with reads and parameter creates with parameter creates, but the two
+        may not mix -- one round, one group.
         """
 
         calls = batch.calls
@@ -1016,12 +1491,15 @@ class EditWorkflowOrchestrator:
             )
 
         if len(calls) > 1:
+            groups = {
+                call.tool_id: self.tool_executor.batch_group(call.tool_id)
+                for call in calls
+            }
+
+            # Must precede the homogeneity check: sorting a set holding both
+            # None and str raises TypeError.
             non_batchable = sorted(
-                {
-                    call.tool_id
-                    for call in calls
-                    if not self.tool_executor.is_batchable(call.tool_id)
-                }
+                tool_id for tool_id, group in groups.items() if group is None
             )
             if non_batchable:
                 return _batch_rejection_outputs(
@@ -1032,6 +1510,26 @@ class EditWorkflowOrchestrator:
                         "individually batchable; call these tools one at a "
                         "time instead: " + ", ".join(non_batchable) + ".",
                         details={"reason": "not_batchable", "tool_ids": non_batchable},
+                    ),
+                )
+
+            distinct_groups = sorted(set(groups.values()))
+            if len(distinct_groups) > 1:
+                return _batch_rejection_outputs(
+                    batch,
+                    tool_failure(
+                        "TOOL_BATCH_REJECTED",
+                        "Every call in a multi-call batch must belong to the "
+                        "same batch group; this batch mixes "
+                        + ", ".join(
+                            f"{tool_id} ({group})"
+                            for tool_id, group in sorted(groups.items())
+                        )
+                        + ". Split them into one round per group.",
+                        details={
+                            "reason": "mixed_batch_groups",
+                            "batch_groups": distinct_groups,
+                        },
                     ),
                 )
 
@@ -1096,8 +1594,9 @@ class EditWorkflowOrchestrator:
         arguments, and result.
 
         Batch validation (_validate_batch) already guarantees this call's
-        tool ID is allowed and, for a multi-call batch, batchable -- this
-        method does not re-check either. A call whose arguments failed to
+        tool ID is allowed and, for a multi-call batch, that every call
+        shares one batch group -- this method does not re-check either. A
+        call whose arguments failed to
         parse at batch-construction time becomes a TOOL_INPUT_INVALID
         result without dispatching. A read-only call that cannot produce
         information beyond what this step's observations already contain
@@ -1163,7 +1662,11 @@ class EditWorkflowOrchestrator:
             if part["part_id"] != tool_context.part_id
         ]
 
-    def _current_part_inventory(self, job: dict[str, Any]) -> dict[str, Any]:
+    def _current_part_inventory(
+        self,
+        job: dict[str, Any],
+        geometry: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """The part being edited's live features and parameters, scanned
         fresh from the candidate.
 
@@ -1195,6 +1698,11 @@ class EditWorkflowOrchestrator:
             "part_name": part_name,
             "features": features,
             "parameters": parameters,
+            # What the last validated build of this part actually measured.
+            # Supplied so a step can open knowing the current geometry rather
+            # than spending its first round on check_geometry to ask. Empty
+            # until the first validation of this job produces a measurement.
+            "geometry": dict(geometry) if geometry else {},
         }
 
     def _run_agent_loop(
@@ -1202,16 +1710,24 @@ class EditWorkflowOrchestrator:
         job: dict[str, Any],
         goal: CadGoal,
         plan: CadPlan,
-    ) -> CadPlan:
+        candidate_path: str,
+    ) -> AgentLoopOutcome:
         """Drive the plan to completion one continuous reasoning chain per
         active step.
 
         The plan is the loop's engine: each pass works the earliest unfinished
-        step until the agent reports it complete, then advances. The loop ends
-        when no step remains active. A step's reasoning chain -- and the
-        orchestrator-local ``observations`` bookkeeping used for redundant-call
-        rejection -- are scoped to that step and reset whenever it changes, so
-        a later step never inherits an earlier step's chain or tool transcript.
+        step until the agent reports it complete *and* the resulting candidate
+        passes validation, then advances. The loop ends when no step remains
+        active. A step's reasoning chain -- and the orchestrator-local
+        ``observations``/validation bookkeeping -- are scoped to that step and
+        reset whenever it changes, so a later step never inherits an earlier
+        step's chain or tool transcript.
+
+        ``job`` is a snapshot. Everything read from it here (project_id,
+        resolved_part_id, id, messages) is immutable once the candidate is
+        prepared; every field that moves during the loop is read by
+        :meth:`validate_candidate`, which refetches the row itself. Do not add
+        a read of a mutable field here without refetching.
         """
 
         edit_job_id = str(job["id"])
@@ -1236,15 +1752,43 @@ class EditWorkflowOrchestrator:
         agent_turn = 0
         step_attempt = 0
         reasoning_round = 0
+        step_state = _StepValidationState()
+        last_passed_proof = self._seed_passed_proof(job)
+        # The most recent measurement any validation of this job produced,
+        # passing or not. Carried into each new step's opening context.
+        latest_geometry: dict[str, Any] = self._seed_latest_geometry(job)
+        # Derived from the entry step rather than passed in, so a worker that
+        # resumes straight into a checkpointed repair step gets the repair
+        # budget too. A mixed plan cannot occur: repair is only appended once
+        # every normal step has reached a terminal status.
+        entry_step = _active_step(plan)
+        turn_budget = (
+            MAX_REPAIR_TURNS
+            if entry_step is not None and entry_step.kind == "repair"
+            else MAX_AGENT_TURNS
+        )
 
         while True:
             active_step = _active_step(plan)
             if active_step is None:
+                # Re-read rather than reason about whether anything could have
+                # touched the candidate since the last passing run. One
+                # storage read per job buys the caller the right to skip a
+                # provably redundant final validation.
+                final_sha256 = source_hash(self.repository.read_text(candidate_path))
+                proof = (
+                    last_passed_proof
+                    if last_passed_proof is not None
+                    and last_passed_proof.source_sha256 == final_sha256
+                    else None
+                )
                 LOGGER.info(
-                    "agent loop finished edit_job_id=%s plan_id=%s turns=%s",
+                    "agent loop finished edit_job_id=%s plan_id=%s turns=%s "
+                    "validated=%s",
                     edit_job_id,
                     plan.plan_id,
                     agent_turn,
+                    proof is not None,
                 )
                 self._trace(
                     "agent_loop.completed",
@@ -1252,8 +1796,9 @@ class EditWorkflowOrchestrator:
                     goal_id=str(goal.goal_id),
                     plan_id=str(plan.plan_id),
                     agent_turn=agent_turn,
+                    validated=proof is not None,
                 )
-                return plan
+                return AgentLoopOutcome(plan=plan, proof=proof)
 
             if active_step.step_id != current_step_id:
                 previous_step_id = current_step_id
@@ -1263,6 +1808,13 @@ class EditWorkflowOrchestrator:
                 step_attempt = 0
                 reasoning_round = 0
                 observations = []
+                # Seeded rather than merely cleared: a replacement worker
+                # resuming into a step that already had a verdict must not
+                # re-validate the same bytes and must open its chain with the
+                # diagnostics the previous worker already paid for.
+                step_state = self._seed_validation_state(
+                    edit_job_id, active_step.step_id
+                )
                 if active_step.status == "pending":
                     plan = self._set_step_status(
                         edit_job_id,
@@ -1273,12 +1825,17 @@ class EditWorkflowOrchestrator:
                     active_step = _active_step(plan) or active_step
                 self._transition(
                     edit_job_id,
-                    "applying_edit",
+                    (
+                        "applying_repair"
+                        if active_step.kind == "repair"
+                        else "applying_edit"
+                    ),
                     "tools.started",
                     f"Working on plan step {active_step.step_id}.",
                     metadata={
                         "step_id": active_step.step_id,
                         "objective": active_step.objective,
+                        "kind": active_step.kind,
                     },
                 )
                 self._trace(
@@ -1294,13 +1851,14 @@ class EditWorkflowOrchestrator:
 
             starting_new_chain = previous_response_id is None
             agent_turn += 1
+            self._metrics.agent_turns += 1
             if starting_new_chain:
                 step_attempt += 1
                 reasoning_round = 1
             else:
                 reasoning_round += 1
 
-            if agent_turn > MAX_AGENT_TURNS:
+            if agent_turn > turn_budget:
                 self._trace(
                     "agent_loop.failed",
                     edit_job_id,
@@ -1310,14 +1868,16 @@ class EditWorkflowOrchestrator:
                     agent_turn=agent_turn,
                     step_attempt=step_attempt,
                     reasoning_round=reasoning_round,
+                    turn_budget=turn_budget,
                     error_code="AGENT_TURN_LIMIT",
                 )
                 raise WorkflowFailure(
                     "AGENT_TURN_LIMIT",
                     "The agent loop exceeded its total decision limit.",
                     details={
+                        "turn_budget": turn_budget,
                         "step_id": active_step.step_id,
-                        "max_turns": MAX_AGENT_TURNS,
+                        "max_turns": turn_budget,
                     },
                 )
             if reasoning_round > MAX_STEP_TURNS:
@@ -1351,7 +1911,7 @@ class EditWorkflowOrchestrator:
             if starting_new_chain:
                 decision_observations = list(observations)
                 decision_project_inventory = {
-                    "current_part": self._current_part_inventory(job),
+                    "current_part": self._current_part_inventory(job, latest_geometry),
                     "other_parts": other_parts_inventory,
                 }
                 decision = self._with_heartbeat(
@@ -1364,6 +1924,7 @@ class EditWorkflowOrchestrator:
                         recent_messages=recent_messages,
                         observations=decision_observations,
                         project_inventory=decision_project_inventory,
+                        validation_feedback=step_state.feedback,
                     ),
                 )
             else:
@@ -1380,6 +1941,7 @@ class EditWorkflowOrchestrator:
                         tool_outputs=decision_tool_outputs,
                     ),
                 )
+            self._metrics.record_usage(decision)
             previous_response_id = str(_field(decision, "id", "") or "") or None
 
             calls = [
@@ -1424,6 +1986,8 @@ class EditWorkflowOrchestrator:
                 pending_tool_outputs = rejection_outputs
                 continue
 
+            if len(batch.calls) > 1:
+                self._metrics.batched_rounds += 1
             step_completed = False
             completion_summary = ""
             pending_tool_outputs = []
@@ -1462,6 +2026,7 @@ class EditWorkflowOrchestrator:
                     tool_id,
                     result.ok,
                 )
+                self._metrics.record_call(tool_id, result)
                 observations.append(
                     {
                         "tool_id": tool_id,
@@ -1470,21 +2035,175 @@ class EditWorkflowOrchestrator:
                     }
                 )
                 if tool_id == STEP_COMPLETION_TOOL_ID and result.ok:
+                    rejection: Any | None = None
                     if self._step_blocked_on_missing_geometry(job, active_step, goal):
-                        result = tool_failure(
+                        # Deterministic gates run first: they are free, and
+                        # there is no point paying for a sandboxed validation
+                        # run to learn a part with no features is incomplete.
+                        rejection = tool_failure(
                             "STEP_REQUIRES_A_FEATURE",
                             "This part has no CAD features yet, and this step "
                             "addresses a required criterion. Call create_feature "
-                            "(and create_parameter first if a new dimension is "
-                            "needed) before requesting completion again.",
+                            "(and create_parameter first if new dimensions are "
+                            "needed -- all of them in one round) before "
+                            "requesting completion again.",
                         )
+                    elif (
+                        not _step_validation_enabled()
+                        and active_step.kind != "repair"
+                    ):
+                        # The flag governs only the step gate. A repair step's
+                        # completion is always validated -- that verdict is
+                        # the whole reason the step exists.
+                        pass
+                    else:
+                        # request_step_completion declares batch_group = None,
+                        # and _validate_batch's first multi-call sub-rule
+                        # rejects any batch containing a tool with no group,
+                        # so this call is always alone in its batch. That is
+                        # what makes the hash read below atomic with respect
+                        # to agent mutation: nothing else the agent asked for
+                        # this turn can touch the candidate between here and
+                        # the verdict. This invariant is load-bearing --
+                        # giving request_step_completion a batch group would
+                        # silently break it, so a test pins it.
+                        candidate_sha256 = source_hash(
+                            self.repository.read_text(candidate_path)
+                        )
+                        if candidate_sha256 == step_state.last_failed_sha256:
+                            # Load-bearing, not an optimization: the queue RPC
+                            # reuses an existing child for an unchanged
+                            # (path, hash), so re-validating here would return
+                            # the same failure instantly and teach the agent
+                            # nothing.
+                            rejection = tool_failure(
+                                "STEP_VALIDATION_NO_CHANGE",
+                                "The candidate is byte-identical to the one "
+                                "that just failed validation, so it would fail "
+                                "the same way. Change the source to address "
+                                "the reported diagnostics before requesting "
+                                "completion again.",
+                                details=step_state.feedback or {},
+                            )
+                        elif (
+                            last_passed_proof is not None
+                            and last_passed_proof.source_sha256 == candidate_sha256
+                        ):
+                            # These exact bytes already passed -- typically a
+                            # pure-discovery step that changed nothing.
+                            pass
+                        elif step_state.rejections >= (
+                            MAX_REPAIR_ATTEMPTS
+                            if active_step.kind == "repair"
+                            else MAX_STEP_VALIDATION_REJECTIONS
+                        ):
+                            if active_step.kind == "repair":
+                                # A repair step sits at the final boundary --
+                                # there is nothing further to defer to, so an
+                                # exhausted budget ends the job rather than
+                                # letting an unproven candidate through.
+                                raise WorkflowFailure(
+                                    "REPAIR_BUDGET_EXHAUSTED",
+                                    "The candidate still fails validation "
+                                    "after the repair budget was spent.",
+                                    details={
+                                        "step_id": active_step.step_id,
+                                        "repair_attempts": step_state.rejections,
+                                        "max_repair_attempts": MAX_REPAIR_ATTEMPTS,
+                                        "diagnostics": (
+                                            (step_state.feedback or {}).get(
+                                                "diagnostics"
+                                            )
+                                            or []
+                                        ),
+                                    },
+                                )
+                            # A normal step stands down instead: let the
+                            # completion through so the defect reaches the
+                            # final gate, which owns the repair machinery,
+                            # rather than burning this step's turn budget and
+                            # failing the whole job mid-plan.
+                            LOGGER.info(
+                                "step validation gate exhausted edit_job_id=%s "
+                                "step_id=%s rejections=%s",
+                                edit_job_id,
+                                active_step.step_id,
+                                step_state.rejections,
+                            )
+                        else:
+                            outcome = self.validate_candidate(
+                                edit_job_id,
+                                candidate_path,
+                                # A repair step's gate IS the final gate:
+                                # passing it proves the whole candidate, so
+                                # the proof it produces is what commit uses.
+                                purpose=(
+                                    "final"
+                                    if active_step.kind == "repair"
+                                    else "step"
+                                ),
+                                step_id=active_step.step_id,
+                            )
+                            # validate_candidate leaves the row in
+                            # validating_candidate; the loop owns state again
+                            # from here, and without this the public progress
+                            # stream would claim the job is validating for the
+                            # rest of the step while the agent is editing.
+                            self._transition(
+                                edit_job_id,
+                                (
+                                    "applying_repair"
+                                    if active_step.kind == "repair"
+                                    else "applying_edit"
+                                ),
+                                "validation.completed",
+                                f"Candidate validation for "
+                                f"{active_step.step_id}: {outcome.status}.",
+                                metadata={
+                                    "step_id": active_step.step_id,
+                                    "outcome": outcome.status,
+                                },
+                            )
+                            measured = _geometry_summary(outcome.report)
+                            if measured:
+                                latest_geometry = measured
+                            if outcome.status == "passed":
+                                last_passed_proof = outcome.proof
+                                step_state.reset()
+                            elif outcome.status == "repairable":
+                                step_state.record_failure(candidate_sha256, outcome)
+                                rejection = tool_failure(
+                                    "CANDIDATE_VALIDATION_FAILED",
+                                    _validation_rejection_message(outcome),
+                                    details={
+                                        "stage": outcome.report.get("stage"),
+                                        "diagnostics": outcome.diagnostics,
+                                        # What the rejected candidate actually
+                                        # measures, so the agent does not need
+                                        # a check_geometry round to find out.
+                                        "geometry": measured,
+                                    },
+                                )
+                            else:
+                                raise WorkflowFailure(
+                                    "VALIDATION_FAILED",
+                                    outcome.message,
+                                    details={
+                                        "validation_job_id": outcome.validation_job_id,
+                                        "step_id": active_step.step_id,
+                                        "report": outcome.report,
+                                    },
+                                )
+                    if rejection is not None:
+                        result = rejection
                         observations[-1]["result"] = result.model_dump(mode="json")
                         LOGGER.info(
                             "agent step completion blocked edit_job_id=%s "
-                            "step_id=%s turn=%s reason=no_cad_features",
+                            "step_id=%s turn=%s code=%s",
                             edit_job_id,
                             active_step.step_id,
                             agent_turn,
+                            result.error.code,
                         )
                     else:
                         step_completed = True
@@ -1546,45 +2265,171 @@ class EditWorkflowOrchestrator:
                     observation_count=len(observations),
                 )
 
-    def _validate_candidate(
-        self,
-        job: dict[str, Any],
-        candidate_path: str,
-    ) -> tuple[dict[str, Any], str, str]:
-        """Validate the loop's final candidate and return proof of that validation.
+    @staticmethod
+    def _validation_history(job: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return this job's ``candidate_validation`` history, oldest first."""
 
-        ``queue_edit_candidate_validation`` enforces an ``attempt-{n}`` path
-        server-side that the agent loop's stable candidate path doesn't use,
-        so this copies the candidate's current content there before queuing
-        -- content is byte-identical, so the hash validated is the hash the
-        loop produced.
+        return [
+            event
+            for event in (job.get("history") or [])
+            if isinstance(event, dict) and event.get("event") == "candidate_validation"
+        ]
+
+    def _seed_validation_state(
+        self, edit_job_id: str, step_id: str
+    ) -> _StepValidationState:
+        """Rebuild one step's validation state from durable history.
+
+        A worker that dies mid-step loses the in-memory state, but the
+        verdicts it already paid for are in ``edit_jobs.history``. Replaying
+        them means the replacement worker opens the step already knowing the
+        last failing hash (so it will not re-validate identical bytes) and
+        how many rejections the gate has spent.
         """
 
-        edit_job_id = str(job["id"])
+        state = _StepValidationState()
+        job = self.repository.edit_job(edit_job_id)
+        for event in self._validation_history(job):
+            if event.get("step_id") != step_id:
+                continue
+            if event.get("outcome") == "passed":
+                state.reset()
+                continue
+            if event.get("outcome") != "repairable":
+                continue
+            source_sha256 = str(event.get("source_sha256") or "")
+            if not source_sha256:
+                continue
+            state.last_failed_sha256 = source_sha256
+            state.feedback = {
+                "stage": event.get("stage"),
+                "diagnostics": list(event.get("diagnostics") or []),
+                "source_sha256": source_sha256,
+            }
+            state.rejections += 1
+        return state
+
+    def _seed_latest_geometry(self, job: dict[str, Any]) -> dict[str, Any]:
+        """Rebuild the most recent measurement from durable history.
+
+        Deliberately the most recent measurement of *any* outcome, not the
+        most recent passing one: after a failed validation the failing
+        geometry is what the part currently is, and opening a step with an
+        older passing measurement would describe a model that no longer
+        exists.
+        """
+
+        for event in reversed(self._validation_history(job)):
+            geometry = event.get("geometry")
+            if isinstance(geometry, dict) and geometry:
+                return dict(geometry)
+        return {}
+
+    def _seed_passed_proof(self, job: dict[str, Any]) -> ValidationProof | None:
+        """Rebuild the last passing proof from durable history, if any.
+
+        Only the *identity* of the passing run is reconstructed here. The
+        proof is never trusted on its own: it is used solely to skip a
+        redundant re-validation of unchanged bytes, and `_commit_candidate`
+        independently re-verifies the child job before anything is written to
+        canonical source.
+        """
+
+        for event in reversed(self._validation_history(job)):
+            if event.get("outcome") != "passed":
+                continue
+            validation_job_id = str(event.get("validation_job_id") or "")
+            source_sha256 = str(event.get("source_sha256") or "")
+            storage_path = str(event.get("storage_path") or "")
+            if not (validation_job_id and source_sha256 and storage_path):
+                return None
+            try:
+                validation_job = self.repository.generation_job(validation_job_id)
+            except Exception:
+                LOGGER.warning(
+                    "could not reload passing validation child edit_job_id=%s "
+                    "validation_job_id=%s",
+                    job.get("id"),
+                    validation_job_id,
+                    exc_info=True,
+                )
+                return None
+            return ValidationProof(
+                validation_job=validation_job,
+                storage_path=storage_path,
+                source_sha256=source_sha256,
+                validation_run=int(event.get("validation_run") or 0),
+            )
+        return None
+
+    def validate_candidate(
+        self,
+        edit_job_id: str,
+        candidate_path: str,
+        *,
+        purpose: str,
+        step_id: str | None = None,
+    ) -> ValidationOutcome:
+        """Validate the candidate's current bytes and classify the verdict.
+
+        Callable from both validation boundaries: a step's completion gate
+        (``purpose="step"``) and the whole-plan gate (``purpose="final"``).
+
+        This never raises :class:`WorkflowFailure` for a *verdict* -- a failed
+        validation is a returned :class:`ValidationOutcome`, not an exception,
+        because the two callers do different things with one. It still raises
+        for genuine errors: an unreadable candidate, a dependency timeout, or
+        a lost lease.
+
+        It takes ``edit_job_id`` rather than a job row and refetches the row
+        itself. That is deliberate: ``validation_run_count``,
+        ``current_candidate_sha256`` and ``validation_job_id`` all move as
+        validations run, and the agent loop holds a job snapshot taken before
+        it started. Reading them here means no caller has to remember to
+        refetch.
+        """
+
+        job = self.repository.edit_job(edit_job_id)
         candidate_content = self.repository.read_text(candidate_path)
         candidate_sha256 = source_hash(candidate_content)
-        attempt_number = int(job.get("attempt_count") or 0)
+
+        validation_run = int(job.get("validation_run_count") or 0)
         if job.get("current_candidate_sha256") != candidate_sha256:
-            # A resume validating the exact content a prior attempt already
-            # queued reuses that attempt number/path so the RPC's own
-            # idempotent-reuse check (matched on path *and* hash) returns the
-            # existing validation job instead of queuing a duplicate.
-            attempt_number += 1
-        attempt_path = self._attempt_candidate_path(job, attempt_number)
-        self.repository.write_text(attempt_path, candidate_content)
+            # current_candidate_sha256 is the last hash *submitted* for
+            # validation. Re-validating that exact content -- a resume of a
+            # run whose verdict we never read -- reuses its run number and
+            # path so the RPC's idempotent-reuse check returns the existing
+            # child rather than queuing a duplicate.
+            validation_run += 1
+        proof_path = self._validation_run_path(job, validation_run)
+        self.repository.write_text(proof_path, candidate_content)
 
         self._transition(
             edit_job_id,
             "validating_candidate",
             "validation.started",
-            f"Validating candidate attempt {attempt_number}.",
-            metadata={"attempt": attempt_number},
+            f"Validating candidate run {validation_run}.",
+            metadata={
+                "purpose": purpose,
+                "step_id": step_id,
+                "validation_run": validation_run,
+            },
         )
-        validation_job_id = self.repository.queue_validation(
+        self._trace(
+            "validation.started",
             edit_job_id,
-            attempt_path,
+            purpose=purpose,
+            step_id=step_id,
+            validation_run=validation_run,
+            source_sha256=candidate_sha256,
+            storage_path=proof_path,
+        )
+        self._metrics.validation_runs += 1
+        validation_job_id = self.repository.queue_validation_run(
+            edit_job_id,
+            proof_path,
             candidate_sha256,
-            attempt_number,
+            validation_run,
             worker_id=self.worker_id,
         )
         validation_job = self._wait_for_job(
@@ -1593,48 +2438,176 @@ class EditWorkflowOrchestrator:
             self.repository.generation_job,
             "CAD validation",
         )
+
         report = _record(validation_job.get("result"))
-        passed = (
-            validation_job.get("status") == "completed"
-            and report.get("status") == "passed"
-            and report.get("valid") is True
-            and validation_job.get("source_storage_path") == attempt_path
-            and validation_job.get("source_sha256") == candidate_sha256
-            and str(validation_job.get("edit_job_id")) == edit_job_id
+        diagnostics = _bounded_diagnostics(report)
+        status = self._classify_validation(
+            edit_job_id=edit_job_id,
+            validation_job=validation_job,
+            proof_path=proof_path,
+            candidate_sha256=candidate_sha256,
+            report=report,
+            diagnostics=diagnostics,
         )
+        message = str(
+            validation_job.get("error_message")
+            or "The candidate failed validation."
+        )
+        if status == "passed":
+            disconnected = _disconnected_solids_diagnostic(report)
+            if disconnected is not None:
+                # The validator's job is to measure; judging the measurement
+                # against this system's product invariant is ours. A part is
+                # one connected printable solid: a project made of several
+                # physical pieces is several parts, each with its own source
+                # and its own agent, which is what the assembly layer binds
+                # interfaces to. A part that quietly split in two is a piece
+                # nothing downstream can see.
+                status = "repairable"
+                diagnostics = [disconnected, *diagnostics]
+                message = disconnected["message"]
+        outcome = ValidationOutcome(
+            status=status,
+            source_sha256=candidate_sha256,
+            validation_run=validation_run,
+            validation_job_id=str(validation_job_id),
+            storage_path=proof_path,
+            report=report,
+            diagnostics=diagnostics,
+            message=message,
+            proof=(
+                ValidationProof(
+                    validation_job=validation_job,
+                    storage_path=proof_path,
+                    source_sha256=candidate_sha256,
+                    validation_run=validation_run,
+                )
+                if status == "passed"
+                else None
+            ),
+        )
+
         self._event(
             edit_job_id,
-            "validation.passed" if passed else "validation.failed",
+            "validation.passed" if status == "passed" else "validation.failed",
             "validating_candidate",
-            f"Candidate attempt {attempt_number} "
-            f"{'passed' if passed else 'failed'} validation.",
+            f"Candidate run {validation_run} "
+            f"{'passed' if status == 'passed' else 'failed'} validation.",
             {
-                "attempt": attempt_number,
-                "validation_job_id": validation_job_id,
+                "purpose": purpose,
+                "step_id": step_id,
+                "validation_run": validation_run,
+                "outcome": status,
+                "validation_job_id": str(validation_job_id),
                 "candidate_sha256": candidate_sha256,
             },
         )
-        if not passed:
-            raise WorkflowFailure(
-                "VALIDATION_FAILED",
-                str(
-                    validation_job.get("error_message")
-                    or "The committed candidate failed validation."
-                ),
-                details={
-                    "validation_job_id": validation_job_id,
-                    "attempt": attempt_number,
-                    "report": report,
-                },
-            )
-        return validation_job, attempt_path, candidate_sha256
+        self._trace(
+            "validation.completed",
+            edit_job_id,
+            purpose=purpose,
+            step_id=step_id,
+            validation_run=validation_run,
+            outcome=status,
+            source_sha256=candidate_sha256,
+            validation_job_id=str(validation_job_id),
+            stage=report.get("stage"),
+            diagnostic_codes=sorted(
+                {str(item.get("error_code") or "") for item in diagnostics}
+            ),
+        )
+        # The durable record the loop re-seeds itself from after a restart.
+        self._history(
+            edit_job_id,
+            {
+                "event": "candidate_validation",
+                "purpose": purpose,
+                "step_id": step_id,
+                "outcome": status,
+                "validation_run": validation_run,
+                "validation_job_id": str(validation_job_id),
+                "source_sha256": candidate_sha256,
+                "storage_path": proof_path,
+                "stage": report.get("stage"),
+                "diagnostics": diagnostics,
+                # Persisted so a resumed worker can open a step with the real
+                # last measurement rather than an older passing one.
+                "geometry": _geometry_summary(report),
+            },
+        )
+        return outcome
+
+    @staticmethod
+    def _classify_validation(
+        *,
+        edit_job_id: str,
+        validation_job: dict[str, Any],
+        proof_path: str,
+        candidate_sha256: str,
+        report: dict[str, Any],
+        diagnostics: list[dict[str, Any]],
+    ) -> str:
+        """Classify one validation child's result. Order matters.
+
+        Returns ``"passed"``, ``"repairable"`` (the candidate's own source is
+        at fault and the diagnostics are safe to show the model), or
+        ``"infrastructure"`` (the verdict says nothing actionable about the
+        source, so it must fail the job rather than be handed to the agent as
+        a CAD problem).
+        """
+
+        # 1. Identity first. A report that does not describe our bytes tells
+        #    us nothing about them -- its repairable_hint is meaningless and
+        #    its diagnostics point at code this job never wrote. This also
+        #    catches the validator's own hash-mismatch and superseded paths.
+        if (
+            validation_job.get("source_storage_path") != proof_path
+            or validation_job.get("source_sha256") != candidate_sha256
+            or str(validation_job.get("edit_job_id")) != edit_job_id
+        ):
+            return "infrastructure"
+
+        job_status = str(validation_job.get("status") or "")
+        report_status = report.get("status")
+
+        # 2. The passing case: the same six conditions the commit guard
+        #    re-verifies independently before writing canonical source.
+        if (
+            job_status == "completed"
+            and report_status == "passed"
+            and report.get("valid") is True
+        ):
+            return "passed"
+
+        # 3. A report claiming "passed" while valid is not True contradicts
+        #    itself. That is a validator defect, not a model mistake.
+        if job_status == "completed" and report_status == "passed":
+            return "infrastructure"
+
+        # 4. The only path to the agent. Every condition is deliberate:
+        #    `is True` rather than truthiness so an absent hint is never
+        #    read as repairable; schema_version >= 2 because a schema-1
+        #    report has no repairable_hint field at all and silently
+        #    treating it as unrepairable would be a mysterious hard stop;
+        #    and non-empty diagnostics because a repairable verdict with
+        #    nothing to say gives the agent nothing to act on and it would
+        #    burn its budget reproducing the identical failure.
+        if (
+            report_status == "failed"
+            and report.get("repairable_hint") is True
+            and int(report.get("schema_version") or 0) >= 2
+            and diagnostics
+        ):
+            return "repairable"
+
+        # 5. Everything else -- timeouts, validator crashes, import errors,
+        #    unparseable reports. Never shown to the agent.
+        return "infrastructure"
 
     def _commit_candidate(
         self,
         job: dict[str, Any],
-        validation_job: dict[str, Any],
-        attempt_path: str,
-        candidate_sha256: str,
+        proof: ValidationProof,
     ) -> str:
         """Write the validated candidate to canonical source, hash-guarded.
 
@@ -1644,9 +2617,16 @@ class EditWorkflowOrchestrator:
         reading, writing, and re-reading are all hash-checked so a
         concurrent change to either side is caught rather than silently
         overwritten.
+
+        The proof is re-verified here independently of whoever produced it,
+        so a proof carried over from a step's own validation gate is held to
+        exactly the same standard as one from the final gate.
         """
 
         edit_job_id = str(job["id"])
+        validation_job = proof.validation_job
+        attempt_path = proof.storage_path
+        candidate_sha256 = proof.source_sha256
         report = _record(validation_job.get("result"))
         if (
             validation_job.get("status") != "completed"
@@ -1829,7 +2809,10 @@ class EditWorkflowOrchestrator:
             "goal": goal.model_dump(mode="json"),
             "high_level_plan": high_level_plan.model_dump(mode="json"),
             "planning_log_path": planning_log_path,
-            "attempts": int(job.get("attempt_count") or 0),
+            # validation_run_count, not attempt_count: nothing increments
+            # attempt_count now that validation is allocated per run, so
+            # reporting it would freeze this public field at 0.
+            "attempts": int(job.get("validation_run_count") or 0),
             "resolved_target": {
                 "part_id": job.get("resolved_part_id")
                 or job.get("requested_part_id"),
@@ -1847,6 +2830,7 @@ class EditWorkflowOrchestrator:
             str(job["id"]),
             result,
             worker_id=self.worker_id,
+            metrics=self._metrics.as_json(),
         )
         return result
 
@@ -1901,16 +2885,62 @@ class EditWorkflowOrchestrator:
 
         candidate_path, _base_sha256 = self._prepare_candidate(job)
         job = self.repository.edit_job(edit_job_id)
-        high_level_plan = self._run_agent_loop(job, goal, high_level_plan)
+        loop_outcome = self._run_agent_loop(
+            job, goal, high_level_plan, candidate_path
+        )
+        high_level_plan = loop_outcome.plan
+        proof = loop_outcome.proof
         job = self.repository.edit_job(edit_job_id)
 
-        validation_job, attempt_path, candidate_sha256 = self._validate_candidate(
-            job, candidate_path
-        )
-        job = self.repository.edit_job(edit_job_id)
-        canonical_path = self._commit_candidate(
-            job, validation_job, attempt_path, candidate_sha256
-        )
+        # Final validation, with bounded repair. Each pass either proves the
+        # candidate, fails the job, or appends one repair step and runs the
+        # ordinary agent loop against it. It terminates because the repair
+        # count only grows and is capped.
+        while proof is None:
+            # The loop's last step either did not validate, or the candidate
+            # moved after it did. Either way the whole-plan result is
+            # unproven, so validate it here.
+            outcome = self.validate_candidate(
+                edit_job_id, candidate_path, purpose="final"
+            )
+            if outcome.status == "passed":
+                proof = outcome.proof
+                job = self.repository.edit_job(edit_job_id)
+                break
+            if outcome.status != "repairable":
+                raise WorkflowFailure(
+                    "VALIDATION_FAILED",
+                    outcome.message,
+                    details={
+                        "validation_job_id": outcome.validation_job_id,
+                        "report": outcome.report,
+                    },
+                )
+            if _repair_step_count(high_level_plan) >= MAX_REPAIR_ATTEMPTS:
+                raise WorkflowFailure(
+                    "REPAIR_BUDGET_EXHAUSTED",
+                    "The candidate still fails validation after the repair "
+                    "budget was spent.",
+                    details={
+                        "repair_attempts": _repair_step_count(high_level_plan),
+                        "max_repair_attempts": MAX_REPAIR_ATTEMPTS,
+                        "validation_job_id": outcome.validation_job_id,
+                        "report": outcome.report,
+                    },
+                )
+            high_level_plan = self._append_repair_step(
+                edit_job_id, high_level_plan, outcome
+            )
+            job = self.repository.edit_job(edit_job_id)
+            loop_outcome = self._run_agent_loop(
+                job, goal, high_level_plan, candidate_path
+            )
+            high_level_plan = loop_outcome.plan
+            proof = loop_outcome.proof
+            job = self.repository.edit_job(edit_job_id)
+
+        candidate_sha256 = proof.source_sha256
+        canonical_path = self._commit_candidate(job, proof)
         job = self.repository.edit_job(edit_job_id)
         index_job_id = self._reindex_after_commit(
             job, canonical_path, candidate_sha256
@@ -1930,7 +2960,7 @@ class EditWorkflowOrchestrator:
             index_job_id,
             export_job_id,
             export_warnings,
-            validation_job,
+            proof.validation_job,
         )
 
     def _handle_failure(
@@ -1961,10 +2991,17 @@ class EditWorkflowOrchestrator:
             message=str(failure),
             result=result,
             worker_id=self.worker_id,
+            # Failed runs matter more than successful ones for analysis --
+            # they are the ones you go looking for.
+            metrics=self._metrics.as_json(),
         )
         return result
 
     def run(self, claimed_job: dict[str, Any]) -> dict[str, Any]:
+        # Reset per run, not per instance: a worker reuses one orchestrator
+        # across successive claimed jobs, so counters left over from the
+        # previous run would be attributed to this one.
+        self._metrics = _RunMetrics()
         try:
             return self._run(claimed_job)
         except WorkflowFailure as failure:

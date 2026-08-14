@@ -70,6 +70,14 @@ export class CadActionsService {
       case 'index_project': return this.indexProject(action.project_id);
       case 'test_index': return this.testIndex(action.project_id, action.request_text);
       case 'get_index_job': return this.getIndexJob(action.project_id, action.job_id);
+      case 'plan_project':
+        return this.planProject(action.project_id, action.request_text, action.auto_publish, action.assembly_id);
+      case 'get_project_plan': return this.getProjectPlan(action.project_id, action.job_id);
+      case 'publish_assembly_revision':
+        return this.publishAssemblyRevision(action.project_id, action.design_request_id, action.assembly_id);
+      case 'get_assembly_publish_job': return this.getAssemblyPublishJob(action.project_id, action.job_id);
+      case 'list_assembly_revisions': return this.listAssemblyRevisions(action.project_id, action.assembly_id);
+      case 'list_assemblies': return this.listAssembliesAction(action.project_id);
       case 'get_edit_job': return this.getEditJob(action.job_id, action.after_sequence ?? 0);
       case 'delete_project': return this.deleteProject(action.project_id);
       case 'delete_part': return this.deletePart(action.project_id, action.part_id);
@@ -259,6 +267,89 @@ export class CadActionsService {
       message: `Index job ${jobId} is ${job.status}.`,
       status: job.status,
       job,
+    };
+  }
+
+  private async planProject(
+    projectId: string,
+    requestText: string,
+    autoPublish?: boolean,
+    assemblyId?: string,
+  ): Promise<Record<string, unknown>> {
+    const project = await this.repository.project(projectId) as ProjectRecord;
+    // No requireIndexableProject()-style precondition -- an empty project is
+    // valid input; every part just becomes kind="new".
+    const job = await this.repository.queueProjectPlanningJob(projectId, requestText, {
+      autoPublish,
+      assemblyId,
+    });
+    return {
+      message: `Project planning job for "${project.project_name}" is ${job.status}. Job: ${job.id}`
+        + (autoPublish ? ' It will auto-publish an assembly revision on success.' : ''),
+      status: job.status,
+      job_type: 'project_plan',
+      project_id: projectId,
+      job_id: job.id,
+    };
+  }
+
+  private async getProjectPlan(projectId: string, jobId: string): Promise<Record<string, unknown>> {
+    const job = await this.repository.projectPlanningJobInProject(projectId, jobId);
+    // Only a plan queued with auto_publish=true ever has a matching row --
+    // this "peeks" at that outcome so a caller doesn't need a second
+    // get_assembly_publish_job round trip to see it.
+    const publish = job.auto_publish
+      ? await this.repository.publishJobForDesignRequest(projectId, jobId)
+      : null;
+    return {
+      message: `Project planning job ${jobId} is ${job.status}.`,
+      status: job.status,
+      job,
+      publish,
+    };
+  }
+
+  private async publishAssemblyRevision(
+    projectId: string,
+    designRequestId: string,
+    assemblyId?: string,
+  ): Promise<Record<string, unknown>> {
+    const project = await this.repository.project(projectId) as ProjectRecord;
+    const job = await this.repository.queueAssemblyPublishJob(projectId, designRequestId, assemblyId);
+    return {
+      message: `Assembly publish job for "${project.project_name}" is ${job.status}. Job: ${job.id}`,
+      status: job.status,
+      job_type: 'assembly_publish',
+      project_id: projectId,
+      job_id: job.id,
+    };
+  }
+
+  private async getAssemblyPublishJob(projectId: string, jobId: string): Promise<Record<string, unknown>> {
+    const job = await this.repository.assemblyPublishJobInProject(projectId, jobId);
+    return {
+      message: `Assembly publish job ${jobId} is ${job.status}.`,
+      status: job.status,
+      job,
+    };
+  }
+
+  private async listAssemblyRevisions(projectId: string, assemblyId: string): Promise<Record<string, unknown>> {
+    const revisions = await this.repository.assemblyRevisions(projectId, assemblyId);
+    return {
+      message: `Assembly ${assemblyId} has ${revisions.length} revision(s).`,
+      status: 'ok',
+      assembly_id: assemblyId,
+      revisions,
+    };
+  }
+
+  private async listAssembliesAction(projectId: string): Promise<Record<string, unknown>> {
+    const assemblies = await this.repository.assembliesInProject(projectId);
+    return {
+      message: `Project has ${assemblies.length} assembl${assemblies.length === 1 ? 'y' : 'ies'}.`,
+      status: 'ok',
+      assemblies,
     };
   }
 

@@ -14,8 +14,15 @@ from __future__ import annotations
 import time
 from typing import Any, Callable, Literal
 
+from ...diagnostics import bounded_diagnostics, diagnostics_message
 from ...failures import WorkflowFailure
-from ..base import AgentTool, StrictToolModel, ToolExecutionContext, ToolInputRejected
+from ..base import (
+    AgentTool,
+    StrictToolModel,
+    ToolExecutionContext,
+    ToolExecutionRejected,
+    ToolInputRejected,
+)
 from ..hashing import source_hash
 
 _TERMINAL_JOB_STATUSES = ("completed", "failed", "cancelled")
@@ -75,13 +82,14 @@ class GeometryDelta(StrictToolModel):
 class CheckGeometryOutput(StrictToolModel):
     """Structured geometry-check result for the current candidate.
 
-    ``status`` distinguishes a completed check from every expected failure
-    mode (the candidate could not be read, the geometry-check job failed, or
-    it did not finish before its bounded timeout) so the agent can observe
-    the specific reason rather than a generic tool failure.
+    Only produced for a check that actually measured something. The failure
+    modes that used to be expressed here as a ``status`` -- unreadable
+    candidate, failed check job, timeout -- are now ``GEOMETRY_CHECK_FAILED``
+    tool failures instead, because a result carrying no geometry is not
+    evidence and should not arrive looking like a success.
     """
 
-    status: Literal["completed", "source_not_found", "job_failed", "timeout"]
+    status: Literal["completed"]
     source_hash: str | None
     previous_source_hash: str | None
     geometry: GeometryFacts | None
@@ -146,19 +154,38 @@ def _warnings(value: Any) -> tuple[str, ...]:
 
 
 def _failure(
-    status: Literal["source_not_found", "job_failed", "timeout"],
+    reason: Literal["source_not_found", "job_failed", "timeout"],
     *,
     source_hash_value: str | None,
     message: str,
-) -> CheckGeometryOutput:
-    return CheckGeometryOutput(
-        status=status,
-        source_hash=source_hash_value,
-        previous_source_hash=None,
-        geometry=None,
-        delta=None,
-        warnings=(),
-        message=message,
+    diagnostics: list[dict[str, Any]] | None = None,
+) -> ToolExecutionRejected:
+    """Build the rejection for a check that produced no geometry.
+
+    Raised rather than returned: a check that could not measure anything has
+    nothing to report as evidence, and returning it as a success buried the
+    reason inside a payload the agent skimmed past -- in one observed run,
+    four consecutive "source failed static safety checks" results all arrived
+    as ``ok: true``. As a failure it reaches the agent's existing rule to
+    address a failed call before doing anything that depends on it.
+
+    ``diagnostics`` carries the validator's structured findings when the
+    check failed for a reason it could locate -- a static-safety rejection
+    names the rule, the function, and the line. Projected through the same
+    helper the step-completion gate uses, so the same defect reads
+    identically whichever path noticed it.
+
+    This still gates nothing: no caller branches on this tool's result.
+    """
+
+    return ToolExecutionRejected(
+        "GEOMETRY_CHECK_FAILED",
+        diagnostics_message(message, diagnostics or []),
+        details={
+            "reason": reason,
+            "source_hash": source_hash_value,
+            "diagnostics": diagnostics or [],
+        },
     )
 
 
@@ -190,8 +217,7 @@ class CheckGeometryTool(AgentTool[CheckGeometryInput, CheckGeometryOutput]):
     )
     input_model = CheckGeometryInput
     output_model = CheckGeometryOutput
-    batchable = False
-    parallel_safe = False
+    batch_group = None
 
     def __init__(
         self,
@@ -225,7 +251,7 @@ class CheckGeometryTool(AgentTool[CheckGeometryInput, CheckGeometryOutput]):
         try:
             source = context.services.repository.read_text(candidate_path)
         except WorkflowFailure as exc:
-            return _failure(
+            raise _failure(
                 "source_not_found", source_hash_value=None, message=str(exc)
             )
 
@@ -238,7 +264,7 @@ class CheckGeometryTool(AgentTool[CheckGeometryInput, CheckGeometryOutput]):
         job = context.services.repository.generation_job(job_id)
         while str(job.get("status") or "") not in _TERMINAL_JOB_STATUSES:
             if self._monotonic() >= deadline:
-                return _failure(
+                raise _failure(
                     "timeout",
                     source_hash_value=content_hash,
                     message="Geometry check did not complete before its timeout.",
@@ -249,13 +275,20 @@ class CheckGeometryTool(AgentTool[CheckGeometryInput, CheckGeometryOutput]):
         report = job.get("result") if isinstance(job.get("result"), dict) else {}
         source_matches = str(job.get("source_sha256") or "") == content_hash
         if job.get("status") != "completed" or not source_matches:
+            geometry = report.get("geometry")
+            diagnostics = bounded_diagnostics(
+                geometry.get("diagnostics") if isinstance(geometry, dict) else None
+            )
             message = str(
                 job.get("error_message")
                 or report.get("error_message")
                 or "Geometry check job did not complete successfully."
             )
-            return _failure(
-                "job_failed", source_hash_value=content_hash, message=message
+            raise _failure(
+                "job_failed",
+                source_hash_value=content_hash,
+                message=message,
+                diagnostics=diagnostics,
             )
 
         previous_hash = report.get("previous_source_sha256")

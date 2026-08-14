@@ -114,12 +114,12 @@ class SupabaseEditRepositoryTests(unittest.TestCase):
             ],
         )
 
-    def test_queue_validation_calls_the_owned_rpc_with_all_arguments(self):
+    def test_queue_validation_run_calls_the_owned_rpc_with_all_arguments(self):
         calls = []
 
         class RpcBuilder:
             def execute(self):
-                return SimpleNamespace(data="validation-1")
+                return SimpleNamespace(data="validation-7")
 
         def rpc(name, params):
             calls.append((name, params))
@@ -128,32 +128,34 @@ class SupabaseEditRepositoryTests(unittest.TestCase):
         supabase = SimpleNamespace(rpc=rpc)
         repository = SupabaseEditRepository(supabase)
 
-        result = repository.queue_validation(
+        result = repository.queue_validation_run(
             "edit-a",
-            "project/candidates/cad/part/edit-a/attempt-1/model.py",
-            "a" * 64,
-            1,
+            "project/candidates/cad/part/edit-a/validation-3/model.py",
+            "b" * 64,
+            3,
             worker_id="worker-1",
         )
 
-        self.assertEqual(result, "validation-1")
+        self.assertEqual(result, "validation-7")
         self.assertEqual(
             calls,
             [
                 (
-                    "queue_edit_candidate_validation_owned",
+                    "queue_edit_candidate_validation_run_owned",
                     {
                         "p_edit_job_id": "edit-a",
                         "p_worker_id": "worker-1",
-                        "p_candidate_path": "project/candidates/cad/part/edit-a/attempt-1/model.py",
-                        "p_candidate_sha256": "a" * 64,
-                        "p_attempt_count": 1,
+                        "p_candidate_path": (
+                            "project/candidates/cad/part/edit-a/validation-3/model.py"
+                        ),
+                        "p_candidate_sha256": "b" * 64,
+                        "p_validation_run": 3,
                     },
                 )
             ],
         )
 
-    def test_queue_validation_translates_a_lost_lease(self):
+    def test_queue_validation_run_translates_a_lost_lease(self):
         class RpcBuilder:
             def execute(self):
                 raise RuntimeError("EDIT_LEASE_LOST: gone")
@@ -162,8 +164,8 @@ class SupabaseEditRepositoryTests(unittest.TestCase):
         repository = SupabaseEditRepository(supabase)
 
         with self.assertRaisesRegex(WorkflowFailure, "no longer owns"):
-            repository.queue_validation(
-                "edit-a", "path", "a" * 64, 1, worker_id="worker-1"
+            repository.queue_validation_run(
+                "edit-a", "path", "b" * 64, 1, worker_id="worker-1"
             )
 
     def test_queue_export_calls_the_owned_rpc_with_all_arguments(self):

@@ -28,7 +28,7 @@ REQUESTED_PART_MIGRATION = (
     ROOT
     / "supabase"
     / "migrations"
-    / "20260726010000_add_requested_cad_part.sql"
+    / "20260712040000_edit_jobs.sql"
 ).read_text(encoding="utf-8")
 
 
@@ -109,7 +109,7 @@ class CadAgentCutoverContractTests(unittest.TestCase):
         self.assertIn("this.repository.part(", EDIT_GATEWAY)
         self.assertIn("parsed.data.project_id", EDIT_GATEWAY)
         self.assertIn("parsed.data.part_id", EDIT_GATEWAY)
-        self.assertIn("add column requested_part_id uuid", REQUESTED_PART_MIGRATION)
+        self.assertIn("requested_part_id uuid,", REQUESTED_PART_MIGRATION)
         self.assertIn(
             "foreign key (project_id, requested_part_id)",
             REQUESTED_PART_MIGRATION,

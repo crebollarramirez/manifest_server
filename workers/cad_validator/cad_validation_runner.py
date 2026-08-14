@@ -12,6 +12,17 @@ import cadquery as cq
 
 WORKER_DIR = Path(__file__).resolve().parent
 
+# Same sibling-import dance as geometry_check_runner: this runs in an
+# isolated interpreter, which does not prepend the script's own directory to
+# sys.path.
+if str(WORKER_DIR) not in sys.path:
+    sys.path.insert(0, str(WORKER_DIR))
+
+try:
+    from .geometry_inspection import measure_geometry
+except ImportError:
+    from geometry_inspection import measure_geometry
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Execute a generated CadQuery model.")
@@ -123,6 +134,12 @@ def geometry_result(model: object) -> dict:
             ],
             "build_artifacts": None,
         }
+    # The model is already built and its solids are already in hand, so the
+    # full measurement is free here. Reporting it -- rather than only the
+    # solid count -- is what lets the agent loop learn what a step produced
+    # from the validation it already runs, instead of spending a whole model
+    # round calling check_geometry to ask.
+    measurement = measure_geometry(model)
     return {
         "status": "passed",
         "stage": "completed",
@@ -131,6 +148,11 @@ def geometry_result(model: object) -> dict:
         "build_artifacts": {
             "solid_count": len(solids),
             "result_type": result_type,
+            "volume_mm3": measurement.get("volume_mm3"),
+            "bounding_box": measurement.get("bounding_box"),
+            "center_of_mass": measurement.get("center_of_mass"),
+            "face_count": measurement.get("face_count"),
+            "edge_count": measurement.get("edge_count"),
         },
     }
 

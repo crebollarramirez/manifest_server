@@ -88,6 +88,38 @@ export const CadAgentActionSchema = z.discriminatedUnion('action', [
     job_id: UuidSchema,
   }).strict(),
   ActionBase.extend({
+    action: z.literal('plan_project'),
+    project_id: UuidSchema,
+    request_text: NonBlankSchema.max(20_000),
+    auto_publish: z.boolean().optional(),
+    assembly_id: UuidSchema.optional(),
+  }).strict(),
+  ActionBase.extend({
+    action: z.literal('get_project_plan'),
+    project_id: UuidSchema,
+    job_id: UuidSchema,
+  }).strict(),
+  ActionBase.extend({
+    action: z.literal('publish_assembly_revision'),
+    project_id: UuidSchema,
+    design_request_id: UuidSchema,
+    assembly_id: UuidSchema.optional(),
+  }).strict(),
+  ActionBase.extend({
+    action: z.literal('get_assembly_publish_job'),
+    project_id: UuidSchema,
+    job_id: UuidSchema,
+  }).strict(),
+  ActionBase.extend({
+    action: z.literal('list_assembly_revisions'),
+    project_id: UuidSchema,
+    assembly_id: UuidSchema,
+  }).strict(),
+  ActionBase.extend({
+    action: z.literal('list_assemblies'),
+    project_id: UuidSchema,
+  }).strict(),
+  ActionBase.extend({
     action: z.literal('get_edit_job'),
     job_id: UuidSchema,
     after_sequence: z.number().int().min(0).optional(),

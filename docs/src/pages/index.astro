@@ -249,6 +249,18 @@ CAD_EDITOR_DEPENDENCY_POLL_INTERVAL_SECONDS=0.5
 CAD_EDITOR_DEPENDENCY_TIMEOUT_SECONDS=300
 CAD_EDITOR_LEASE_SECONDS=300`} />
 					</div>
+					<div>
+						<h4>Project Planner (Python worker) — <code>workers/project_planner/.env</code></h4>
+						<CommandBlock label="Project Planner environment" command={`SUPABASE_SERVICE_ROLE_KEY=replace-with-local-service-role-key
+OPENAI_API_KEY=replace-with-openai-key
+# Optional
+SUPABASE_URL_DOCKER=http://host.docker.internal:54321
+OPENAI_MODEL=gpt-5.4-mini
+OPENAI_PROJECT_PLANNING_MODEL=gpt-5.4-mini
+PROJECT_PLANNER_POLL_INTERVAL_SECONDS=2
+PROJECT_PLANNING_MAX_PARTS=12
+PROJECT_PLANNING_MAX_INTERFACES=24`} />
+					</div>
 				</div>
 			</section>
 
@@ -270,11 +282,12 @@ CAD_AGENT_PORT=3010`} />
 
 			<section class="runbook__section">
 				<h3>4. Start all worker containers</h3>
-				<p>This detached sequence builds and starts all four microservices. Each Compose project remains independently restartable and inspectable.</p>
+				<p>This detached sequence builds and starts all five microservices. Each Compose project remains independently restartable and inspectable.</p>
 				<CommandBlock label="Start every worker" command={`docker compose --env-file workers/indexer/.env -f workers/indexer/docker-compose.yml up --build -d &&
 docker compose --env-file workers/cad_validator/.env -f workers/cad_validator/docker-compose.yml up --build -d &&
 docker compose --env-file workers/cad_exporter/.env -f workers/cad_exporter/docker-compose.yml up --build -d &&
-docker compose --env-file workers/agent_3d/.env -f workers/agent_3d/docker-compose.yml up --build -d`} />
+docker compose --env-file workers/agent_3d/.env -f workers/agent_3d/docker-compose.yml up --build -d &&
+docker compose --env-file workers/project_planner/.env -f workers/project_planner/docker-compose.yml up --build -d`} />
 
 				<div class="runbook__commands">
 					<div>
@@ -298,9 +311,15 @@ docker compose --env-file workers/agent_3d/.env -f workers/agent_3d/docker-compo
 						<CommandBlock label="Stop" command="docker compose -f workers/agent_3d/docker-compose.yml down" />
 						<CommandBlock label="Scale to 4 replicas" command="docker compose --env-file workers/agent_3d/.env -f workers/agent_3d/docker-compose.yml up --build --scale agent-3d=4" />
 					</div>
+					<div>
+						<h4>Project Planner</h4>
+						<CommandBlock label="Start" command="docker compose --env-file workers/project_planner/.env -f workers/project_planner/docker-compose.yml up --build" />
+						<CommandBlock label="Stop" command="docker compose -f workers/project_planner/docker-compose.yml down" />
+					</div>
 				</div>
 
-				<CommandBlock label="Stop every worker" command={`docker compose -f workers/agent_3d/docker-compose.yml down &&
+				<CommandBlock label="Stop every worker" command={`docker compose -f workers/project_planner/docker-compose.yml down &&
+docker compose -f workers/agent_3d/docker-compose.yml down &&
 docker compose -f workers/cad_exporter/docker-compose.yml down &&
 docker compose -f workers/cad_validator/docker-compose.yml down &&
 docker compose -f workers/indexer/docker-compose.yml down`} />
@@ -315,6 +334,7 @@ CAD_AGENT_HTTP_TIMEOUT_SECONDS=120
 CAD_AGENT_WS_URL=ws://127.0.0.1:3010/v1/cad-edits/ws`} />
 				<CommandBlock label="Install CLI dependencies" command="python -m pip install -r requirements.txt" />
 				<CommandBlock label="Start CLI" command="python cad_agent_cli.py" />
+				<p>Type <code>/plan &lt;request&gt;</code> once a project is linked to run the project-scoped AI planner and print its <code>project_plan</code> and <code>assembly_spec</code> — it stops there and never creates parts or CAD edit jobs.</p>
 			</section>
 		</section>
 	</div>

@@ -22,6 +22,10 @@ ENV_PATH = ROOT / ".env"
 MAX_HISTORY_MESSAGES = 8
 INDEX_TEST_TIMEOUT_SECONDS = 60.0
 INDEX_TEST_POLL_INTERVAL_SECONDS = 0.5
+PROJECT_PLANNING_TIMEOUT_SECONDS = 180.0
+PROJECT_PLANNING_POLL_INTERVAL_SECONDS = 1.0
+ASSEMBLY_PUBLISH_TIMEOUT_SECONDS = 60.0
+ASSEMBLY_PUBLISH_POLL_INTERVAL_SECONDS = 1.0
 DEFAULT_CAD_AGENT_HTTP_URL = "http://127.0.0.1:3000"
 DEFAULT_CAD_AGENT_WS_URL = "ws://localhost:3000/v1/cad-edits/ws"
 DEFAULT_HTTP_TIMEOUT_SECONDS = 120.0
@@ -40,6 +44,8 @@ class CliCommand:
     target: str
     name: str = ""
     part_type: str | None = None
+    assembly_id: str | None = None
+    auto_publish: bool = False
 
 
 @dataclass
@@ -242,6 +248,10 @@ def parse_command(value: str) -> CliCommand:
         return CliCommand("list_projects", "project")
     if verb == "/list" and tokens == ["/list", "-parts"]:
         return CliCommand("list_parts", "part")
+    if verb == "/list" and tokens == ["/list", "-assemblies"]:
+        return CliCommand("list_assemblies", "assembly")
+    if verb == "/list" and len(tokens) == 3 and tokens[1] == "-assembly-revisions":
+        return CliCommand("list_assembly_revisions", "assembly", tokens[2])
     if verb == "/export" and len(tokens) == 2:
         return CliCommand("export_part", "part", tokens[1])
     if verb == "/validate" and len(tokens) == 2:
@@ -250,6 +260,33 @@ def parse_command(value: str) -> CliCommand:
         return CliCommand("test_index", "index", _command_name(tokens, 2))
     if verb == "/index" and len(tokens) == 2 and tokens[1] != "-test":
         return CliCommand("index_project", "index", tokens[1])
+    if verb == "/plan" and len(tokens) >= 2:
+        index = 1
+        auto_publish = False
+        assembly_id: str | None = None
+        while index < len(tokens):
+            if tokens[index] == "-auto-publish":
+                auto_publish = True
+                index += 1
+                continue
+            if tokens[index] == "-assembly" and index + 1 < len(tokens):
+                assembly_id = tokens[index + 1]
+                index += 2
+                continue
+            break
+        return CliCommand(
+            "plan_project",
+            "plan",
+            _command_name(tokens, index),
+            assembly_id=assembly_id,
+            auto_publish=auto_publish,
+        )
+    if verb == "/publish" and len(tokens) == 2:
+        return CliCommand("publish_assembly_revision", "assembly", tokens[1])
+    if verb == "/publish" and len(tokens) == 4 and tokens[2] == "-assembly":
+        return CliCommand(
+            "publish_assembly_revision", "assembly", tokens[1], assembly_id=tokens[3]
+        )
     if verb == "/edit-status" and len(tokens) == 2:
         return CliCommand("get_edit_job", "edit", tokens[1])
     if verb == "/delete" and len(tokens) >= 3 and tokens[1] == "-project":
@@ -264,6 +301,9 @@ def parse_command(value: str) -> CliCommand:
         "`/link -part <partId>`, `/list -projects`, `/list -parts`, "
         "`/export <partId>`, `/validate <partId>`, "
         "`/index <projectId>`, `/index -test <request>`, "
+        "`/plan [-auto-publish] [-assembly <assemblyId>] <request>`, "
+        "`/publish <designRequestJobId> [-assembly <assemblyId>]`, "
+        "`/list -assemblies`, `/list -assembly-revisions <assemblyId>`, "
         "`/edit-status <jobId>`, "
         "`/delete -project <projectId>`, or "
         "`/delete -part <partId>`."
@@ -443,6 +483,139 @@ def wait_for_index_job(
         sleep(min(poll_interval_seconds, deadline - now))
 
 
+def wait_for_project_planning_job(
+    client: Any,
+    project_id: str,
+    job_id: str,
+    *,
+    timeout_seconds: float = PROJECT_PLANNING_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = PROJECT_PLANNING_POLL_INTERVAL_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> str:
+    deadline = monotonic() + timeout_seconds
+    while True:
+        payload = invoke_action(
+            client,
+            {
+                "action": "get_project_plan",
+                "project_id": project_id,
+                "job_id": job_id,
+            },
+        )
+        job = payload.get("job")
+        if not isinstance(job, dict):
+            raise RuntimeError("CAD Agent response must include a project planning job object.")
+        status = job.get("status")
+        if not isinstance(status, str):
+            raise RuntimeError("Project planning job response must include a string status.")
+
+        if status == "completed":
+            plan = job.get("project_plan")
+            spec = job.get("assembly_spec")
+            result = (
+                f"Project plan completed. Job: {job_id}\n"
+                f"--- project_plan ---\n{json.dumps(plan, indent=2, sort_keys=True)}\n"
+                f"--- assembly_spec ---\n{json.dumps(spec, indent=2, sort_keys=True)}"
+            )
+            publish = payload.get("publish")
+            if isinstance(publish, dict):
+                publish_status = publish.get("status")
+                if publish_status == "completed":
+                    revision = publish.get("assembly_revision")
+                    result += (
+                        f"\n--- publish (auto) ---\n"
+                        f"{json.dumps(revision, indent=2, sort_keys=True)}"
+                    )
+                elif publish_status in {"failed", "cancelled"}:
+                    code = publish.get("error_code")
+                    message = publish.get("error_message")
+                    detail = f"{code}: {message}" if code else (message or "No error detail.")
+                    result += f"\n--- publish (auto) {publish_status} ---\n{detail}"
+                else:
+                    result += f"\n--- publish (auto) {publish_status} ---"
+            return result
+        if status in {"failed", "cancelled"}:
+            code = job.get("error_code")
+            message = job.get("error_message")
+            detail = f"{code}: {message}" if code else (message or "No error detail.")
+            plan = job.get("project_plan")
+            partial = (
+                f"\n--- partial project_plan ---\n{json.dumps(plan, indent=2, sort_keys=True)}"
+                if plan is not None
+                else ""
+            )
+            error_details = job.get("error_details")
+            details_block = (
+                f"\n--- error_details ---\n{json.dumps(error_details, indent=2, sort_keys=True)}"
+                if error_details is not None
+                else ""
+            )
+            return f"Project plan {status}. Job: {job_id}\n{detail}{partial}{details_block}"
+
+        now = monotonic()
+        if now >= deadline:
+            return (
+                f"Project plan is still {status} after "
+                f"{timeout_seconds:g} seconds. Job: {job_id}"
+            )
+        sleep(min(poll_interval_seconds, deadline - now))
+
+
+def wait_for_assembly_publish_job(
+    client: Any,
+    project_id: str,
+    job_id: str,
+    *,
+    timeout_seconds: float = ASSEMBLY_PUBLISH_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = ASSEMBLY_PUBLISH_POLL_INTERVAL_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> str:
+    deadline = monotonic() + timeout_seconds
+    while True:
+        payload = invoke_action(
+            client,
+            {
+                "action": "get_assembly_publish_job",
+                "project_id": project_id,
+                "job_id": job_id,
+            },
+        )
+        job = payload.get("job")
+        if not isinstance(job, dict):
+            raise RuntimeError("CAD Agent response must include an assembly publish job object.")
+        status = job.get("status")
+        if not isinstance(status, str):
+            raise RuntimeError("Assembly publish job response must include a string status.")
+
+        if status == "completed":
+            revision = job.get("assembly_revision")
+            return (
+                f"Assembly revision published. Job: {job_id}\n"
+                f"--- assembly_revision ---\n{json.dumps(revision, indent=2, sort_keys=True)}"
+            )
+        if status in {"failed", "cancelled"}:
+            code = job.get("error_code")
+            message = job.get("error_message")
+            detail = f"{code}: {message}" if code else (message or "No error detail.")
+            error_details = job.get("error_details")
+            details_block = (
+                f"\n--- error_details ---\n{json.dumps(error_details, indent=2, sort_keys=True)}"
+                if error_details is not None
+                else ""
+            )
+            return f"Assembly publish {status}. Job: {job_id}\n{detail}{details_block}"
+
+        now = monotonic()
+        if now >= deadline:
+            return (
+                f"Assembly publish is still {status} after "
+                f"{timeout_seconds:g} seconds. Job: {job_id}"
+            )
+        sleep(min(poll_interval_seconds, deadline - now))
+
+
 def handle_command(
     client: Any,
     state: CliState,
@@ -452,6 +625,8 @@ def handle_command(
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
     index_timeout_seconds: float = INDEX_TEST_TIMEOUT_SECONDS,
+    plan_timeout_seconds: float = PROJECT_PLANNING_TIMEOUT_SECONDS,
+    publish_timeout_seconds: float = ASSEMBLY_PUBLISH_TIMEOUT_SECONDS,
 ) -> str:
     if command.action == "create_project":
         payload = invoke_action(
@@ -513,6 +688,79 @@ def handle_command(
             timeout_seconds=index_timeout_seconds,
             sleep=sleep,
             monotonic=monotonic,
+        )
+
+    if command.action == "plan_project":
+        if not state.project:
+            raise CommandError("A linked project is required to create a project plan.")
+        body: dict[str, Any] = {
+            "action": "plan_project",
+            "project_id": state.project["id"],
+            "request_text": command.name,
+        }
+        if command.auto_publish:
+            body["auto_publish"] = True
+        if command.assembly_id:
+            body["assembly_id"] = command.assembly_id
+        payload = invoke_action(client, body)
+        job_id = response_job_id(payload)
+        return wait_for_project_planning_job(
+            client,
+            state.project["id"],
+            job_id,
+            timeout_seconds=plan_timeout_seconds,
+            sleep=sleep,
+            monotonic=monotonic,
+        )
+
+    if command.action == "publish_assembly_revision":
+        if not state.project:
+            raise CommandError("A linked project is required to publish an assembly revision.")
+        body: dict[str, Any] = {
+            "action": "publish_assembly_revision",
+            "project_id": state.project["id"],
+            "design_request_id": command.name,
+        }
+        if command.assembly_id:
+            body["assembly_id"] = command.assembly_id
+        payload = invoke_action(client, body)
+        job_id = response_job_id(payload)
+        return wait_for_assembly_publish_job(
+            client,
+            state.project["id"],
+            job_id,
+            timeout_seconds=publish_timeout_seconds,
+            sleep=sleep,
+            monotonic=monotonic,
+        )
+
+    if command.action == "list_assemblies":
+        if not state.project:
+            raise CommandError("A linked project is required to list assemblies.")
+        payload = invoke_action(
+            client, {"action": "list_assemblies", "project_id": state.project["id"]}
+        )
+        return (
+            response_message(payload)
+            + "\n"
+            + json.dumps(payload.get("assemblies"), indent=2, sort_keys=True)
+        )
+
+    if command.action == "list_assembly_revisions":
+        if not state.project:
+            raise CommandError("A linked project is required to list assembly revisions.")
+        payload = invoke_action(
+            client,
+            {
+                "action": "list_assembly_revisions",
+                "project_id": state.project["id"],
+                "assembly_id": command.name,
+            },
+        )
+        return (
+            response_message(payload)
+            + "\n"
+            + json.dumps(payload.get("revisions"), indent=2, sort_keys=True)
         )
 
     if command.action in {"create_part", "link_part", "list_parts", "delete_part"}:
@@ -802,6 +1050,12 @@ def main() -> int:
         print("Use /export <partId> or /validate <partId> to queue manual jobs.")
         print("Use /index <projectId> to index CAD parts in a project.")
         print("Use /index -test <request> to test the linked project's Getter.")
+        print("Use /plan [-auto-publish] [-assembly <assemblyId>] <request> to run the")
+        print("  project-scoped AI planner (no CAD is generated). -auto-publish skips the")
+        print("  separate /publish step and persists a revision immediately on success.")
+        print("Use /publish <designRequestJobId> [-assembly <assemblyId>] to persist a")
+        print("  completed plan as a new (or next) immutable assembly revision.")
+        print("Use /list -assemblies or /list -assembly-revisions <assemblyId> to inspect them.")
         print("Use /edit-status <jobId> to inspect a CAD edit workflow.")
         print("CAD requests require a project; mesh requests require a linked mesh part.")
         print("Type `exit` or `quit` to stop.\n")

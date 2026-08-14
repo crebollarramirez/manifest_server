@@ -1,4 +1,4 @@
--- Add project-scoped jobs for building and querying CAD source indexes.
+-- Project-scoped jobs for building and querying CAD source indexes.
 create table public.index_jobs (
   id uuid primary key default gen_random_uuid(),
   project_id uuid not null references public.projects(id) on delete cascade,
@@ -31,6 +31,8 @@ create index index_jobs_project_status_idx
 create unique index index_jobs_one_active_build_per_project_idx
   on public.index_jobs (project_id)
   where type = 'build_index' and status in ('queued', 'running');
+
+alter table public.index_jobs enable row level security;
 
 create function public.claim_next_index_job()
 returns setof public.index_jobs
@@ -65,8 +67,6 @@ begin
   return next claimed_job;
 end;
 $$;
-
-alter table public.index_jobs enable row level security;
 
 revoke all on function public.claim_next_index_job()
   from public, anon, authenticated;

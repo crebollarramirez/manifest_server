@@ -81,8 +81,7 @@ class CreateCadPartTool(AgentTool[CreateCadPartInput, CreateCadPartOutput]):
     )
     input_model = CreateCadPartInput
     output_model = CreateCadPartOutput
-    batchable = False
-    parallel_safe = False
+    batch_group = None
 
     async def normalize_input(self, tool_input: CreateCadPartInput) -> CreateCadPartInput:
         return tool_input.model_copy(update={"part_name": tool_input.part_name.strip()})

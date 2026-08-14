@@ -135,7 +135,7 @@ class CheckGeometryToolUnitTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(result.data.delta.volume_mm3, 500.0)
         self.assertEqual(len(sleeps), 2)  # polled twice before completion
 
-    async def test_failed_job_becomes_a_structured_job_failed_status(self):
+    async def test_a_failed_check_job_is_reported_as_a_tool_failure(self):
         import hashlib
 
         content_hash = hashlib.sha256(MODEL_SOURCE.encode()).hexdigest()
@@ -153,9 +153,13 @@ class CheckGeometryToolUnitTests(unittest.IsolatedAsyncioTestCase):
 
         result = await tool.run({}, make_context(repository))
 
-        self.assertTrue(result.ok)
-        self.assertEqual(result.data.status, "job_failed")
-        self.assertIsNotNone(result.data.message)
+        # A check that measured nothing is not evidence: it arrives as a
+        # failure so the agent's "address the failure first" rule applies,
+        # with the validator's reason intact rather than sanitized.
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error.code, "GEOMETRY_CHECK_FAILED")
+        self.assertEqual(result.error.message, "CAD execution failed.")
+        self.assertEqual(result.error.details["reason"], "job_failed")
 
     async def test_timeout_is_bounded_and_deterministic(self):
         content_hash = "b" * 64
@@ -179,10 +183,86 @@ class CheckGeometryToolUnitTests(unittest.IsolatedAsyncioTestCase):
 
         result = await tool.run({}, make_context(repository))
 
-        self.assertTrue(result.ok)
-        self.assertEqual(result.data.status, "timeout")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error.code, "GEOMETRY_CHECK_FAILED")
+        self.assertEqual(result.error.details["reason"], "timeout")
 
-    async def test_source_hash_mismatch_is_rejected_as_job_failed(self):
+    async def test_a_static_safety_rejection_reaches_the_agent_located(self):
+        """The whole point of forwarding the AST report.
+
+        A real run received "Source failed static safety checks and was not
+        executed." six times and thrashed for twenty rounds, because the rule,
+        the function, and the line were all discarded before it saw them.
+        """
+
+        import hashlib
+
+        content_hash = hashlib.sha256(MODEL_SOURCE.encode()).hexdigest()
+        repository = FakeRepository(
+            job_sequence=[
+                {
+                    "status": "failed",
+                    "source_sha256": content_hash,
+                    "error_message": "Source failed static safety checks.",
+                    "result": {
+                        "error_message": "Source failed static safety checks.",
+                        "geometry": {
+                            "execution_ok": False,
+                            "diagnostics": [
+                                {
+                                    "error_code": "INVALID_DEPENDENCY",
+                                    "message": (
+                                        "support_arm.depends_on must match direct "
+                                        "build_model dataflow; declared="
+                                        "['mounting_plate'], observed="
+                                        "['mounting_holes']."
+                                    ),
+                                    "stage": "reference_validation",
+                                    "line": 91,
+                                    "function_name": "build_support_arm",
+                                    "semantic_id": "support_arm",
+                                }
+                            ],
+                        },
+                    },
+                }
+            ]
+        )
+        tool = CheckGeometryTool()
+
+        result = await tool.run({}, make_context(repository))
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error.code, "GEOMETRY_CHECK_FAILED")
+        diagnostic = result.error.details["diagnostics"][0]
+        self.assertEqual(diagnostic["error_code"], "INVALID_DEPENDENCY")
+        self.assertEqual(diagnostic["line"], 91)
+        self.assertEqual(diagnostic["function_name"], "build_support_arm")
+        self.assertEqual(diagnostic["semantic_id"], "support_arm")
+        # And the same detail is legible in the message the model reads.
+        self.assertIn("INVALID_DEPENDENCY", result.error.message)
+        self.assertIn("build_support_arm", result.error.message)
+        self.assertIn("line 91", result.error.message)
+
+    async def test_a_failure_with_nothing_locatable_still_reports_its_reason(self):
+        repository = FakeRepository(
+            job_sequence=[{"status": "queued", "source_sha256": "b" * 64, "result": None}]
+        )
+        clock = {"value": 0.0}
+        tool = CheckGeometryTool(
+            timeout_seconds=5.0,
+            poll_interval_seconds=0.1,
+            sleep=lambda _s: clock.__setitem__("value", clock["value"] + 1000.0),
+            monotonic=lambda: clock["value"],
+        )
+
+        result = await tool.run({}, make_context(repository))
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error.details["diagnostics"], [])
+        self.assertIn("timeout", result.error.message.lower())
+
+    async def test_a_source_hash_mismatch_is_reported_as_a_tool_failure(self):
         repository = FakeRepository(
             job_sequence=[
                 {
@@ -196,8 +276,9 @@ class CheckGeometryToolUnitTests(unittest.IsolatedAsyncioTestCase):
 
         result = await tool.run({}, make_context(repository))
 
-        self.assertTrue(result.ok)
-        self.assertEqual(result.data.status, "job_failed")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error.code, "GEOMETRY_CHECK_FAILED")
+        self.assertEqual(result.error.details["reason"], "job_failed")
 
     async def test_missing_candidate_is_rejected_before_queuing_a_job(self):
         repository = FakeRepository()
@@ -209,14 +290,15 @@ class CheckGeometryToolUnitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.error.code, "TOOL_VALIDATION_FAILED")
         self.assertEqual(repository.queue_calls, [])
 
-    async def test_missing_candidate_source_is_reported_as_source_not_found(self):
+    async def test_a_missing_candidate_source_is_reported_as_a_tool_failure(self):
         repository = FakeRepository(files={})
         tool = CheckGeometryTool()
 
         result = await tool.run({}, make_context(repository))
 
-        self.assertTrue(result.ok)
-        self.assertEqual(result.data.status, "source_not_found")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error.code, "GEOMETRY_CHECK_FAILED")
+        self.assertEqual(result.error.details["reason"], "source_not_found")
         self.assertEqual(repository.queue_calls, [])
 
     async def test_rejects_unexpected_arguments(self):

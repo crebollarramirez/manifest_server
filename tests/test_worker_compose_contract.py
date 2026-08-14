@@ -54,6 +54,31 @@ class WorkerComposeContractTests(unittest.TestCase):
         self.assertIn('CMD ["python", "workers/agent_3d/edit_worker.py"]', editor_dockerfile)
         self.assertIn("workers/agent_3d/planning/prompts", editor_dockerfile)
 
+        planner = (
+            ROOT / "workers" / "project_planner" / "docker-compose.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("name: manifest-project-planner", planner)
+        self.assertEqual(planner.count("\n  project-planner:\n"), 1)
+        self.assertIn("manifest-project-planner:local", planner)
+        self.assertIn("SUPABASE_SERVICE_ROLE_KEY is required", planner)
+        self.assertIn("OPENAI_API_KEY is required", planner)
+        self.assertIn("OPENAI_PROJECT_PLANNING_MODEL", planner)
+        self.assertNotIn("worker_id", planner)
+        self.assertNotIn("LEASE_SECONDS", planner)
+        planner_dockerfile = (
+            ROOT / "workers" / "project_planner" / "Dockerfile"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'CMD ["python", "workers/project_planner/project_planner_worker.py"]',
+            planner_dockerfile,
+        )
+        self.assertIn("workers/indexer/indexer", planner_dockerfile)
+        self.assertIn("workers/project_planner/project_planner", planner_dockerfile)
+
+        # assembly_publisher was folded into project_planner_worker.py --
+        # there is no separate deployable for it anymore.
+        self.assertFalse((ROOT / "workers" / "assembly_publisher").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

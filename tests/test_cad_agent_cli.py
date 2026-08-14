@@ -78,6 +78,13 @@ class CommandParsingTests(unittest.TestCase):
                 "test_index",
                 "make the mounting holes bigger",
             ),
+            "/plan an adjustable phone stand with a rotating arm": (
+                "plan_project",
+                "an adjustable phone stand with a rotating arm",
+            ),
+            "/publish design-request-1": ("publish_assembly_revision", "design-request-1"),
+            "/list -assemblies": ("list_assemblies", ""),
+            "/list -assembly-revisions assembly-1": ("list_assembly_revisions", "assembly-1"),
             f"/edit-status {EDIT_JOB_ID}": ("get_edit_job", EDIT_JOB_ID),
             f"/delete -project {PROJECT['id']}": ("delete_project", PROJECT["id"]),
             f"/delete -part {PART['id']}": ("delete_part", PART["id"]),
@@ -90,6 +97,25 @@ class CommandParsingTests(unittest.TestCase):
         mesh_command = cad_agent_cli.parse_command('/create -part -mesh "Dragon Body"')
         self.assertEqual(mesh_command.part_type, "mesh")
 
+        publish_with_assembly = cad_agent_cli.parse_command(
+            "/publish design-request-1 -assembly assembly-1"
+        )
+        self.assertEqual(publish_with_assembly.action, "publish_assembly_revision")
+        self.assertEqual(publish_with_assembly.name, "design-request-1")
+        self.assertEqual(publish_with_assembly.assembly_id, "assembly-1")
+
+        plan_auto_publish = cad_agent_cli.parse_command(
+            "/plan -auto-publish -assembly assembly-1 a two-part phone stand"
+        )
+        self.assertEqual(plan_auto_publish.action, "plan_project")
+        self.assertEqual(plan_auto_publish.name, "a two-part phone stand")
+        self.assertTrue(plan_auto_publish.auto_publish)
+        self.assertEqual(plan_auto_publish.assembly_id, "assembly-1")
+
+        plan_default = cad_agent_cli.parse_command("/plan a two-part phone stand")
+        self.assertFalse(plan_default.auto_publish)
+        self.assertIsNone(plan_default.assembly_id)
+
     def test_rejects_unknown_or_unterminated_commands(self):
         with self.assertRaises(cad_agent_cli.CommandError):
             cad_agent_cli.parse_command("/create -part Left Bracket")
@@ -101,6 +127,8 @@ class CommandParsingTests(unittest.TestCase):
             cad_agent_cli.parse_command(f"/validate {PART['id']} extra")
         with self.assertRaises(cad_agent_cli.CommandError):
             cad_agent_cli.parse_command("/index -test")
+        with self.assertRaises(cad_agent_cli.CommandError):
+            cad_agent_cli.parse_command("/plan")
         with self.assertRaises(cad_agent_cli.CommandError):
             cad_agent_cli.parse_command("/edit-status")
 
@@ -386,6 +414,286 @@ class LinkedStateTests(unittest.TestCase):
         self.assertEqual(
             test_supabase.calls[1]["action"],
             "get_index_job",
+        )
+
+    def test_plan_command_submits_and_prints_completed_plan(self):
+        plan_job_id = "77777777-7777-4777-8777-777777777777"
+        client = FakeClient([
+            {"message": "queued", "job_id": plan_job_id},
+            {
+                "message": "completed",
+                "job": {
+                    "status": "completed",
+                    "project_plan": {"summary": "A two-part phone stand.", "parts": []},
+                    "assembly_spec": {"nodes": []},
+                },
+            },
+        ])
+        state = cad_agent_cli.CliState(project=PROJECT.copy())
+
+        result = cad_agent_cli.handle_command(
+            client,
+            state,
+            cad_agent_cli.parse_command("/plan an adjustable phone stand"),
+        )
+
+        self.assertIn("Project plan completed", result)
+        self.assertIn('"summary": "A two-part phone stand."', result)
+        self.assertIn('"nodes": []', result)
+        self.assertEqual(
+            client.calls[0],
+            {
+                "action": "plan_project",
+                "project_id": PROJECT["id"],
+                "request_text": "an adjustable phone stand",
+            },
+        )
+        self.assertEqual(client.calls[1]["action"], "get_project_plan")
+
+    def test_plan_command_with_auto_publish_sends_flags_and_prints_revision(self):
+        plan_job_id = "88888888-8888-4888-8888-888888888888"
+        client = FakeClient([
+            {"message": "queued", "job_id": plan_job_id},
+            {
+                "message": "completed",
+                "job": {
+                    "status": "completed",
+                    "project_plan": {"summary": "A two-part phone stand.", "parts": []},
+                    "assembly_spec": {"nodes": []},
+                },
+                "publish": {
+                    "status": "completed",
+                    "assembly_revision": {"assembly_id": "assembly-1", "revision": 1},
+                },
+            },
+        ])
+        state = cad_agent_cli.CliState(project=PROJECT.copy())
+
+        result = cad_agent_cli.handle_command(
+            client,
+            state,
+            cad_agent_cli.parse_command(
+                "/plan -auto-publish -assembly assembly-1 an adjustable phone stand"
+            ),
+        )
+
+        self.assertIn("Project plan completed", result)
+        self.assertIn("publish (auto)", result)
+        self.assertIn('"revision": 1', result)
+        self.assertEqual(
+            client.calls[0],
+            {
+                "action": "plan_project",
+                "project_id": PROJECT["id"],
+                "request_text": "an adjustable phone stand",
+                "auto_publish": True,
+                "assembly_id": "assembly-1",
+            },
+        )
+
+    def test_plan_command_reports_clarification_failure(self):
+        plan_job_id = "66666666-6666-4666-8666-666666666666"
+        client = FakeClient([
+            {"message": "queued", "job_id": plan_job_id},
+            {
+                "message": "failed",
+                "job": {
+                    "status": "failed",
+                    "error_code": "PROJECT_CLARIFICATION_REQUIRED",
+                    "error_message": "Should the lid be removable or permanently attached?",
+                    "project_plan": None,
+                },
+            },
+        ])
+        state = cad_agent_cli.CliState(project=PROJECT.copy())
+
+        result = cad_agent_cli.handle_command(
+            client,
+            state,
+            cad_agent_cli.parse_command("/plan make the lid attached"),
+        )
+
+        self.assertIn("Project plan failed", result)
+        self.assertIn("PROJECT_CLARIFICATION_REQUIRED", result)
+        self.assertIn("removable or permanently attached", result)
+
+    def test_plan_command_prints_error_details_when_present(self):
+        plan_job_id = "55555555-5555-4555-8555-555555555555"
+        client = FakeClient([
+            {"message": "queued", "job_id": plan_job_id},
+            {
+                "message": "failed",
+                "job": {
+                    "status": "failed",
+                    "error_code": "PROJECT_PLAN_INVALID",
+                    "error_message": "The project plan still had 1 unresolved violation(s).",
+                    "project_plan": None,
+                    "error_details": {
+                        "violations": [
+                            {
+                                "code": "PROJECT_PLAN_INVALID_INTERFACE",
+                                "message": 'Interface "x" connects a part to itself.',
+                                "details": {"condition": "self_reference"},
+                                "retryable": True,
+                            }
+                        ],
+                        "attempts": [{"attempt": 0}],
+                    },
+                },
+            },
+        ])
+        state = cad_agent_cli.CliState(project=PROJECT.copy())
+
+        result = cad_agent_cli.handle_command(
+            client,
+            state,
+            cad_agent_cli.parse_command("/plan a self-referencing widget"),
+        )
+
+        self.assertIn("--- error_details ---", result)
+        self.assertIn("PROJECT_PLAN_INVALID_INTERFACE", result)
+        self.assertIn("self_reference", result)
+
+    def test_plan_command_requires_linked_project(self):
+        client = FakeClient([])
+        with self.assertRaises(cad_agent_cli.CommandError):
+            cad_agent_cli.handle_command(
+                client,
+                cad_agent_cli.CliState(),
+                cad_agent_cli.parse_command("/plan a flower pot"),
+            )
+
+    def test_publish_command_submits_and_prints_completed_revision(self):
+        design_request_id = "88888888-8888-4888-8888-888888888888"
+        publish_job_id = "99999999-9999-4999-9999-999999999999"
+        assembly_id = "aaaaaaaa-1111-4111-8111-111111111111"
+        client = FakeClient([
+            {"message": "queued", "job_id": publish_job_id},
+            {
+                "message": "completed",
+                "job": {
+                    "status": "completed",
+                    "assembly_revision": {
+                        "revision_id": "rev-1",
+                        "assembly_id": assembly_id,
+                        "revision": 1,
+                        "parent_revision": None,
+                    },
+                },
+            },
+        ])
+        state = cad_agent_cli.CliState(project=PROJECT.copy())
+
+        result = cad_agent_cli.handle_command(
+            client,
+            state,
+            cad_agent_cli.parse_command(f"/publish {design_request_id}"),
+        )
+
+        self.assertIn("Assembly revision published", result)
+        self.assertIn('"revision": 1', result)
+        self.assertEqual(
+            client.calls[0],
+            {
+                "action": "publish_assembly_revision",
+                "project_id": PROJECT["id"],
+                "design_request_id": design_request_id,
+            },
+        )
+        self.assertEqual(client.calls[1]["action"], "get_assembly_publish_job")
+
+    def test_publish_command_includes_assembly_id_when_continuing(self):
+        design_request_id = "88888888-8888-4888-8888-888888888888"
+        assembly_id = "aaaaaaaa-1111-4111-8111-111111111111"
+        client = FakeClient([
+            {"message": "queued", "job_id": "job-1"},
+            {"message": "completed", "job": {"status": "completed", "assembly_revision": {"revision": 2}}},
+        ])
+        state = cad_agent_cli.CliState(project=PROJECT.copy())
+
+        cad_agent_cli.handle_command(
+            client,
+            state,
+            cad_agent_cli.parse_command(f"/publish {design_request_id} -assembly {assembly_id}"),
+        )
+
+        self.assertEqual(
+            client.calls[0],
+            {
+                "action": "publish_assembly_revision",
+                "project_id": PROJECT["id"],
+                "design_request_id": design_request_id,
+                "assembly_id": assembly_id,
+            },
+        )
+
+    def test_publish_command_reports_plan_invalid_with_error_details(self):
+        client = FakeClient([
+            {"message": "queued", "job_id": "job-1"},
+            {
+                "message": "failed",
+                "job": {
+                    "status": "failed",
+                    "error_code": "ASSEMBLY_PUBLISH_PLAN_INVALID",
+                    "error_message": "The project plan failed canonical validation with 1 violation(s).",
+                    "error_details": {
+                        "violations": [
+                            {"code": "PROJECT_PLAN_EXECUTION_DEPENDENCY_CYCLE", "message": "cyclic"}
+                        ]
+                    },
+                },
+            },
+        ])
+        state = cad_agent_cli.CliState(project=PROJECT.copy())
+
+        result = cad_agent_cli.handle_command(
+            client, state, cad_agent_cli.parse_command("/publish design-request-1")
+        )
+
+        self.assertIn("Assembly publish failed", result)
+        self.assertIn("ASSEMBLY_PUBLISH_PLAN_INVALID", result)
+        self.assertIn("PROJECT_PLAN_EXECUTION_DEPENDENCY_CYCLE", result)
+
+    def test_publish_command_requires_linked_project(self):
+        client = FakeClient([])
+        with self.assertRaises(cad_agent_cli.CommandError):
+            cad_agent_cli.handle_command(
+                client,
+                cad_agent_cli.CliState(),
+                cad_agent_cli.parse_command("/publish design-request-1"),
+            )
+
+    def test_list_assemblies_and_assembly_revisions_commands(self):
+        assembly_id = "aaaaaaaa-1111-4111-8111-111111111111"
+        client = FakeClient([
+            {
+                "message": "Project has 1 assembly.",
+                "assemblies": [{"id": assembly_id, "head_revision": 2}],
+            },
+            {
+                "message": f"Assembly {assembly_id} has 2 revision(s).",
+                "revisions": [{"revision": 1}, {"revision": 2}],
+            },
+        ])
+        state = cad_agent_cli.CliState(project=PROJECT.copy())
+
+        assemblies_result = cad_agent_cli.handle_command(
+            client, state, cad_agent_cli.parse_command("/list -assemblies")
+        )
+        self.assertIn("Project has 1 assembly.", assemblies_result)
+        self.assertIn('"head_revision": 2', assemblies_result)
+        self.assertEqual(
+            client.calls[0], {"action": "list_assemblies", "project_id": PROJECT["id"]}
+        )
+
+        revisions_result = cad_agent_cli.handle_command(
+            client, state, cad_agent_cli.parse_command(f"/list -assembly-revisions {assembly_id}")
+        )
+        self.assertIn("2 revision(s)", revisions_result)
+        self.assertIn('"revision": 1', revisions_result)
+        self.assertEqual(
+            client.calls[1],
+            {"action": "list_assembly_revisions", "project_id": PROJECT["id"], "assembly_id": assembly_id},
         )
 
     def test_edit_status_does_not_require_linked_state(self):

@@ -7,7 +7,12 @@ from typing import Any, Literal
 from pydantic import Field
 
 from ...failures import WorkflowFailure
-from ..base import AgentTool, StrictToolModel, ToolExecutionContext
+from ..base import (
+    BATCH_GROUP_READ,
+    AgentTool,
+    StrictToolModel,
+    ToolExecutionContext,
+)
 
 
 def _records(value: Any) -> list[dict[str, Any]]:
@@ -216,8 +221,7 @@ class IndexSearchTool(AgentTool[IndexSearchInput, IndexSearchOutput]):
     )
     input_model = IndexSearchInput
     output_model = IndexSearchOutput
-    batchable = True
-    parallel_safe = True
+    batch_group = BATCH_GROUP_READ
 
     async def execute(
         self,
@@ -303,8 +307,7 @@ class IndexGetFeatureTool(
     )
     input_model = IndexGetFeatureInput
     output_model = IndexGetFeatureOutput
-    batchable = True
-    parallel_safe = True
+    batch_group = BATCH_GROUP_READ
 
     async def execute(
         self,

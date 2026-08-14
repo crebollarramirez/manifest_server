@@ -118,6 +118,19 @@ Decorator rules:
 
 ## Geometry practices
 
+- **A part is exactly one connected printable solid.** `build_model` must
+  return geometry whose solid count is 1. This is not a stylistic preference:
+  a project made of several physical pieces is several *parts*, each with its
+  own source and its own assembly interfaces, and a part that silently splits
+  into two bodies is a piece nothing downstream can see, bind, or print.
+- Additive geometry must actually intersect what it joins before you union it.
+  Two bodies that merely touch at a mathematical tangent, or that are placed
+  near each other but do not overlap, union into two separate solids rather
+  than one. Give joins real overlap, and derive their placement from the
+  geometry they attach to rather than from independently chosen coordinates.
+- Fillets and chamfers refine an already-connected body. They cannot join
+  separate solids, and attempting to blend across a gap fails rather than
+  closing it. Fix connectivity first, then refine edges.
 - Prefer readable, stepwise CadQuery construction over dense fluent chains.
 - Build geometry as explicit constructive-solid-geometry stages with names that
   reflect their purpose, such as `outer_body`, `inner_cavity`, `wall_ring`,

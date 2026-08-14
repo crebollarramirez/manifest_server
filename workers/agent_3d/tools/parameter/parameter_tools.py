@@ -8,7 +8,13 @@ from typing import Literal
 from pydantic import Field
 
 from ...failures import WorkflowFailure
-from ..base import AgentTool, StrictToolModel, ToolExecutionContext, ToolInputRejected
+from ..base import (
+    BATCH_GROUP_PARAMETER_CREATE,
+    AgentTool,
+    StrictToolModel,
+    ToolExecutionContext,
+    ToolInputRejected,
+)
 from ..hashing import source_hash
 from ..feature.feature_generation import _candidate_source_path, _source_layout
 from .parameter_generation import (
@@ -132,8 +138,13 @@ class CreateParameterTool(AgentTool[CreateParameterInput, CreateParameterOutput]
     )
     input_model = CreateParameterInput
     output_model = CreateParameterOutput
-    batchable = False
-    parallel_safe = False
+    # Several fields may be created in one round. Each call re-reads the
+    # candidate before splicing its own marker-wrapped field, and the
+    # insertion span is marker-aware, so batched calls append cleanly in the
+    # order they were issued. Distinct field names cannot conflict, and a
+    # repeated one is caught by the duplicate check, which also reads live
+    # source and therefore sees an earlier call in the same batch.
+    batch_group = BATCH_GROUP_PARAMETER_CREATE
 
     async def normalize_input(self, tool_input: CreateParameterInput) -> CreateParameterInput:
         return tool_input.model_copy(update={"parameter_name": tool_input.parameter_name.strip()})
@@ -230,8 +241,7 @@ class EditParameterTool(AgentTool[EditParameterInput, EditParameterOutput]):
     )
     input_model = EditParameterInput
     output_model = EditParameterOutput
-    batchable = False
-    parallel_safe = False
+    batch_group = None
 
     async def normalize_input(self, tool_input: EditParameterInput) -> EditParameterInput:
         return tool_input.model_copy(update={"parameter_name": tool_input.parameter_name.strip()})
@@ -327,8 +337,7 @@ class DeleteParameterTool(AgentTool[DeleteParameterInput, DeleteParameterOutput]
     )
     input_model = DeleteParameterInput
     output_model = DeleteParameterOutput
-    batchable = False
-    parallel_safe = False
+    batch_group = None
 
     async def normalize_input(self, tool_input: DeleteParameterInput) -> DeleteParameterInput:
         return tool_input.model_copy(update={"parameter_name": tool_input.parameter_name.strip()})

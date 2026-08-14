@@ -1,0 +1,23 @@
+name: manifest-project-planner
+
+services:
+  project-planner:
+    image: manifest-project-planner:local
+    build:
+      context: ../..
+      dockerfile: workers/project_planner/Dockerfile
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL_DOCKER:-http://host.docker.internal:54321}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?SUPABASE_SERVICE_ROLE_KEY is required}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY is required}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4-mini}
+      OPENAI_PROJECT_PLANNING_MODEL: ${OPENAI_PROJECT_PLANNING_MODEL:-gpt-5.4-mini}
+      PROJECT_PLANNER_POLL_INTERVAL_SECONDS: ${PROJECT_PLANNER_POLL_INTERVAL_SECONDS:-2}
+      PROJECT_PLANNING_MAX_PARTS: ${PROJECT_PLANNING_MAX_PARTS:-12}
+      PROJECT_PLANNING_MAX_INTERFACES: ${PROJECT_PLANNING_MAX_INTERFACES:-24}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ../..:/app
+    init: true
+    restart: unless-stopped

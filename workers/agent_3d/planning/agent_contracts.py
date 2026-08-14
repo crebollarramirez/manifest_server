@@ -118,7 +118,30 @@ class CadPlanModelOutput(CadPlanContent):
     version: int
 
 
+class PlanStepState(PlanStep):
+    """A plan step as the orchestrator owns it, not as the planner emits it.
+
+    ``kind`` is server-owned state, which is why it lives here rather than on
+    :class:`PlanStep`: :class:`CadPlanModelOutput` is handed to the Responses
+    API as ``text_format``, which compiles the model into a strict JSON schema
+    where every property is required. A ``kind`` field on ``PlanStep`` would
+    therefore force the planning model to emit one for every step. The planner
+    never creates a repair step -- only the orchestrator does, and only after
+    final validation fails.
+
+    The default matters for more than ergonomics: plan checkpoints written
+    before repair steps existed have no ``kind``, and ``extra="forbid"`` plus
+    a required field would fail every one of them on resume.
+    """
+
+    kind: Literal["plan", "repair"] = "plan"
+
+
 class CadPlan(CadPlanContent):
     plan_id: UUID
     goal_id: UUID
     version: int = Field(gt=0)
+    # Re-declared rather than only retyped: pydantic does not inherit the
+    # parent field's Field() metadata across an override, so omitting the
+    # bounds here would silently drop them.
+    steps: list[PlanStepState] = Field(min_length=1, max_length=64)

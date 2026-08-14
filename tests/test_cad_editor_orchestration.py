@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import re
 import unittest
+import unittest.mock
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
 from workers.agent_3d.failures import WorkflowFailure
 from workers.agent_3d.orchestrator import (
     MAX_AGENT_TURNS,
+    MAX_REPAIR_ATTEMPTS,
+    MAX_REPAIR_TURNS,
     MAX_STEP_TURNS,
+    MAX_STEP_VALIDATION_REJECTIONS,
     MAX_TOOL_CALLS_PER_BATCH,
     EditWorkflowOrchestrator,
     ToolCallBatch,
@@ -28,8 +35,10 @@ from workers.agent_3d.planning.agent_contracts import (
     CadPlan,
     CadPlanModelOutput,
 )
+from workers.agent_3d.tools.hashing import source_hash
 from workers.agent_3d.tools import (
     CreateFeatureTool,
+    CreateParameterTool,
     EditCadBuildModelTool,
     IndexGetFeatureTool,
     RequestStepCompletionTool,
@@ -39,6 +48,34 @@ from workers.agent_3d.tools import (
     ToolServices,
 )
 
+
+def _constraint_values(anchor: str) -> frozenset[str]:
+    """Read an `in (...)` CHECK list out of the migrations.
+
+    Parsed from the SQL rather than duplicated here on purpose: a hardcoded
+    copy drifts silently, and the whole point of checking these in the fake
+    is to fail when code emits a value the database would reject. The last
+    migration that defines the constraint wins, matching how they apply.
+    """
+
+    migrations = sorted(
+        (Path(__file__).resolve().parents[1] / "supabase" / "migrations").glob("*.sql")
+    )
+    for path in reversed(migrations):
+        text = path.read_text(encoding="utf-8")
+        index = text.rfind(anchor)
+        if index == -1:
+            continue
+        body = text[index + len(anchor):]
+        body = body[: body.index(")")]
+        values = frozenset(re.findall(r"'([a-z_]+(?:\.[a-z_]+)?)'", body))
+        if values:
+            return values
+    raise AssertionError(f"No migration defines a CHECK list for {anchor!r}.")
+
+
+ALLOWED_EVENT_TYPES = _constraint_values("event_type in (")
+ALLOWED_JOB_STATES = _constraint_values("state in (")
 
 PROJECT_ID = "22222222-2222-4222-8222-222222222222"
 PART_ID = "11111111-1111-4111-8111-111111111111"
@@ -145,6 +182,96 @@ def plan_output() -> CadPlanModelOutput:
     )
 
 
+# Validation report builders. These mirror the real schema-2 shape the CAD
+# validator emits (workers/cad_validator/cad_ast_validator.py), because the
+# orchestrator's classification reads schema_version, repairable_hint, and
+# diagnostics -- a looser stub would silently exercise a different branch
+# than the one a test means to cover.
+def passed_report(solid_count: int = 1, **geometry: object) -> dict:
+    return {
+        "schema_version": 2,
+        "status": "passed",
+        "stage": "completed",
+        "repairable_hint": False,
+        "diagnostics": [],
+        "valid": True,
+        "safe_to_execute": True,
+        "build_artifacts": {
+            "solid_count": solid_count,
+            "result_type": "cadquery.Workplane",
+            **geometry,
+        },
+    }
+
+
+def repairable_report(
+    error_code: str = "CADQUERY_RUNTIME_ERROR",
+    message: str = "Shape is not valid.",
+    **diagnostic: object,
+) -> dict:
+    """A failure the agent can act on: the candidate's own source is at fault."""
+
+    return {
+        "schema_version": 2,
+        "status": "failed",
+        "stage": "cadquery_runtime",
+        "repairable_hint": True,
+        "diagnostics": [
+            {
+                "error_code": error_code,
+                "message": message,
+                "stage": "cadquery_runtime",
+                "file_path": "model.py",
+                "related_symbols": ["make_bracket"],
+                **diagnostic,
+            }
+        ],
+        "valid": False,
+        "safe_to_execute": True,
+    }
+
+
+def timeout_report() -> dict:
+    """Infrastructure failure: nothing here describes a fixable source defect."""
+
+    return {
+        "schema_version": 2,
+        "status": "failed",
+        "stage": "cadquery_runtime",
+        "repairable_hint": False,
+        "diagnostics": [
+            {
+                "error_code": "VALIDATION_TIMEOUT",
+                "message": "Validation exceeded its time budget.",
+                "stage": "cadquery_runtime",
+                "file_path": "model.py",
+                "related_symbols": [],
+            }
+        ],
+        "valid": False,
+        "safe_to_execute": True,
+    }
+
+
+def worker_error_report() -> dict:
+    return {
+        "schema_version": 2,
+        "status": "failed",
+        "stage": "worker",
+        "repairable_hint": False,
+        "diagnostics": [
+            {
+                "error_code": "VALIDATION_WORKER_ERROR",
+                "message": "The validation worker crashed.",
+                "stage": "worker",
+                "file_path": "model.py",
+                "related_symbols": [],
+            }
+        ],
+        "valid": False,
+    }
+
+
 class FakeRepository:
     def __init__(self):
         self.jobs = {
@@ -187,7 +314,12 @@ class FakeRepository:
         self.generation_count = 0
         self.export_count = 0
         self.validation_status = "completed"
-        self.validation_result: dict = {"status": "passed", "valid": True}
+        self.validation_result: dict = passed_report()
+        # Scripts consecutive validation runs. Each entry may carry any of
+        # status / result / source_storage_path / source_sha256 /
+        # error_message; anything omitted falls back to the flat knobs above.
+        # Empty means "every run behaves the same".
+        self.validation_outcomes: list[dict] = []
         self.index_should_fail = False
         self.export_should_fail = False
         self.validation_calls: list[dict] = []
@@ -252,6 +384,22 @@ class FakeRepository:
         metadata: dict,
     ) -> dict:
         self._owned(worker_id)
+        # edit_job_events.event_type and edit_jobs.state are closed CHECK
+        # lists in the database. Enforcing them here is what stops a new
+        # event type or state from passing every test and then failing on
+        # its first real run -- exactly how validation.completed shipped
+        # broken once.
+        if event_type not in ALLOWED_EVENT_TYPES:
+            raise AssertionError(
+                f"event_type {event_type!r} is not in the "
+                "edit_job_events_event_type_check constraint; add it in a "
+                "migration before emitting it."
+            )
+        if state not in ALLOWED_JOB_STATES:
+            raise AssertionError(
+                f"state {state!r} is not in the edit_jobs state check "
+                "constraint; add it in a migration before setting it."
+            )
         event = {
             "edit_job_id": edit_job_id,
             "event_type": event_type,
@@ -331,12 +479,12 @@ class FakeRepository:
     def generation_job(self, generation_job_id: str) -> dict:
         return copy.deepcopy(self.generation_jobs[generation_job_id])
 
-    def queue_validation(
+    def queue_validation_run(
         self,
         edit_job_id: str,
         candidate_path: str,
         candidate_sha256: str,
-        attempt_count: int,
+        validation_run: int,
         *,
         worker_id: str,
     ) -> str:
@@ -346,25 +494,43 @@ class FakeRepository:
                 "edit_job_id": edit_job_id,
                 "candidate_path": candidate_path,
                 "candidate_sha256": candidate_sha256,
-                "attempt_count": attempt_count,
+                "validation_run": validation_run,
             }
         )
+        # Mirrors the RPC's idempotent-reuse branch: the same (path, hash)
+        # returns the child that already exists rather than a duplicate,
+        # regardless of its status.
+        existing_id = self.jobs[edit_job_id].get("validation_job_id")
+        existing = self.generation_jobs.get(str(existing_id)) if existing_id else None
+        if (
+            existing is not None
+            and existing["source_storage_path"] == candidate_path
+            and existing["source_sha256"] == candidate_sha256
+        ):
+            return str(existing_id)
+
         self.generation_count += 1
         generation_id = f"validation-{self.generation_count}"
+        outcome = (
+            self.validation_outcomes.pop(0)
+            if self.validation_outcomes
+            else {"status": self.validation_status, "result": self.validation_result}
+        )
+        report = copy.deepcopy(outcome.get("result", self.validation_result))
         self.generation_jobs[generation_id] = {
             "id": generation_id,
             "edit_job_id": edit_job_id,
             "type": "validate_cad",
             "source_kind": "candidate",
-            "source_storage_path": candidate_path,
-            "source_sha256": candidate_sha256,
-            "status": self.validation_status,
-            "result": copy.deepcopy(self.validation_result),
-            "error_message": None,
+            "source_storage_path": outcome.get("source_storage_path", candidate_path),
+            "source_sha256": outcome.get("source_sha256", candidate_sha256),
+            "status": outcome.get("status", self.validation_status),
+            "result": report,
+            "error_message": outcome.get("error_message"),
         }
         self.jobs[edit_job_id].update(
             state="validating_candidate",
-            attempt_count=attempt_count,
+            validation_run_count=validation_run,
             current_candidate_path=candidate_path,
             current_candidate_sha256=candidate_sha256,
             validation_job_id=generation_id,
@@ -397,12 +563,14 @@ class FakeRepository:
         result: dict,
         *,
         worker_id: str,
+        metrics: dict | None = None,
     ) -> dict:
         self._owned(worker_id)
         self.jobs[edit_job_id].update(
             status="completed",
             state="completed",
             result=copy.deepcopy(result),
+            metrics=copy.deepcopy(metrics or {}),
         )
         return self.edit_job(edit_job_id)
 
@@ -414,6 +582,7 @@ class FakeRepository:
         message: str,
         result: dict,
         worker_id: str,
+        metrics: dict | None = None,
     ) -> dict:
         self._owned(worker_id)
         self.jobs[edit_job_id].update(
@@ -422,6 +591,7 @@ class FakeRepository:
             error_code=code,
             error_message=message,
             result=copy.deepcopy(result),
+            metrics=copy.deepcopy(metrics or {}),
         )
         return self.edit_job(edit_job_id)
 
@@ -487,20 +657,24 @@ def completion_turn(summary: str = "Step done.", call_id: str = "call-1"):
     return [tool_call("request_step_completion", call_id, summary=summary)]
 
 
-def create_feature_turn(call_id: str = "call-1"):
-    """Build a decision that adds one valid CAD feature to the candidate."""
+def create_feature_turn(call_id: str = "call-1", name: str = "base_plate"):
+    """Build a decision that adds one valid CAD feature to the candidate.
+
+    ``name`` distinguishes successive features so a test can mutate the
+    candidate more than once -- creating the same semantic ID twice fails.
+    """
 
     return [
         tool_call(
             "create_feature",
             call_id,
-            semantic_id="base_plate",
-            function_name="build_base_plate",
+            semantic_id=name,
+            function_name=f"build_{name}",
             role="primary_body",
             parameters=[],
             dependencies=[],
-            search_keys=["base", "plate"],
-            docstring="Build the base plate.",
+            search_keys=[name, "plate"],
+            docstring=f"Build the {name}.",
             function_body='return cq.Workplane("XY").box(100, 100, 5)',
         )
     ]
@@ -526,6 +700,7 @@ class FakeAgent3D:
             {"type": "function", "name": "index_search"},
             {"type": "function", "name": "index_get_feature"},
             {"type": "function", "name": "create_feature"},
+            {"type": "function", "name": "create_parameter"},
             {"type": "function", "name": "edit_cad_build_model"},
         )
 
@@ -562,6 +737,7 @@ class RecordingToolExecutor:
         registry.register(CreateFeatureTool())
         registry.register(EditCadBuildModelTool())
         registry.register(IndexGetFeatureTool())
+        registry.register(CreateParameterTool())
         self._executor = ToolExecutor(registry)
         self.invoked = False
         self.calls: list[dict] = []
@@ -571,8 +747,8 @@ class RecordingToolExecutor:
         self.calls.append(kwargs)
         return self._executor.execute_sync(**kwargs)
 
-    def is_batchable(self, tool_id: str) -> bool:
-        return self._executor.is_batchable(tool_id)
+    def batch_group(self, tool_id: str) -> str | None:
+        return self._executor.batch_group(tool_id)
 
 
 def runtime(repository: FakeRepository, *, agent_script: list[list] | None = None):
@@ -1006,11 +1182,78 @@ class ExecuteCallRedundancyIntegrationTests(unittest.TestCase):
 
 
 class BatchValidationTests(unittest.TestCase):
-    ALLOWED = {"index_search", "index_get_feature", "create_feature"}
+    ALLOWED = {
+        "index_search",
+        "index_get_feature",
+        "create_feature",
+        "create_parameter",
+        "request_step_completion",
+    }
 
     @staticmethod
     def _batch(*items) -> ToolCallBatch:
         return ToolCallBatch(calls=tuple(_parse_call(item) for item in items))
+
+    @staticmethod
+    def _rejection(outputs: list[dict]) -> dict:
+        return json.loads(outputs[0]["output"])["error"]
+
+    def test_several_create_parameter_calls_share_one_round(self):
+        orchestrator, *_rest = runtime(FakeRepository())
+        batch = self._batch(
+            tool_call("create_parameter", "call-1", parameter_name="a_mm", value=1.0),
+            tool_call("create_parameter", "call-2", parameter_name="b_mm", value=2.0),
+            tool_call("create_parameter", "call-3", parameter_name="c_mm", value=3.0),
+        )
+
+        self.assertIsNone(orchestrator._validate_batch(batch, self.ALLOWED))
+
+    def test_a_read_mixed_with_a_parameter_create_is_rejected_as_mixed_groups(self):
+        orchestrator, *_rest = runtime(FakeRepository())
+        batch = self._batch(
+            tool_call("index_get_feature", "call-1", semantic_id="a"),
+            tool_call("create_parameter", "call-2", parameter_name="a_mm", value=1.0),
+        )
+
+        outputs = orchestrator._validate_batch(batch, self.ALLOWED)
+
+        self.assertEqual(len(outputs), 2)
+        error = self._rejection(outputs)
+        self.assertEqual(error["code"], "TOOL_BATCH_REJECTED")
+        self.assertEqual(error["details"]["reason"], "mixed_batch_groups")
+        self.assertEqual(
+            error["details"]["batch_groups"], ["parameter_create", "read"]
+        )
+
+    def test_a_parameter_create_with_a_solo_tool_reports_not_batchable(self):
+        # Pins the sub-rule ordering: the None check must run before the
+        # homogeneity check, or sorting a set holding None and str raises.
+        orchestrator, *_rest = runtime(FakeRepository())
+        batch = self._batch(
+            tool_call("create_parameter", "call-1", parameter_name="a_mm", value=1.0),
+            tool_call("create_feature", "call-2"),
+        )
+
+        outputs = orchestrator._validate_batch(batch, self.ALLOWED)
+
+        error = self._rejection(outputs)
+        self.assertEqual(error["details"]["reason"], "not_batchable")
+        self.assertEqual(error["details"]["tool_ids"], ["create_feature"])
+
+    def test_request_step_completion_can_never_share_a_round(self):
+        # The atomicity invariant: the completion gate reads the candidate
+        # hash assuming nothing else in this round can have touched it.
+        orchestrator, *_rest = runtime(FakeRepository())
+        batch = self._batch(
+            tool_call("request_step_completion", "call-1", summary="done"),
+            tool_call("create_parameter", "call-2", parameter_name="a_mm", value=1.0),
+        )
+
+        outputs = orchestrator._validate_batch(batch, self.ALLOWED)
+
+        error = self._rejection(outputs)
+        self.assertEqual(error["details"]["reason"], "not_batchable")
+        self.assertEqual(error["details"]["tool_ids"], ["request_step_completion"])
 
     def test_two_batchable_tools_together_are_accepted(self):
         # Two calls to the same batchable tool (RecordingToolExecutor only
@@ -1241,7 +1484,23 @@ class ProjectInventoryTests(unittest.TestCase):
                         "default": "100.0",
                     }
                 ],
+                "geometry": {},
             },
+        )
+
+    def test_current_part_inventory_carries_the_last_measured_geometry(self):
+        repository = FakeRepository()
+        repository.files[CANDIDATE_PATH] = ACCEPTED_SOURCE
+        orchestrator, *_rest = runtime(repository)
+
+        inventory = orchestrator._current_part_inventory(
+            repository.jobs[EDIT_JOB_ID], {"solid_count": 1, "volume_mm3": 70200.0}
+        )
+
+        # Supplied so a step opens knowing what the model measures instead of
+        # spending its first round on check_geometry to ask.
+        self.assertEqual(
+            inventory["geometry"], {"solid_count": 1, "volume_mm3": 70200.0}
         )
 
     def test_current_part_inventory_fails_open_when_the_candidate_is_not_bootstrapped_yet(
@@ -1254,7 +1513,13 @@ class ProjectInventoryTests(unittest.TestCase):
 
         self.assertEqual(
             inventory,
-            {"part_id": PART_ID, "part_name": "Bracket", "features": [], "parameters": []},
+            {
+                "part_id": PART_ID,
+                "part_name": "Bracket",
+                "features": [],
+                "parameters": [],
+                "geometry": {},
+            },
         )
 
 
@@ -1325,7 +1590,7 @@ class CadEditorOrchestrationTests(unittest.TestCase):
         self.assertEqual(result["outcome"], "committed")
         self.assertEqual(result["goal"]["goal_id"], GOAL_ID)
         self.assertEqual(result["high_level_plan"]["goal_id"], GOAL_ID)
-        self.assertEqual(result["validation_result"], {"status": "passed", "valid": True})
+        self.assertEqual(result["validation_result"], passed_report())
         self.assertEqual(result["index_job_id"], "index-1")
         self.assertEqual(result["export_job_id"], "export-1")
         self.assertEqual(result["changed_files"], [ACCEPTED_SOURCE_PATH])
@@ -1747,6 +2012,67 @@ class AgentBatchExecutionTests(unittest.TestCase):
     result, success or failure, is returned to the same reasoning chain.
     """
 
+    @staticmethod
+    def _parameter_turn(*names: str):
+        """One round creating several ModelParams fields together."""
+
+        return [
+            tool_call(
+                "create_parameter",
+                f"p-{index}",
+                parameter_name=name,
+                value=float(index + 1),
+            )
+            for index, name in enumerate(names)
+        ]
+
+    def test_a_create_parameter_batch_applies_every_field(self):
+        repository = FakeRepository()
+        orchestrator, _creator, _planner, _trace, _agent, tool_executor = runtime(
+            repository,
+            agent_script=[
+                self._parameter_turn("slot_mm", "rib_mm", "boss_mm"),
+                completion_turn(call_id="done"),
+            ],
+        )
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        source = repository.files[CANDIDATE_PATH]
+        for name in ("slot_mm", "rib_mm", "boss_mm"):
+            self.assertIn(f"{name}: float", source)
+        # Three fields created in one round rather than three.
+        self.assertEqual(
+            [call["tool_id"] for call in tool_executor.calls[:3]],
+            ["create_parameter"] * 3,
+        )
+
+    def test_one_failed_call_in_a_batch_does_not_stop_the_others(self):
+        repository = FakeRepository()
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository,
+            agent_script=[
+                # The middle call reuses the first call's name.
+                self._parameter_turn("slot_mm", "slot_mm", "boss_mm"),
+                completion_turn(call_id="done"),
+            ],
+        )
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        outputs = agent_3d.continue_step_requests[0]["tool_outputs"]
+        decoded = [json.loads(output["output"]) for output in outputs]
+        self.assertEqual([item["ok"] for item in decoded], [True, False, True])
+        self.assertEqual(decoded[1]["error"]["code"], "TOOL_VALIDATION_FAILED")
+        self.assertEqual(decoded[1]["error"]["details"]["reason"], "duplicate")
+        # The two that succeeded stay applied: a partial failure is not a
+        # rollback, and the agent is expected to fix only the failed call.
+        source = repository.files[CANDIDATE_PATH]
+        self.assertIn("slot_mm: float", source)
+        self.assertIn("boss_mm: float", source)
+
     def test_calls_dispatch_in_model_returned_order(self):
         repository = FakeRepository()
         orchestrator, _creator, _planner, _trace, agent_3d, tool_executor = runtime(
@@ -1974,11 +2300,11 @@ class CandidateBootstrapTests(unittest.TestCase):
 
         self.assertEqual(repository.files[CANDIDATE_PATH], ACCEPTED_SOURCE)
         # current_candidate_path/sha256 are set on the job row by the
-        # queue_edit_candidate_validation RPC itself once the commit pipeline
-        # validates the final candidate, not by _prepare_candidate directly.
+        # queue_edit_candidate_validation_run RPC itself when a candidate is
+        # validated, not by _prepare_candidate directly.
         self.assertEqual(
             repository.jobs[EDIT_JOB_ID]["current_candidate_path"],
-            f"{PROJECT_ID}/candidates/cad/{PART_ID}/{EDIT_JOB_ID}/attempt-1/model.py",
+            f"{PROJECT_ID}/candidates/cad/{PART_ID}/{EDIT_JOB_ID}/validation-1/model.py",
         )
         self.assertEqual(len(result["source_sha256"]), 64)
 
@@ -2200,10 +2526,1097 @@ class EmptyPartCompletionGateTests(unittest.TestCase):
         self.assertEqual(result["error_code"], "AGENT_NO_ACTION")
 
 
-class CommitPipelineTests(unittest.TestCase):
-    def test_validation_failure_fails_the_job_without_touching_canonical(self):
+class StepValidationTests(unittest.TestCase):
+    """The step-level validation gate on request_step_completion."""
+
+    @staticmethod
+    def _completion_outputs(agent_3d) -> list[dict]:
+        """Every function_call_output the agent was fed back, in order."""
+
+        return [
+            output
+            for request in agent_3d.continue_step_requests
+            for output in request["tool_outputs"]
+        ]
+
+    def test_passing_step_validation_completes_the_step(self):
         repository = FakeRepository()
-        repository.validation_result = {"status": "failed", "valid": False}
+        orchestrator, *_rest = runtime(repository)
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(len(repository.validation_calls), 1)
+        call = repository.validation_calls[0]
+        self.assertEqual(
+            call["candidate_path"],
+            f"{PROJECT_ID}/candidates/cad/{PART_ID}/{EDIT_JOB_ID}/validation-1/model.py",
+        )
+        self.assertEqual(call["validation_run"], 1)
+
+    def test_repairable_failure_keeps_the_step_in_progress_and_feeds_diagnostics(self):
+        repository = FakeRepository()
+        repository.validation_outcomes = [
+            {"status": "failed", "result": repairable_report(line=21)},
+        ]
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository,
+            agent_script=[
+                completion_turn(call_id="call-1"),
+                create_feature_turn(call_id="call-2"),
+                completion_turn(call_id="call-3"),
+            ],
+        )
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        # The chain continued rather than restarting: a failed gate is not a
+        # step change, so the agent keeps its own context.
+        self.assertGreaterEqual(len(agent_3d.continue_step_requests), 1)
+        self.assertEqual(len(agent_3d.start_step_requests), 1)
+        rejection = json.loads(self._completion_outputs(agent_3d)[0]["output"])
+        self.assertFalse(rejection["ok"])
+        self.assertEqual(rejection["error"]["code"], "CANDIDATE_VALIDATION_FAILED")
+        self.assertEqual(
+            rejection["error"]["details"]["diagnostics"][0]["line"], 21
+        )
+
+    def test_a_step_failure_never_appends_a_plan_step(self):
+        repository = FakeRepository()
+        repository.validation_outcomes = [
+            {"status": "failed", "result": repairable_report()},
+        ]
+        orchestrator, *_rest = runtime(
+            repository,
+            agent_script=[
+                completion_turn(call_id="call-1"),
+                create_feature_turn(call_id="call-2"),
+                completion_turn(call_id="call-3"),
+            ],
+        )
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(len(result["high_level_plan"]["steps"]), 1)
+
+    def test_a_validation_rejected_completion_traces_as_failed(self):
+        repository = FakeRepository()
+        repository.validation_outcomes = [
+            {"status": "failed", "result": repairable_report()},
+        ]
+        orchestrator, *_rest = runtime(
+            repository,
+            agent_script=[
+                completion_turn(call_id="call-1"),
+                create_feature_turn(call_id="call-2"),
+                completion_turn(call_id="call-3"),
+            ],
+        )
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        completions = [
+            event
+            for event in orchestrator.trace_writer.calls
+            if event["event"] == "tool.completed"
+            and event["tool_id"] == "request_step_completion"
+        ]
+        self.assertFalse(completions[0]["ok"])
+        self.assertEqual(
+            completions[0]["result"]["error"]["code"], "CANDIDATE_VALIDATION_FAILED"
+        )
+
+    def test_the_deterministic_gate_runs_before_any_validation(self):
+        repository = FakeRepository()
+        repository.files[ACCEPTED_SOURCE_PATH] = EMPTY_SKELETON_SOURCE
+        repository.validation_outcomes = [
+            {"status": "failed", "result": repairable_report()},
+        ]
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository,
+            agent_script=[
+                completion_turn(call_id="call-1"),
+                create_feature_turn(call_id="call-2"),
+                completion_turn(call_id="call-3"),
+            ],
+        )
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        # STEP_REQUIRES_A_FEATURE short-circuits before the validator is paid
+        # for: the first completion never queued a run.
+        first = json.loads(self._completion_outputs(agent_3d)[0]["output"])
+        self.assertEqual(first["error"]["code"], "STEP_REQUIRES_A_FEATURE")
+
+    def test_an_unchanged_candidate_is_rejected_without_revalidating(self):
+        repository = FakeRepository()
+        repository.validation_outcomes = [
+            {"status": "failed", "result": repairable_report()},
+        ]
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository,
+            agent_script=[
+                completion_turn(call_id="call-1"),
+                completion_turn(call_id="call-2"),
+            ],
+        )
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "failed")
+        # Only the first completion paid for a validation run; the second saw
+        # a byte-identical candidate and was rejected deterministically.
+        self.assertEqual(len(repository.validation_calls), 1)
+        second = json.loads(self._completion_outputs(agent_3d)[1]["output"])
+        self.assertEqual(second["error"]["code"], "STEP_VALIDATION_NO_CHANGE")
+
+    def test_a_changed_candidate_is_validated_again(self):
+        repository = FakeRepository()
+        repository.validation_outcomes = [
+            {"status": "failed", "result": repairable_report()},
+            {"status": "completed", "result": passed_report()},
+        ]
+        orchestrator, *_rest = runtime(
+            repository,
+            agent_script=[
+                completion_turn(call_id="call-1"),
+                create_feature_turn(call_id="call-2"),
+                completion_turn(call_id="call-3"),
+            ],
+        )
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(len(repository.validation_calls), 2)
+        self.assertEqual(repository.validation_calls[1]["validation_run"], 2)
+
+    def test_a_passing_step_gate_is_reused_as_the_final_proof(self):
+        repository = FakeRepository()
+        orchestrator, *_rest = runtime(repository)
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        # The last step's own gate already proved these exact bytes, so _run
+        # must not queue a second, identical final validation.
+        self.assertEqual(len(repository.validation_calls), 1)
+
+    def _seed_passing_validation(self, repository, *, source_sha256: str) -> None:
+        """Record a completed passing validation on the job, as a prior worker would."""
+
+        proof_path = (
+            f"{PROJECT_ID}/candidates/cad/{PART_ID}/{EDIT_JOB_ID}/validation-1/model.py"
+        )
+        repository.generation_jobs["validation-earlier"] = {
+            "id": "validation-earlier",
+            "edit_job_id": EDIT_JOB_ID,
+            "type": "validate_cad",
+            "source_kind": "candidate",
+            "source_storage_path": proof_path,
+            "source_sha256": source_sha256,
+            "status": "completed",
+            "result": passed_report(),
+            "error_message": None,
+        }
+        repository.files[proof_path] = ACCEPTED_SOURCE
+        repository.jobs[EDIT_JOB_ID]["history"] = [
+            {"event": "goal_created", "goal": goal().model_dump(mode="json")},
+            {
+                "event": "candidate_validation",
+                "purpose": "step",
+                "step_id": "PS-1",
+                "outcome": "passed",
+                "validation_run": 1,
+                "validation_job_id": "validation-earlier",
+                "source_sha256": source_sha256,
+                "storage_path": proof_path,
+                "stage": "completed",
+                "diagnostics": [],
+            },
+        ]
+
+    def test_a_seeded_proof_for_the_current_bytes_skips_revalidation(self):
+        repository = FakeRepository()
+        self._seed_passing_validation(
+            repository, source_sha256=source_hash(ACCEPTED_SOURCE)
+        )
+        orchestrator, *_rest = runtime(repository)
+
+        with unittest.mock.patch.dict(
+            os.environ, {"CAD_EDITOR_STEP_VALIDATION": "0"}
+        ):
+            result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        # A previous worker already proved these exact bytes, so the resumed
+        # job commits on that proof without paying for validation again.
+        self.assertEqual(repository.validation_calls, [])
+
+    def test_a_seeded_proof_for_other_bytes_is_never_reused(self):
+        repository = FakeRepository()
+        self._seed_passing_validation(repository, source_sha256="a" * 64)
+        orchestrator, *_rest = runtime(repository)
+
+        with unittest.mock.patch.dict(
+            os.environ, {"CAD_EDITOR_STEP_VALIDATION": "0"}
+        ):
+            result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        # The seeded proof describes source this candidate no longer has, so
+        # it is discarded and the real candidate is validated before commit.
+        self.assertEqual(len(repository.validation_calls), 1)
+
+    def test_an_infrastructure_failure_at_a_step_gate_never_reaches_the_agent(self):
+        repository = FakeRepository()
+        repository.validation_outcomes = [
+            {"status": "failed", "result": timeout_report()},
+        ]
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository,
+            agent_script=[
+                completion_turn(call_id="call-1"),
+                completion_turn(call_id="call-2"),
+            ],
+        )
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_code"], "VALIDATION_FAILED")
+        self.assertEqual(agent_3d.continue_step_requests, [])
+
+    def test_a_report_describing_other_bytes_is_infrastructure(self):
+        repository = FakeRepository()
+        repository.validation_outcomes = [
+            {
+                "status": "failed",
+                "result": repairable_report(),
+                # Repairable-looking, but the verdict is about a different
+                # candidate, so its diagnostics say nothing about ours.
+                "source_sha256": "f" * 64,
+            },
+        ]
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository, agent_script=[completion_turn(call_id="call-1")]
+        )
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["error_code"], "VALIDATION_FAILED")
+        self.assertEqual(agent_3d.continue_step_requests, [])
+
+    def test_a_schema_one_report_is_infrastructure(self):
+        repository = FakeRepository()
+        legacy = {"status": "failed", "valid": False, "repairable_hint": True}
+        repository.validation_outcomes = [{"status": "failed", "result": legacy}]
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository, agent_script=[completion_turn(call_id="call-1")]
+        )
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["error_code"], "VALIDATION_FAILED")
+        self.assertEqual(agent_3d.continue_step_requests, [])
+
+    def test_a_repairable_report_with_no_diagnostics_is_infrastructure(self):
+        repository = FakeRepository()
+        empty = {**repairable_report(), "diagnostics": []}
+        repository.validation_outcomes = [{"status": "failed", "result": empty}]
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository, agent_script=[completion_turn(call_id="call-1")]
+        )
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["error_code"], "VALIDATION_FAILED")
+        self.assertEqual(agent_3d.continue_step_requests, [])
+
+    def test_the_gate_stops_validating_after_its_rejection_budget(self):
+        repository = FakeRepository()
+        repository.validation_outcomes = [
+            {"status": "failed", "result": repairable_report()}
+            for _ in range(MAX_STEP_VALIDATION_REJECTIONS)
+        ]
+        # Distinct feature names, because the tool rejects a duplicate
+        # semantic ID and requires a snake_case verb_noun function name.
+        names = ["base_plate", "top_flange", "side_rib", "corner_gusset"]
+        script: list[list] = [completion_turn(call_id="call-0")]
+        for index in range(MAX_STEP_VALIDATION_REJECTIONS):
+            script.append(create_feature_turn(call_id=f"m-{index}", name=names[index]))
+            script.append(completion_turn(call_id=f"c-{index}"))
+        orchestrator, *_rest = runtime(repository, agent_script=script)
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        # Two rejections, then the gate stands down and the completion is
+        # honored -- the defect goes on to the final boundary rather than
+        # burning the step's turn budget and failing the job mid-plan.
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(
+            len([c for c in repository.validation_calls]),
+            MAX_STEP_VALIDATION_REJECTIONS + 1,  # + the final gate
+        )
+
+    def test_state_returns_to_applying_edit_after_an_in_loop_validation(self):
+        repository = FakeRepository()
+        repository.validation_outcomes = [
+            {"status": "failed", "result": repairable_report()},
+        ]
+        orchestrator, *_rest = runtime(
+            repository,
+            agent_script=[
+                completion_turn(call_id="call-1"),
+                create_feature_turn(call_id="call-2"),
+                completion_turn(call_id="call-3"),
+            ],
+        )
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        states = [event["state"] for event in repository.events]
+        first_validation = states.index("validating_candidate")
+        # The public progress stream must not keep claiming the job is
+        # validating while the agent is back to editing.
+        self.assertIn("applying_edit", states[first_validation:])
+
+    def test_a_seeded_failure_is_replayed_after_a_restart(self):
+        repository = FakeRepository()
+        candidate_sha256 = source_hash(ACCEPTED_SOURCE)
+        repository.jobs[EDIT_JOB_ID]["history"] = [
+            {"event": "goal_created", "goal": goal().model_dump(mode="json")},
+            {
+                "event": "candidate_validation",
+                "purpose": "step",
+                "step_id": "PS-1",
+                "outcome": "repairable",
+                "validation_run": 1,
+                "validation_job_id": "validation-earlier",
+                "source_sha256": candidate_sha256,
+                "storage_path": "ignored",
+                "stage": "cadquery_runtime",
+                "diagnostics": [
+                    {"error_code": "CADQUERY_RUNTIME_ERROR", "message": "Bad shape."}
+                ],
+            },
+        ]
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository,
+            agent_script=[
+                completion_turn(call_id="call-1"),
+                completion_turn(call_id="call-2"),
+            ],
+        )
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        # The replacement worker knows these exact bytes already failed, so
+        # it rejects the completion without paying for the run again.
+        first = json.loads(self._completion_outputs(agent_3d)[0]["output"])
+        self.assertEqual(first["error"]["code"], "STEP_VALIDATION_NO_CHANGE")
+        self.assertEqual(repository.validation_calls, [])
+
+    def test_step_validation_can_be_disabled_without_disabling_the_final_gate(self):
+        repository = FakeRepository()
+        orchestrator, *_rest = runtime(repository)
+        with unittest.mock.patch.dict(
+            os.environ, {"CAD_EDITOR_STEP_VALIDATION": "0"}
+        ):
+            result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        # The step gate stood down, but the whole-plan candidate was still
+        # validated exactly once before commit.
+        self.assertEqual(len(repository.validation_calls), 1)
+        self.assertEqual(repository.validation_calls[0]["validation_run"], 1)
+
+
+class DisconnectedSolidsGateTests(unittest.TestCase):
+    """A part is one connected printable solid, enforced from the validation
+    report the gate already reads.
+
+    This is the failure that motivated the gate: a real run split the model
+    into two solids at PS-4, validated clean four times because the validator
+    checks executability rather than topology, and burned the next step's
+    whole turn budget trying to fillet two disjoint bodies together.
+    """
+
+    @staticmethod
+    def _outputs(agent_3d) -> list[dict]:
+        return [
+            json.loads(output["output"])
+            for request in agent_3d.continue_step_requests
+            for output in request["tool_outputs"]
+        ]
+
+    def test_a_two_solid_candidate_cannot_complete_a_step(self):
+        repository = FakeRepository()
+        repository.validation_outcomes = [
+            {"status": "completed", "result": passed_report(solid_count=2)},
+            {"status": "completed", "result": passed_report(solid_count=1)},
+        ]
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository,
+            agent_script=[
+                completion_turn(call_id="call-1"),
+                create_feature_turn(call_id="call-2"),
+                completion_turn(call_id="call-3"),
+            ],
+        )
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        rejection = self._outputs(agent_3d)[0]
+        self.assertFalse(rejection["ok"])
+        self.assertEqual(rejection["error"]["code"], "CANDIDATE_VALIDATION_FAILED")
+        codes = [d["error_code"] for d in rejection["error"]["details"]["diagnostics"]]
+        self.assertIn("DISCONNECTED_SOLIDS", codes)
+
+    def test_the_rejection_tells_the_agent_the_solid_count(self):
+        repository = FakeRepository()
+        repository.validation_outcomes = [
+            {"status": "completed", "result": passed_report(solid_count=3)},
+            {"status": "completed", "result": passed_report(solid_count=1)},
+        ]
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository,
+            agent_script=[
+                completion_turn(call_id="call-1"),
+                create_feature_turn(call_id="call-2"),
+                completion_turn(call_id="call-3"),
+            ],
+        )
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        diagnostic = self._outputs(agent_3d)[0]["error"]["details"]["diagnostics"][0]
+        self.assertEqual(diagnostic["solid_count"], 3)
+        self.assertIn("3 disconnected solids", diagnostic["message"])
+        self.assertEqual(diagnostic["function_name"], "build_model")
+
+    def test_a_one_solid_candidate_completes_normally(self):
+        repository = FakeRepository()
+        orchestrator, *_rest = runtime(repository)
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(len(repository.validation_calls), 1)
+
+    def test_a_report_without_a_measurement_is_not_failed(self):
+        # Reports predating the measurement must not fail a candidate that
+        # otherwise validated cleanly.
+        repository = FakeRepository()
+        legacy = passed_report()
+        legacy["build_artifacts"] = None
+        repository.validation_result = legacy
+        orchestrator, *_rest = runtime(repository)
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+
+    def test_a_multi_solid_final_candidate_drives_the_repair_loop(self):
+        repository = FakeRepository()
+        repository.validation_outcomes = [
+            {"status": "completed", "result": passed_report(solid_count=2)},
+            {"status": "completed", "result": passed_report(solid_count=1)},
+        ]
+        orchestrator, *_rest = runtime(
+            repository,
+            agent_script=[
+                completion_turn(call_id="call-1"),
+                create_feature_turn(call_id="r-1", name="top_flange"),
+                completion_turn(call_id="r-2"),
+            ],
+        )
+
+        with unittest.mock.patch.dict(
+            os.environ, {"CAD_EDITOR_STEP_VALIDATION": "0"}
+        ):
+            result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        appended = [
+            event
+            for event in repository.jobs[EDIT_JOB_ID]["history"]
+            if event.get("event") == "repair_step_appended"
+        ]
+        self.assertEqual(len(appended), 1)
+        self.assertIn("DISCONNECTED_SOLIDS", appended[0]["trigger"]["error_codes"])
+
+    def test_a_seeded_measurement_survives_a_restart(self):
+        repository = FakeRepository()
+        repository.jobs[EDIT_JOB_ID]["history"] = [
+            {"event": "goal_created", "goal": goal().model_dump(mode="json")},
+            {
+                "event": "candidate_validation",
+                "purpose": "step",
+                "step_id": "PS-1",
+                "outcome": "repairable",
+                "source_sha256": source_hash(ACCEPTED_SOURCE),
+                "diagnostics": [
+                    {"error_code": "DISCONNECTED_SOLIDS", "message": "2 solids."}
+                ],
+                "geometry": {"solid_count": 2, "volume_mm3": 200301.7},
+            },
+        ]
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository, agent_script=[completion_turn(call_id="call-1")]
+        )
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        # The most recent measurement of any outcome, not the last passing
+        # one: after a failure the failing geometry is what the part is.
+        geometry = agent_3d.start_step_requests[0]["project_inventory"][
+            "current_part"
+        ]["geometry"]
+        self.assertEqual(geometry["solid_count"], 2)
+
+    def test_a_measured_candidate_reaches_the_next_step_as_inventory(self):
+        repository = FakeRepository()
+        repository.validation_result = passed_report(
+            solid_count=1, volume_mm3=70200.0, face_count=6, edge_count=12
+        )
+        plan = CadPlan.model_validate(
+            {
+                **plan_output().model_dump(mode="json"),
+                "plan_id": str(uuid4()),
+                "goal_id": GOAL_ID,
+                "version": 1,
+                "steps": [
+                    {
+                        "step_id": "PS-1",
+                        "sequence": 1,
+                        "objective": "First.",
+                        "depends_on": [],
+                        "addresses_criteria": ["GC-1"],
+                        "status": "pending",
+                    },
+                    {
+                        "step_id": "PS-2",
+                        "sequence": 2,
+                        "objective": "Second.",
+                        "depends_on": ["PS-1"],
+                        "addresses_criteria": [],
+                        "status": "pending",
+                    },
+                ],
+            }
+        )
+        repository.jobs[EDIT_JOB_ID]["history"] = [
+            {"event": "goal_created", "goal": goal().model_dump(mode="json")},
+            {"event": "plan_created", "plan": plan.model_dump(mode="json")},
+        ]
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(repository)
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        # PS-2 opens already knowing what PS-1 built, so it need not spend a
+        # round on check_geometry to find out.
+        second = agent_3d.start_step_requests[1]
+        geometry = second["project_inventory"]["current_part"]["geometry"]
+        self.assertEqual(geometry["solid_count"], 1)
+        self.assertEqual(geometry["volume_mm3"], 70200.0)
+
+
+class RunMetricsTests(unittest.TestCase):
+    """edit_jobs.metrics: the per-run facts edit_job_events cannot carry.
+
+    Deliberately excludes anything already durable as an event -- per-step
+    turns, validation outcomes, timings -- so the two do not disagree.
+    """
+
+    def test_a_completed_run_records_its_tool_mix_and_turns(self):
+        repository = FakeRepository()
+        orchestrator, *_rest = runtime(
+            repository,
+            agent_script=[
+                create_feature_turn(call_id="call-1"),
+                completion_turn(call_id="call-2"),
+            ],
+        )
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        metrics = repository.jobs[EDIT_JOB_ID]["metrics"]
+        self.assertEqual(metrics["agent_turns"], 2)
+        self.assertEqual(metrics["tool_calls"], 2)
+        self.assertEqual(
+            metrics["tool_mix"],
+            {"create_feature": 1, "request_step_completion": 1},
+        )
+        self.assertEqual(metrics["validation_runs"], 1)
+        self.assertEqual(metrics["tool_failures"], {})
+
+    def test_a_failed_run_records_metrics_too(self):
+        # Failed runs are the ones you go looking for, so they must carry
+        # their counters as well.
+        repository = FakeRepository()
+        repository.validation_result = timeout_report()
+        repository.validation_status = "failed"
+        orchestrator, *_rest = runtime(repository)
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "failed")
+        metrics = repository.jobs[EDIT_JOB_ID]["metrics"]
+        self.assertGreater(metrics["agent_turns"], 0)
+        self.assertGreater(metrics["validation_runs"], 0)
+
+    def test_batched_rounds_are_counted(self):
+        repository = FakeRepository()
+        orchestrator, *_rest = runtime(
+            repository,
+            agent_script=[
+                [
+                    tool_call("create_parameter", "p-1", parameter_name="a_mm", value=1.0),
+                    tool_call("create_parameter", "p-2", parameter_name="b_mm", value=2.0),
+                ],
+                completion_turn(call_id="done"),
+            ],
+        )
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        metrics = repository.jobs[EDIT_JOB_ID]["metrics"]
+        self.assertEqual(metrics["batched_rounds"], 1)
+        self.assertEqual(metrics["tool_calls"], 3)
+        self.assertEqual(metrics["agent_turns"], 2)
+
+    def test_tool_failures_are_counted_by_code(self):
+        repository = FakeRepository()
+        orchestrator, *_rest = runtime(
+            repository,
+            agent_script=[
+                create_feature_turn(call_id="call-1", name="base_plate"),
+                create_feature_turn(call_id="call-2", name="base_plate"),
+                completion_turn(call_id="call-3"),
+            ],
+        )
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        metrics = repository.jobs[EDIT_JOB_ID]["metrics"]
+        self.assertEqual(metrics["tool_failures"], {"TOOL_VALIDATION_FAILED": 1})
+
+    def test_counters_do_not_leak_between_runs(self):
+        # One worker reuses a single orchestrator across claimed jobs.
+        repository = FakeRepository()
+        orchestrator, *_rest = runtime(repository)
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+        first = copy.deepcopy(repository.jobs[EDIT_JOB_ID]["metrics"])
+        repository.jobs[EDIT_JOB_ID].update(
+            status="running", state="applying_edit", result=None, history=[]
+        )
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+        second = repository.jobs[EDIT_JOB_ID]["metrics"]
+
+        self.assertEqual(first["agent_turns"], second["agent_turns"])
+
+
+class RepairStepContractTests(unittest.TestCase):
+    """PlanStepState.kind stays server-owned and backward compatible."""
+
+    def test_kind_defaults_to_plan_for_checkpoints_that_predate_repair(self):
+        payload = plan_output().model_dump(mode="json")
+        payload.update(plan_id=str(uuid4()), goal_id=GOAL_ID, version=1)
+        for step in payload["steps"]:
+            step.pop("kind", None)
+
+        plan = CadPlan.model_validate(payload)
+
+        self.assertEqual(plan.steps[0].kind, "plan")
+
+    def test_the_planner_is_never_asked_to_emit_kind(self):
+        # CadPlanModelOutput is compiled into a strict schema where every
+        # property is required, so a `kind` on the planner-facing model would
+        # force the planning model to invent one.
+        planner_schema = json.dumps(CadPlanModelOutput.model_json_schema())
+        self.assertNotIn('"kind"', planner_schema)
+        self.assertIn('"kind"', json.dumps(CadPlan.model_json_schema()))
+
+    def test_the_step_count_bounds_survive_the_steps_override(self):
+        payload = plan_output().model_dump(mode="json")
+        payload.update(plan_id=str(uuid4()), goal_id=GOAL_ID, version=1, steps=[])
+        with self.assertRaises(ValueError):
+            CadPlan.model_validate(payload)
+
+        payload["steps"] = [
+            {
+                "step_id": f"PS-{index}",
+                "sequence": index,
+                "objective": "Too many.",
+                "depends_on": [],
+                "addresses_criteria": [],
+                "status": "pending",
+            }
+            for index in range(1, 66)
+        ]
+        with self.assertRaises(ValueError):
+            CadPlan.model_validate(payload)
+
+
+class FinalRepairLoopTests(unittest.TestCase):
+    """The bounded repair loop that runs after final validation fails."""
+
+    @staticmethod
+    def _history_events(repository, name: str) -> list[dict]:
+        return [
+            event
+            for event in repository.jobs[EDIT_JOB_ID]["history"]
+            if event.get("event") == name
+        ]
+
+    @staticmethod
+    def _final_plan(repository) -> dict:
+        updates = [
+            event
+            for event in repository.jobs[EDIT_JOB_ID]["history"]
+            if event.get("event") == "plan_updated"
+        ]
+        return updates[-1]["plan"]
+
+    def test_a_passing_final_validation_never_appends_a_repair_step(self):
+        repository = FakeRepository()
+        orchestrator, *_rest = runtime(repository)
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(self._history_events(repository, "repair_step_appended"), [])
+
+    def test_a_repairable_final_failure_appends_exactly_one_repair_step(self):
+        repository = FakeRepository()
+        # Step gate off, so the first validation the job runs is the final
+        # one -- this isolates the final boundary's own behavior.
+        repository.validation_outcomes = [
+            {"status": "failed", "result": repairable_report()},
+            {"status": "completed", "result": passed_report()},
+        ]
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository,
+            agent_script=[
+                completion_turn(call_id="call-1"),
+                create_feature_turn(call_id="call-2"),
+                completion_turn(call_id="call-3"),
+            ],
+        )
+
+        with unittest.mock.patch.dict(
+            os.environ, {"CAD_EDITOR_STEP_VALIDATION": "0"}
+        ):
+            result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        appended = self._history_events(repository, "repair_step_appended")
+        self.assertEqual(len(appended), 1)
+        steps = self._final_plan(repository)["steps"]
+        self.assertEqual(len(steps), 2)
+        self.assertEqual(steps[1]["kind"], "repair")
+        self.assertEqual(steps[1]["step_id"], "PS-2")
+        self.assertEqual(steps[1]["addresses_criteria"], [])
+        self.assertEqual(steps[1]["depends_on"], ["PS-1"])
+        # A repair step is a plan revision, unlike a status change.
+        self.assertEqual(self._final_plan(repository)["version"], 2)
+
+    def test_the_repair_step_opens_a_fresh_chain_with_the_diagnostics(self):
+        repository = FakeRepository()
+        repository.validation_outcomes = [
+            {"status": "failed", "result": repairable_report(line=42)},
+            {"status": "completed", "result": passed_report()},
+        ]
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository,
+            agent_script=[
+                completion_turn(call_id="call-1"),
+                create_feature_turn(call_id="call-2"),
+                completion_turn(call_id="call-3"),
+            ],
+        )
+
+        with unittest.mock.patch.dict(
+            os.environ, {"CAD_EDITOR_STEP_VALIDATION": "0"}
+        ):
+            orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        # Two start_step calls: PS-1, then a brand-new chain for the repair
+        # step -- never a continuation of the previous step's chain.
+        repair_start = agent_3d.start_step_requests[-1]
+        self.assertEqual(repair_start["active_step"].kind, "repair")
+        feedback = repair_start["validation_feedback"]
+        self.assertEqual(feedback["diagnostics"][0]["line"], 42)
+
+    def test_repair_completion_is_gated_by_validation_and_appends_no_second_step(self):
+        repository = FakeRepository()
+        repository.validation_outcomes = [
+            {"status": "failed", "result": repairable_report()},   # final
+            {"status": "failed", "result": repairable_report()},   # repair try 1
+            {"status": "completed", "result": passed_report()},    # repair try 2
+        ]
+        orchestrator, *_rest = runtime(
+            repository,
+            agent_script=[
+                completion_turn(call_id="call-1"),
+                # repair chain
+                create_feature_turn(call_id="r-1", name="top_flange"),
+                completion_turn(call_id="r-2"),
+                create_feature_turn(call_id="r-3", name="side_rib"),
+                completion_turn(call_id="r-4"),
+            ],
+        )
+
+        with unittest.mock.patch.dict(
+            os.environ, {"CAD_EDITOR_STEP_VALIDATION": "0"}
+        ):
+            result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        # One repair step containing two attempts -- not a step per attempt.
+        self.assertEqual(len(self._history_events(repository, "repair_step_appended")), 1)
+        self.assertEqual(len(self._final_plan(repository)["steps"]), 2)
+
+    def test_a_successful_repair_commits_without_revalidating(self):
+        repository = FakeRepository()
+        repository.validation_outcomes = [
+            {"status": "failed", "result": repairable_report()},
+            {"status": "completed", "result": passed_report()},
+        ]
+        orchestrator, *_rest = runtime(
+            repository,
+            agent_script=[
+                completion_turn(call_id="call-1"),
+                create_feature_turn(call_id="r-1", name="top_flange"),
+                completion_turn(call_id="r-2"),
+            ],
+        )
+
+        with unittest.mock.patch.dict(
+            os.environ, {"CAD_EDITOR_STEP_VALIDATION": "0"}
+        ):
+            result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        # The repair step's own gate is the final gate: its passing verdict
+        # is the proof commit uses, so no third run is queued.
+        self.assertEqual(len(repository.validation_calls), 2)
+
+    def test_the_repair_budget_bounds_attempts_within_one_repair_step(self):
+        repository = FakeRepository()
+        repository.validation_result = repairable_report()
+        repository.validation_status = "failed"
+        names = ["top_flange", "side_rib", "corner_gusset", "edge_fillet"]
+        script: list[list] = [completion_turn(call_id="call-1")]
+        for index in range(MAX_REPAIR_ATTEMPTS + 1):
+            script.append(create_feature_turn(call_id=f"r-{index}", name=names[index]))
+            script.append(completion_turn(call_id=f"rc-{index}"))
+        orchestrator, *_rest = runtime(repository, agent_script=script)
+
+        with unittest.mock.patch.dict(
+            os.environ, {"CAD_EDITOR_STEP_VALIDATION": "0"}
+        ):
+            result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_code"], "REPAIR_BUDGET_EXHAUSTED")
+        self.assertEqual(
+            result["details"]["repair_attempts"], MAX_REPAIR_ATTEMPTS
+        )
+        # One repair step holding every attempt -- a failed repair never
+        # appends another step.
+        self.assertEqual(
+            len(self._history_events(repository, "repair_step_appended")), 1
+        )
+        self.assertEqual(repository.files[ACCEPTED_SOURCE_PATH], ACCEPTED_SOURCE)
+
+    def test_a_non_repairable_final_failure_never_appends_a_repair_step(self):
+        repository = FakeRepository()
+        repository.validation_result = timeout_report()
+        repository.validation_status = "failed"
+        orchestrator, *_rest = runtime(repository)
+
+        with unittest.mock.patch.dict(
+            os.environ, {"CAD_EDITOR_STEP_VALIDATION": "0"}
+        ):
+            result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["error_code"], "VALIDATION_FAILED")
+        self.assertEqual(self._history_events(repository, "repair_step_appended"), [])
+
+    def test_completed_steps_are_never_rewritten_by_repair(self):
+        repository = FakeRepository()
+        repository.validation_outcomes = [
+            {"status": "failed", "result": repairable_report()},
+            {"status": "completed", "result": passed_report()},
+        ]
+        orchestrator, *_rest = runtime(
+            repository,
+            agent_script=[
+                completion_turn(call_id="call-1"),
+                create_feature_turn(call_id="r-1", name="top_flange"),
+                completion_turn(call_id="r-2"),
+            ],
+        )
+
+        with unittest.mock.patch.dict(
+            os.environ, {"CAD_EDITOR_STEP_VALIDATION": "0"}
+        ):
+            orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        steps = self._final_plan(repository)["steps"]
+        self.assertEqual(steps[0]["status"], "completed")
+        self.assertEqual(steps[0]["kind"], "plan")
+
+    def test_a_resumed_repair_step_is_not_appended_again(self):
+        repository = FakeRepository()
+        repaired_plan = {
+            **plan_output().model_dump(mode="json"),
+            "plan_id": str(uuid4()),
+            "goal_id": GOAL_ID,
+            "version": 2,
+            "steps": [
+                {
+                    "step_id": "PS-1",
+                    "sequence": 1,
+                    "objective": "Change the bracket height.",
+                    "depends_on": [],
+                    "addresses_criteria": ["GC-1"],
+                    "status": "completed",
+                    "kind": "plan",
+                },
+                {
+                    "step_id": "PS-2",
+                    "sequence": 2,
+                    "objective": "Resolve the reported failures.",
+                    "depends_on": ["PS-1"],
+                    "addresses_criteria": [],
+                    "status": "pending",
+                    "kind": "repair",
+                },
+            ],
+        }
+        repository.jobs[EDIT_JOB_ID]["history"] = [
+            {"event": "goal_created", "goal": goal().model_dump(mode="json")},
+            {"event": "plan_created", "plan": repaired_plan},
+            {"event": "plan_updated", "plan": repaired_plan},
+        ]
+        orchestrator, *_rest = runtime(
+            repository, agent_script=[completion_turn(call_id="call-1")]
+        )
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        # The checkpointed plan already carried the repair step, so the loop
+        # simply ran it -- the append path is never re-entered.
+        self.assertEqual(self._history_events(repository, "repair_step_appended"), [])
+        self.assertEqual(len(self._final_plan(repository)["steps"]), 2)
+
+    def test_a_recorded_trigger_without_its_plan_write_still_appends_once(self):
+        repository = FakeRepository()
+        repository.validation_outcomes = [
+            {"status": "failed", "result": repairable_report()},
+            {"status": "completed", "result": passed_report()},
+        ]
+        # A previous worker recorded the trigger and died before the plan
+        # checkpoint landed, so the plan it left behind has no repair step.
+        repository.jobs[EDIT_JOB_ID]["history"] = [
+            {"event": "goal_created", "goal": goal().model_dump(mode="json")},
+            {
+                "event": "repair_step_appended",
+                "step_id": "PS-2",
+                "repair_attempt": 1,
+                "plan_version": 2,
+                "trigger": {
+                    "validation_job_id": "validation-earlier",
+                    "source_sha256": "c" * 64,
+                    "stage": "cadquery_runtime",
+                    "error_codes": ["CADQUERY_RUNTIME_ERROR"],
+                },
+            },
+        ]
+        orchestrator, *_rest = runtime(
+            repository,
+            agent_script=[
+                completion_turn(call_id="call-1"),
+                create_feature_turn(call_id="r-1", name="top_flange"),
+                completion_turn(call_id="r-2"),
+            ],
+        )
+
+        with unittest.mock.patch.dict(
+            os.environ, {"CAD_EDITOR_STEP_VALIDATION": "0"}
+        ):
+            result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        steps = self._final_plan(repository)["steps"]
+        self.assertEqual([step["kind"] for step in steps], ["plan", "repair"])
+
+    def test_a_full_plan_fails_cleanly_rather_than_raising_a_validation_error(self):
+        repository = FakeRepository()
+        repository.validation_result = repairable_report()
+        repository.validation_status = "failed"
+        full_plan = {
+            **plan_output().model_dump(mode="json"),
+            "plan_id": str(uuid4()),
+            "goal_id": GOAL_ID,
+            "version": 1,
+            "steps": [
+                {
+                    "step_id": f"PS-{index}",
+                    "sequence": index,
+                    "objective": "Already done.",
+                    "depends_on": [],
+                    "addresses_criteria": ["GC-1"] if index == 1 else [],
+                    "status": "completed",
+                    "kind": "plan",
+                }
+                for index in range(1, 65)
+            ],
+        }
+        repository.jobs[EDIT_JOB_ID]["history"] = [
+            {"event": "goal_created", "goal": goal().model_dump(mode="json")},
+            {"event": "plan_created", "plan": full_plan},
+            {"event": "plan_updated", "plan": full_plan},
+        ]
+        orchestrator, *_rest = runtime(repository)
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["error_code"], "REPAIR_PLAN_FULL")
+
+    def test_the_repair_chain_uses_its_own_turn_budget(self):
+        repository = FakeRepository()
+        repository.validation_result = repairable_report()
+        repository.validation_status = "failed"
+        # Never completes the repair step, so the budget is what stops it.
+        script = [completion_turn(call_id="call-1")]
+        script += [
+            create_feature_turn(call_id=f"r-{index}", name=f"filler_{'x' * index}")
+            for index in range(MAX_REPAIR_TURNS + 2)
+        ]
+        orchestrator, *_rest = runtime(repository, agent_script=script)
+
+        with unittest.mock.patch.dict(
+            os.environ, {"CAD_EDITOR_STEP_VALIDATION": "0"}
+        ):
+            result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_code"], "AGENT_TURN_LIMIT")
+        self.assertEqual(result["details"]["turn_budget"], MAX_REPAIR_TURNS)
+
+
+class CommitPipelineTests(unittest.TestCase):
+    def test_infrastructure_validation_failure_fails_without_touching_canonical(self):
+        repository = FakeRepository()
+        repository.validation_result = worker_error_report()
         orchestrator, *_rest = runtime(repository)
 
         result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
@@ -2278,7 +3691,7 @@ class CommitPipelineTests(unittest.TestCase):
         self.assertEqual(len(result["warnings"]), 1)
         self.assertIn("export", result["warnings"][0])
 
-    def test_validation_is_queued_against_an_attempt_scoped_path(self):
+    def test_validation_is_queued_against_a_run_scoped_path(self):
         repository = FakeRepository()
         orchestrator, *_rest = runtime(repository)
 
@@ -2288,9 +3701,9 @@ class CommitPipelineTests(unittest.TestCase):
         call = repository.validation_calls[0]
         self.assertEqual(
             call["candidate_path"],
-            f"{PROJECT_ID}/candidates/cad/{PART_ID}/{EDIT_JOB_ID}/attempt-1/model.py",
+            f"{PROJECT_ID}/candidates/cad/{PART_ID}/{EDIT_JOB_ID}/validation-1/model.py",
         )
-        self.assertEqual(call["attempt_count"], 1)
+        self.assertEqual(call["validation_run"], 1)
 
 
 class AgentTraceEventTests(unittest.TestCase):

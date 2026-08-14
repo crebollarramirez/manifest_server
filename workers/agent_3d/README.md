@@ -2,14 +2,14 @@
 
 `workers/agent_3d` is the Python CAD-agent runtime. Implemented today: goal
 creation, read-only semantic planning, a plan-driven `Agent3D` reasoning loop
-that executes CAD tools against an edit-scoped candidate, and -- once every
-plan step completes -- validating that candidate, committing it to canonical
-source with a hash-guarded write, reindexing, and queuing export (see
-"Current agent-loop mode" below and `AGENT_REASONING.md`). A repair loop on
-validation failure, the concrete `ToolPlan`/`CadToolExecutor` stage sections
-5-6 describe, and post-completion storage cleanup are not implemented --
-sections 4-6 and 9 below describe that remaining target design, not current
-behavior.
+that executes CAD tools against an edit-scoped candidate, candidate
+validation at both step and whole-plan boundaries with a bounded repair loop
+on a repairable failure, and -- once the candidate is proven -- committing it
+to canonical source with a hash-guarded write, reindexing, and queuing export
+(see "Current agent-loop mode" below and `AGENT_REASONING.md`). The concrete
+`ToolPlan`/`CadToolExecutor` stage sections 5-6 describe, and
+post-completion storage cleanup, are not implemented -- sections 4-6 and 9
+below describe that remaining target design, not current behavior.
 
 `services/cad_agent` is the lightweight NestJS control plane. Nest validates
 WebSocket payloads and project/part linkage, creates idempotent `edit_jobs`, returns the job
@@ -58,36 +58,43 @@ A worker currently:
 4. creates and checkpoints the high-level `CadPlan`;
 5. copies accepted CAD source into an edit-scoped candidate, backing up the
    pre-edit canonical source alongside it;
-6. runs the plan-driven agent loop until every plan step is completed;
-7. validates the final candidate, commits it to canonical source, reindexes,
-   and queues export;
+6. runs the plan-driven agent loop until every plan step is completed, with
+   each step's completion gated on candidate validation;
+7. validates the completed plan's candidate, running a bounded repair loop if
+   that fails repairably, then commits it to canonical source, reindexes, and
+   queues export;
 8. atomically completes the job with `outcome: "committed"`.
 
 Step 6 is the loop documented in `AGENT_REASONING.md`: for the earliest
 unfinished step, `Agent3D` is asked for one decision, its requested tool calls
 are executed against the candidate, and the results become that step's
 observations. When the agent calls `request_step_completion` the orchestrator
-marks the step completed and advances. The orchestrator is the only writer of
-plan state, and **the goal is never mutated**. Plan revision -- adding,
-replacing, or reordering steps -- is not implemented; only step status changes.
+runs its deterministic gates and then validates the candidate; the step
+completes only if that passes. The orchestrator is the only writer of plan
+state, and **the goal is never mutated**. The only plan revision that exists
+is appending one repair step after a failed final validation -- steps are
+never reordered, replaced, or deleted, and the agent cannot request it.
 
-The loop is bounded by ten turns per step and 24 turns overall, and a decision
-requesting no tool call fails the job with `AGENT_NO_ACTION`. It also refuses
-to let a step complete when that step addresses a required criterion but the
-candidate still has no CAD features, and `edit_cad_build_model` refuses to
-wire in a function that doesn't exist in the candidate yet -- see
-`AGENT_REASONING.md`.
+The loop is bounded by 20 turns per step and a per-entry budget of 32 turns
+(12 when entered on a repair step), and a decision requesting no tool call
+fails the job with `AGENT_NO_ACTION`. It also refuses to let a step complete
+when that step addresses a required criterion but the candidate still has no
+CAD features, and `edit_cad_build_model` refuses to wire in a function that
+doesn't exist in the candidate yet -- see `AGENT_REASONING.md`.
 
 CAD tools change source only within
 `{project}/candidates/cad/{part}/{edit_job_id}/model.py`; canonical source is
-never written while the loop runs. Step 7 (detailed in `AGENT_REASONING.md`)
-only starts once every plan step is completed -- a loop that fails on a turn
-limit or `AGENT_NO_ACTION` never reaches it, so nothing gets committed.
-Validation and reindex failures fail the job outright (`VALIDATION_FAILED`,
-`REINDEX_FAILED`, rolling canonical back to its pre-edit backup first); export
-failure only adds a warning to the terminal result. On success the terminal
-result's `changed_files` is the canonical part path, `source_sha256` is the
-committed hash, and `index_job_id`/`export_job_id` are real job IDs.
+never written while the loop runs, including during repair. Step 7 only
+starts once every plan step is completed -- a loop that fails on a turn limit
+or `AGENT_NO_ACTION` never reaches it, so nothing gets committed. If the last
+step's own validation already proved the candidate's current bytes, step 7
+reuses that proof instead of re-validating identical source. An
+infrastructure validation failure, an exhausted repair budget, or a reindex
+failure fail the job (`VALIDATION_FAILED`, `REPAIR_BUDGET_EXHAUSTED`,
+`REINDEX_FAILED`, rolling canonical back to its pre-edit backup first);
+export failure only adds a warning to the terminal result. On success the
+terminal result's `changed_files` is the canonical part path, `source_sha256`
+is the committed hash, and `index_job_id`/`export_job_id` are real job IDs.
 
 `CAD_EDITOR_PLANNING_ONLY` is vestigial -- no code reads it.
 
@@ -190,8 +197,8 @@ overlapping unlinked edits at once.
 Sections 1-3 describe current behavior. Execution then runs the agent loop
 ("Current agent-loop mode" above), then validates, commits, reindexes, and
 queues export for the loop's final candidate before returning the terminal
-result -- sections 7 and 8 below (minus the repair sub-loop) now describe real
-behavior, ported from the pre-Python-rewrite TS orchestrator
+result -- sections 7 and 8 below now describe real behavior, ported from the
+pre-Python-rewrite TS orchestrator
 (`git show HEAD:services/cad_agent/src/orchestrator.service.ts`).
 
 Sections 4-6, 9, and the "Plans, contracts, and source of truth" / "Impact and
@@ -201,10 +208,12 @@ original-source backup are real; the bounded source inventory and blank-part
 `initial_design` classification are not. Sections 5-6 are entirely
 unimplemented: `agent_3d/tool_contracts.py` and `CadToolExecutor`, cited
 below, do not exist in this repository, and the agent loop replaces the
-concrete-ToolPlan stage they describe. Section 7's validation is real; its
-repair sub-loop (diagnostic-driven replanning, up to three attempts) is not --
-a failed validation fails the job outright. Section 9's terminal-result
-reporting is real; its cleanup of temporary candidate/backup storage objects
+concrete-ToolPlan stage they describe. Note that the repair loop section 7
+now describes is the agent-loop one -- an orchestrator-appended repair step
+driven through the ordinary `Agent3D` reasoning chain -- not the
+diagnostic-driven ToolPlan replanning the superseded design envisaged.
+Section 9's terminal-result reporting is real; its cleanup of temporary
+candidate/backup storage objects
 is not. Treat the remaining unimplemented material as a design spec for
 future work, not a description of current behavior.
 
@@ -357,27 +366,43 @@ reindex, or export.
 
 ### 7. Validate and repair
 
-Validation is real (`_validate_candidate`); repair is not -- a failed
-validation raises `VALIDATION_FAILED` and fails the job.
+Both are real (`validate_candidate`, `_append_repair_step`). Validation runs
+at two boundaries -- every step completion and the completed plan -- and a
+repairable failure at the second one appends one repair step.
+[`VALIDATION_AND_REPAIR.md`](VALIDATION_AND_REPAIR.md) explains the design;
+"Step validation" and "Final validation and bounded repair" in
+`AGENT_REASONING.md` give the full state machine. This section is the storage
+and proof contract.
 
-A changed candidate is written under the job-specific candidate prefix and
-re-read to verify its SHA-256. The orchestrator queues the independent CAD
-validator with the exact candidate path, hash, job ID, and attempt.
+Each validation run copies the candidate to
+`{project}/candidates/cad/{part}/{edit_job}/validation-{run}/model.py` and
+re-reads it to verify its SHA-256. `validation_run_count` on the job row
+allocates the run number, inside the RPC that already holds `for update` on
+the row; unlike the legacy `attempt_count` it has no upper cap, because a
+plan legitimately validates once per step. A run's snapshot is written once
+and never rewritten, so its verdict keeps proving those exact bytes even
+after the agent edits the live candidate again.
 
 Validation proof is accepted only when all of these match:
 
 - the validation child completed successfully;
 - its type and source kind identify candidate CAD validation;
 - `edit_job_id` is the current job;
-- `source_storage_path` is the current candidate path;
+- `source_storage_path` is the current run's path;
 - `source_sha256` is the current candidate hash;
 - the structured report says `status: passed` and `valid: true`.
 
-Repairable tool-preflight or validation failures may produce a new concrete
-plan. Validation repair receives the exact prior ToolPlan, failed candidate
-source and hash, structured report, and diagnostic codes. There are at most
-three attempts total. Non-repairable diagnostics or an exhausted limit finish
-the job as failed.
+A failure is then classified as **repairable** (the candidate's own source is
+at fault -- the validator's `repairable_hint`, a schema-2 report, and at
+least one diagnostic) or **infrastructure** (timeout, validator crash, or a
+report that does not describe our bytes). Only repairable failures reach the
+agent; infrastructure failures fail the job with `VALIDATION_FAILED` rather
+than being presented as a CAD problem the model could fix. At most
+`MAX_REPAIR_ATTEMPTS` (3) repair attempts run before
+`REPAIR_BUDGET_EXHAUSTED`.
+
+Set `CAD_EDITOR_STEP_VALIDATION=0` to disable only the per-step gate; the
+final gate and the repair loop are unconditional.
 
 ### 8. Guarded commit, reindex, and export
 
@@ -401,10 +426,12 @@ returned as a warning rather than undoing a valid CAD edit.
 ### 9. Finish and clean up
 
 The terminal-result reporting in this section is real (`_complete_agent_run`);
-the cleanup is not -- temporary `attempt-{n}`/`original` candidate objects are
-left in storage after a job finishes, whether it completed or failed.
+the cleanup is not -- temporary `validation-{run}`/`original` candidate
+objects are left in storage after a job finishes, whether it completed or
+failed. There are now more of them than before, since every validation run
+gets its own immutable snapshot.
 
-The terminal result records the resolved target, attempt count, changed files
+The terminal result records the resolved target, validation run count, changed files
 and symbols, source hash, validation report, index/export job IDs, `goal`,
 `high_level_plan`, and warnings. One database transaction changes the terminal
 row and appends `job.completed` or `job.failed`, so clients cannot observe a
@@ -579,6 +606,10 @@ OPENAI_GOAL_MODEL=gpt-5.4-mini
 OPENAI_PLANNING_MODEL=gpt-5.4-mini
 OPENAI_AGENT_MODEL=gpt-5.4-mini
 CAD_EDITOR_PLANNING_ONLY=true
+# Set to 0 to disable only the per-step validation gate. The final candidate
+# gate and the repair loop stay on regardless. Useful for measuring the
+# latency/cost of step validation without a rollback.
+CAD_EDITOR_STEP_VALIDATION=1
 # Optional; defaults to workers/agent_3d/logs
 CAD_EDITOR_LOG_DIRECTORY=workers/agent_3d/logs
 CAD_AGENT_PORT=3000
@@ -665,6 +696,7 @@ python -m unittest tests.test_cad_editor_orchestration
 python -m unittest tests.test_cad_editor_worker
 python -m unittest tests.test_cad_tool_framework
 python -m unittest tests.test_cad_editor_cutover_migration
+python -m unittest tests.test_agent_step_validation_migration
 python -m unittest tests.test_agent_3d
 python -m unittest tests.test_agent_trace
 python -m unittest discover -s tests -p 'test_*.py'
@@ -681,8 +713,10 @@ npm run build
 The most important implementation files are:
 
 - `workers/agent_3d/edit_worker.py` — edit-job polling and lease heartbeat;
-- `agent_3d/orchestrator.py` — durable planning-only workflow (goal through the
-  high-level plan);
+- `agent_3d/orchestrator.py` — the durable workflow: goal, plan, agent loop,
+  both validation boundaries, the repair loop, and the commit pipeline (see
+  [`VALIDATION_AND_REPAIR.md`](VALIDATION_AND_REPAIR.md) for the validation
+  and repair design);
 - `agent_3d/failures.py` — `WorkflowFailure`, the package's shared expected-
   failure type;
 - `agent_3d/planning/goal_creator.py` — strict goal creation;

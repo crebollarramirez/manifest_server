@@ -340,6 +340,61 @@ def build_model(params: ModelParams):
         self.assertIn("model.py:", message)
         self.assertNotIn("build_model", message.split("(in ", 1)[1])
 
+    def test_a_static_safety_rejection_forwards_the_validator_diagnostics(self):
+        # A feature whose declared depends_on contradicts build_model's actual
+        # dataflow -- the exact defect that once stalled a real run for twenty
+        # rounds because this report was discarded and replaced with a fixed
+        # string naming neither the rule, the function, nor the line.
+        model = """from cadquery_runtime import cad_part, cq, dataclass
+
+@dataclass(frozen=True)
+class ModelParams:
+    width: float = 10.0
+
+@cad_part(
+    semantic_id="base_plate",
+    role="base_plate_role",
+    library="cadquery",
+    parameters=("width",),
+    depends_on=(),
+    search_keys=("base plate",),
+)
+def build_base_plate(params: ModelParams):
+    return cq.Workplane("XY").box(params.width, params.width, 2)
+
+@cad_part(
+    semantic_id="riser",
+    role="riser_role",
+    library="cadquery",
+    parameters=("width",),
+    depends_on=("nonexistent_feature",),
+    search_keys=("riser",),
+)
+def build_riser(params: ModelParams, base_plate):
+    return base_plate.faces(">Z").workplane().box(2, 2, params.width)
+
+def build_model(params: ModelParams):
+    base_plate = build_base_plate(params)
+    return build_riser(params, base_plate)
+"""
+        model_hash = hashlib.sha256(model.encode()).hexdigest()
+        supabase = self._supabase(**{CANDIDATE_PATH: model.encode()})
+        job = _job(source_sha256=model_hash)
+
+        outcome = geometry_check_job(supabase, job)
+
+        self.assertEqual(outcome["status"], "failed")
+        geometry = outcome["report"]["geometry"]
+        diagnostics = geometry["diagnostics"]
+        self.assertTrue(diagnostics, "the AST report must not be discarded")
+        located = [d for d in diagnostics if d.get("function_name")]
+        self.assertTrue(located, "a forwarded diagnostic must locate the defect")
+        # The reason is legible in the message too, not only in the structure.
+        self.assertNotEqual(
+            geometry["error_message"],
+            "Source failed static safety checks and was not executed.",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

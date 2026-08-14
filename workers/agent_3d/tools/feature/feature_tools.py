@@ -58,7 +58,17 @@ class CreateFeatureInput(StrictToolModel):
     function_name: str = Field(min_length=1, max_length=100)
     role: str = Field(min_length=1, max_length=200)
 
-    parameters: tuple[str, ...] = Field(default=(), max_length=32)
+    parameters: tuple[str, ...] = Field(
+        default=(),
+        max_length=32,
+        description=(
+            "Exactly the ModelParams field names your function_body reads as "
+            "params.<name> -- no more, no fewer. A declared name the body "
+            "never reads is rejected just as hard as a name the body reads "
+            "but omits here. Each name must already exist as a ModelParams "
+            "field; create any missing ones with create_parameter first."
+        ),
+    )
     dependencies: tuple[FeatureDependencyInput, ...] = Field(default=(), max_length=16)
     search_keys: tuple[str, ...] = Field(min_length=1, max_length=16)
 
@@ -116,8 +126,7 @@ class CreateFeatureTool(AgentTool[CreateFeatureInput, CreateFeatureOutput]):
     )
     input_model = CreateFeatureInput
     output_model = CreateFeatureOutput
-    batchable = False
-    parallel_safe = False
+    batch_group = None
 
     async def normalize_input(self, tool_input: CreateFeatureInput) -> CreateFeatureInput:
         search_keys = _dedupe_preserve_order([key.strip() for key in tool_input.search_keys])
@@ -379,7 +388,18 @@ class EditFeatureInput(StrictToolModel):
     function_name: str | None = Field(default=None, min_length=1, max_length=100)
 
     role: str | None = Field(default=None, min_length=1, max_length=200)
-    parameters: tuple[str, ...] | None = Field(default=None, max_length=32)
+    parameters: tuple[str, ...] | None = Field(
+        default=None,
+        max_length=32,
+        description=(
+            "Exactly the ModelParams field names the resulting function_body "
+            "reads as params.<name> -- no more, no fewer. A declared name the "
+            "body never reads is rejected just as hard as a name the body "
+            "reads but omits here. Each name must already exist as a "
+            "ModelParams field; create any missing ones with create_parameter "
+            "first."
+        ),
+    )
     dependencies: tuple[FeatureDependencyInput, ...] | None = Field(default=None, max_length=16)
     search_keys: tuple[str, ...] | None = Field(default=None, max_length=16)
     docstring: str | None = Field(default=None, min_length=1, max_length=500)
@@ -434,8 +454,7 @@ class EditFeatureTool(AgentTool[EditFeatureInput, EditFeatureOutput]):
     )
     input_model = EditFeatureInput
     output_model = EditFeatureOutput
-    batchable = False
-    parallel_safe = False
+    batch_group = None
 
     async def normalize_input(self, tool_input: EditFeatureInput) -> EditFeatureInput:
         updates: dict[str, object] = {}
@@ -807,8 +826,7 @@ class DeleteFeatureTool(AgentTool[DeleteFeatureInput, DeleteFeatureOutput]):
     )
     input_model = DeleteFeatureInput
     output_model = DeleteFeatureOutput
-    batchable = False
-    parallel_safe = False
+    batch_group = None
 
     async def normalize_input(self, tool_input: DeleteFeatureInput) -> DeleteFeatureInput:
         return tool_input.model_copy(

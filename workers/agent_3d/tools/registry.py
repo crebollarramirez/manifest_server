@@ -10,6 +10,7 @@ from typing import Any
 from openai.lib._pydantic import to_strict_json_schema
 
 from .base import (
+    BATCH_GROUPS,
     AgentTool,
     StrictToolModel,
     ToolExecutionContext,
@@ -17,6 +18,10 @@ from .base import (
     ToolResult,
     tool_failure,
 )
+
+
+# Distinguishes "declared batch_group = None" from "never declared one".
+_UNDECLARED = object()
 
 
 LOGGER = logging.getLogger(__name__)
@@ -62,10 +67,17 @@ def _validate_tool(tool: AgentTool[Any, Any]) -> None:
     version = getattr(tool_type, "version", None)
     if type(version) is not int or version < 1:
         raise InvalidToolDefinitionError("Tool versions must be positive integers.")
-    for attribute in ("batchable", "parallel_safe"):
-        value = getattr(tool_type, attribute, None)
-        if type(value) is not bool:
-            raise InvalidToolDefinitionError(f"Tool {attribute} must be a bool.")
+    # A sentinel rather than a None default: None is a *legal declared value*
+    # here (it means "never batches"), so a plain getattr default could not
+    # tell an explicit None from a tool that forgot to declare one at all.
+    batch_group = getattr(tool_type, "batch_group", _UNDECLARED)
+    if batch_group is _UNDECLARED or not (
+        batch_group is None or batch_group in BATCH_GROUPS
+    ):
+        raise InvalidToolDefinitionError(
+            "Tool batch_group must be None or one of the declared batch "
+            f"groups: {', '.join(sorted(BATCH_GROUPS))}."
+        )
     description = getattr(tool_type, "description", None)
     if not isinstance(description, str) or not description.strip():
         raise InvalidToolDefinitionError("Tool descriptions must be non-empty.")
@@ -252,16 +264,17 @@ class ToolExecutor:
             "ToolExecutor.execute_sync() cannot run inside an active event loop."
         )
 
-    def is_batchable(self, tool_id: str) -> bool:
-        """Return whether ``tool_id`` may be grouped with other calls in one batch.
+    def batch_group(self, tool_id: str) -> str | None:
+        """Return the batch group ``tool_id`` may share a multi-call batch with.
 
-        Fails closed (``False``) for an unknown tool ID -- defensive only,
-        since callers reach this only after the tool ID has already passed
-        an allowlist check.
+        ``None`` means the tool must be the only call in its round. Fails
+        closed (``None``) for an unknown tool ID -- defensive only, since
+        callers reach this only after the tool ID has already passed an
+        allowlist check.
         """
 
         try:
             tool = self._registry.get(tool_id)
         except UnknownToolError:
-            return False
-        return bool(tool.batchable)
+            return None
+        return tool.batch_group

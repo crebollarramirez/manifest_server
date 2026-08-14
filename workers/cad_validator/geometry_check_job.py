@@ -38,6 +38,7 @@ _GEOMETRY_FIELDS = (
     "execution_ok",
     "geometry_valid",
     "error_message",
+    "diagnostics",
     "volume_mm3",
     "bounding_box",
     "center_of_mass",
@@ -149,8 +150,22 @@ def _measure_source(
     source = source_bytes.decode("utf-8")
     ast_report = validate_cad_source(source, file_path="model.py")
     if not ast_report.get("safe_to_execute"):
+        # The report names the rule, the function, and the line. Forwarding
+        # it is the whole point: a caller told only that "static safety
+        # checks failed" has to guess which of its edits broke, and an agent
+        # given that message repeatedly will thrash instead of fixing the one
+        # thing that is actually wrong.
+        diagnostics = ast_report.get("diagnostics")
+        diagnostics = diagnostics if isinstance(diagnostics, list) else []
+        summary = "; ".join(
+            str(item.get("message"))
+            for item in diagnostics[:3]
+            if isinstance(item, dict) and item.get("message")
+        )
         return execution_failed_geometry(
             "Source failed static safety checks and was not executed."
+            + (f" {summary}" if summary else ""),
+            diagnostics=diagnostics,
         )
     return _execute_and_measure(model_path, params_path, local_dir, timeout_seconds)
 

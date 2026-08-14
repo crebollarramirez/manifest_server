@@ -120,6 +120,7 @@ class Agent3D:
         recent_messages: Sequence[Mapping[str, Any]] = (),
         observations: Sequence[Mapping[str, Any]] = (),
         project_inventory: Mapping[str, Any] | None = None,
+        validation_feedback: Mapping[str, Any] | None = None,
     ) -> Any:
         """Start a new reasoning chain for ``active_step``.
 
@@ -138,6 +139,15 @@ class Agent3D:
         source) so the model doesn't need a tool round to discover it. When
         omitted, an empty roster is sent instead of the field being absent,
         so the model always sees the same shape.
+
+        ``validation_feedback`` carries the diagnostics from a validation the
+        candidate already failed -- either this step's own earlier attempt
+        after a restart, or, for a repair step, the whole-plan failure that
+        caused the step to exist. It is a separate field rather than a
+        synthetic observation because observations mean "tool calls you
+        made", and a validator verdict has a different provenance the model
+        should not be misled about. Empty dict when absent, so the shape is
+        stable.
         """
 
         execution_context = {
@@ -157,6 +167,11 @@ class Agent3D:
                         },
                         "other_parts": [],
                     }
+                ),
+                "validation_feedback": (
+                    dict(validation_feedback)
+                    if validation_feedback is not None
+                    else {}
                 ),
             },
             "step_observations": list(observations),
@@ -242,6 +257,10 @@ class Agent3D:
             "input": input_items,
             "tools": list(self._tool_catalog),
             "tool_choice": "required",
+            # Load-bearing: this is what permits multi-call rounds at all.
+            # The orchestrator's batch groups decide which calls may actually
+            # share a round; turning this off would silently stop all
+            # batching, raising turn consumption with no error anywhere.
             "parallel_tool_calls": True,
             "reasoning": self._reasoning_config(),
         }
