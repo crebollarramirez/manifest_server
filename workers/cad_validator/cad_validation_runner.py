@@ -7,8 +7,6 @@ import sys
 import traceback
 from pathlib import Path
 
-import cadquery as cq
-
 
 WORKER_DIR = Path(__file__).resolve().parent
 
@@ -19,9 +17,9 @@ if str(WORKER_DIR) not in sys.path:
     sys.path.insert(0, str(WORKER_DIR))
 
 try:
-    from .geometry_inspection import measure_geometry
+    from .geometry import GeometryExtractionError, build_geometry
 except ImportError:
-    from geometry_inspection import measure_geometry
+    from geometry import GeometryExtractionError, build_geometry
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,6 +27,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", required=True, type=Path)
     parser.add_argument("--params", required=True, type=Path)
     parser.add_argument("--result", required=True, type=Path)
+    # Where to write the native B-rep. Full validation produces the artifact
+    # too, so the candidate lifecycle -- not agent reasoning -- is what makes a
+    # candidate's geometry exist. The parent uploads whatever lands here.
+    parser.add_argument("--brep", required=False, type=Path, default=None)
     return parser.parse_args()
 
 
@@ -89,25 +91,27 @@ def exception_result(exc: Exception, model_path: Path) -> dict:
     }
 
 
-def geometry_result(model: object) -> dict:
-    if isinstance(model, cq.Workplane):
-        solids = model.solids().vals()
-        result_type = "cadquery.Workplane"
-    elif isinstance(model, cq.Shape):
-        solids = model.Solids()
-        result_type = f"cadquery.{type(model).__name__}"
-    else:
+def geometry_result(model: object, brep_path: Path | None = None) -> dict:
+    """Normalize, serialize, and measure one build result for full validation.
+
+    Geometry travels the same extractor -> analyzer path a geometry check uses,
+    against the same normalized root that gets serialized. Before this, full
+    validation measured the build independently, so the two answers to "what
+    did this candidate build" came from two implementations and neither was
+    grounded in a shape anything had kept.
+    """
+
+    try:
+        built = build_geometry(model, brep_path)
+    except GeometryExtractionError as exc:
         return {
             "status": "failed",
             "stage": "geometry",
             "repairable_hint": True,
             "diagnostics": [
                 {
-                    "error_code": "BUILD_MODEL_RETURN_ERROR",
-                    "message": (
-                        "build_model must return a CadQuery Workplane or Shape; "
-                        f"received {type(model).__name__}."
-                    ),
+                    "error_code": exc.error_code,
+                    "message": exc.message,
                     "stage": "geometry",
                     "file_path": "model.py",
                     "function_name": "build_model",
@@ -117,43 +121,40 @@ def geometry_result(model: object) -> dict:
             "build_artifacts": None,
         }
 
-    if not solids:
-        return {
-            "status": "failed",
-            "stage": "geometry",
-            "repairable_hint": True,
-            "diagnostics": [
-                {
-                    "error_code": "GEOMETRY_BUILD_ERROR",
-                    "message": "build_model returned geometry with no solids.",
-                    "stage": "geometry",
-                    "file_path": "model.py",
-                    "function_name": "build_model",
-                    "related_symbols": ["build_model"],
-                }
-            ],
-            "build_artifacts": None,
-        }
-    # The model is already built and its solids are already in hand, so the
-    # full measurement is free here. Reporting it -- rather than only the
-    # solid count -- is what lets the agent loop learn what a step produced
-    # from the validation it already runs, instead of spending a whole model
-    # round calling check_geometry to ask.
-    measurement = measure_geometry(model)
+    snapshot = built.snapshot
     return {
         "status": "passed",
         "stage": "completed",
         "repairable_hint": False,
-        "diagnostics": [],
+        "diagnostics": list(snapshot.get("diagnostics") or []),
+        # The model is already built and measured, so reporting the full
+        # measurement -- rather than only the solid count -- is what lets the
+        # agent loop learn what a step produced from the validation it already
+        # runs, instead of spending a whole model round calling check_geometry.
+        #
+        # These key names are consumed by orchestrator._geometry_summary and are
+        # deliberately unchanged: the internal representation moved, the roster
+        # the agent reads did not.
         "build_artifacts": {
-            "solid_count": len(solids),
-            "result_type": result_type,
-            "volume_mm3": measurement.get("volume_mm3"),
-            "bounding_box": measurement.get("bounding_box"),
-            "center_of_mass": measurement.get("center_of_mass"),
-            "face_count": measurement.get("face_count"),
-            "edge_count": measurement.get("edge_count"),
+            "solid_count": snapshot.get("solid_count"),
+            "result_type": built.result_type,
+            "volume_mm3": snapshot.get("volume_mm3"),
+            "bounding_box": snapshot.get("bounding_box"),
+            "center_of_mass": snapshot.get("center_of_mass"),
+            "face_count": snapshot.get("face_count"),
+            "edge_count": snapshot.get("edge_count"),
+            # How the shape is oriented, not just how far it reaches. This is
+            # the half a bounding box cannot express, and it travels this path
+            # so a step opens already knowing it.
+            "planar_faces": snapshot.get("planar_faces"),
+            "non_planar_face_count": snapshot.get("non_planar_face_count"),
+            "sharp_edge_count": snapshot.get("sharp_edge_count"),
         },
+        # The snapshot and artifact descriptor the parent persists. Kept beside
+        # build_artifacts rather than merged into it so the agent-facing roster
+        # shape stays exactly what it was.
+        "geometry": snapshot,
+        "geometry_artifact": built.artifact,
     }
 
 
@@ -165,7 +166,7 @@ def execute(args: argparse.Namespace) -> dict:
 
     module = import_model_module(args.model)
     params = module.ModelParams(**params_data)
-    return geometry_result(module.build_model(params))
+    return geometry_result(module.build_model(params), args.brep)
 
 
 def main() -> int:

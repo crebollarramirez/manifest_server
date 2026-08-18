@@ -34,7 +34,7 @@ const modes = [
 	{
 		name: 'Geometry check',
 		source: 'Agent 3D’s check_geometry tool call — no arguments, current edit-scoped candidate only.',
-		success: 'Executes candidate source, measures volume/bounding box/center of mass/solid-face-edge counts, and diffs it against the immediately preceding checked state.',
+		success: 'Executes candidate source, measures volume/bounding box/center of mass/solid-face-edge counts plus the largest planar faces (with inclination from horizontal) and a sharp-edge count, and diffs it against the immediately preceding checked state.',
 		downstream: 'Returned straight to Agent3D mid-loop as deterministic evidence; it never gates a step and is unrelated to the pass/fail validate_cad report.',
 	},
 ];
@@ -125,7 +125,8 @@ const failures = [
 			<p>The CAD Validator consumes <code>validate_cad</code> jobs and returns a schema-v2 proof for accepted or edit-scoped candidate source. It owns the active execution and its temporary workspace, but it does not commit candidate source, plan repairs, promote canonical source, or generate final export files.</p>
 			<p>Postgres owns job lifecycle state, 3dProjects storage owns source objects and parameters, and the CAD Agent or CAD Exporter consumes the appropriate successful outcome.</p>
 			<p>Static validation also proves semantic dependency integrity before execution: direct <code>depends_on</code> edges must be unique, acyclic, and consistent with <code>build_model</code> dataflow, while decorator <code>parameters</code> must match effective <code>params.*</code> usage through reachable private helpers. Metadata drift returns repairable diagnostics and never reaches canonical commit.</p>
-			<p>This worker also serves <code>geometry_check</code> jobs, a separate and much lighter job type behind Agent 3D's <code>check_geometry</code> tool (see the <a href="/workflows/cad-thinking/">reasoning loop</a>). It shares this container's sandboxed execution and geometry-measurement primitives with full validation, but is a repeatable mid-loop probe with its own result schema and cache — it never gates step completion or candidate commit the way a <code>validate_cad</code> pass/fail does. Full details: <code>workers/cad_validator/GEOMETRY_CHECK.md</code>.</p>
+			<p>This worker also serves <code>geometry_check</code> jobs, a separate and much lighter job type behind Agent 3D's <code>check_geometry</code> tool (see the <a href="/workflows/cad-thinking/">reasoning loop</a>). It shares this container's sandboxed execution and geometry layer with full validation, but is a repeatable mid-loop probe with its own result schema and cache — it never gates step completion or candidate commit the way a <code>validate_cad</code> pass/fail does. Full details: <code>workers/cad_validator/GEOMETRY_CHECK.md</code>.</p>
+			<p>Both job types run their candidate through the same geometry layer: the CadQuery result is normalized into one root shape, serialized as a native B-rep artifact bound to the candidate and its <code>source_sha256</code>, and measured from that root. The artifact is the authoritative geometry of a built candidate and <code>model.py</code> remains the canonical design source; a <code>GeometrySnapshot</code> is a derived observation of the artifact rather than the geometry itself. Because full validation runs on every candidate mutation, a later <code>check_geometry</code> normally reuses that work instead of executing the candidate again. Raw B-rep topology is never placed in a report or in agent context. Architecture: <code>workers/cad_validator/geometry/README.md</code>.</p>
 		</article>
 
 		<BoundaryMatrix
@@ -160,11 +161,22 @@ const failures = [
 		]}
 		sources={[
 			{ path: 'workers/cad_validator/cad_validation_worker.py', symbol: 'main / process_job', description: 'Polling, dispatch, durable completion, and unexpected-failure reporting.' },
-			{ path: 'workers/cad_validator/validate_cad_job.py', symbol: 'validate_cad_job / run_model', description: 'Source proof, temporary workspace, isolated process, timeout, and result assembly.' },
+			{ path: 'workers/cad_validator/validate_cad_job.py', symbol: 'validate_cad_job / run_model / _record_geometry', description: 'Source proof, temporary workspace, isolated process, timeout, result assembly, and best-effort persistence of the B-rep artifact the build produced.' },
 			{ path: 'workers/cad_validator/cad_ast_validator.py', symbol: 'validate_cad_source', description: 'Ordered static contract and safety gates.' },
-			{ path: 'workers/cad_validator/cad_validation_runner.py', symbol: 'execute / geometry_result', description: 'ModelParams construction, build_model invocation, and geometry contract.' },
+			{ path: 'workers/cad_validator/cad_validation_runner.py', symbol: 'execute / geometry_result', description: 'ModelParams construction, build_model invocation, B-rep extraction, and geometry contract.' },
 			{ path: 'supabase/migrations/20260725000000_add_cad_edit_workflow.sql', symbol: 'complete_candidate_cad_validation / complete_cad_validation_and_queue_export', description: 'Candidate and accepted completion transaction semantics.' },
 			{ path: 'workers/cad_validator/geometry_check_job.py', symbol: 'process_geometry_check_job', description: 'check_geometry job handling: re-hash, cached or fresh GeometrySnapshot, comparison, and completion.' },
+			{ path: 'workers/cad_validator/geometry/README.md', symbol: 'Geometry layer architecture', description: 'Sources of truth, candidate geometry lifecycle, component responsibilities, persistence and identity, and the labelled future query direction.' },
+			{ path: 'workers/cad_validator/geometry/extraction.py', symbol: 'CadGeometryExtractor', description: 'Normalizes a build_model Workplane or Shape result into one root cq.Shape, compounding every stack shape rather than taking the first.' },
+			{ path: 'workers/cad_validator/geometry/artifact.py', symbol: 'serialize_root / load_root / verify_digest', description: 'Native B-rep serialization and reload. artifact_digest identifies the stored bytes, not the geometry: identical shapes built differently serialize differently.' },
+			{ path: 'workers/cad_validator/geometry/analyzer.py', symbol: 'GeometryAnalyzer / SNAPSHOT_FIELDS', description: 'Derives every snapshot metric from the normalized B-rep root: volume, surface area, bounding box, center of mass, topology counts, the planar-face census, and the sharp-edge count.' },
+			{ path: 'workers/cad_validator/geometry/engine.py', symbol: 'GeometryEngine / CandidateSourceRef', description: 'The geometry service boundary: derive, reuse, resolve, load, and compare. Callers do not know how B-rep files are stored or how OCCT topology is represented.' },
+			{ path: 'workers/cad_validator/geometry/comparison.py', symbol: 'compare_geometry', description: 'Field-by-field before/after delta, including sharp_edge_count, which moves opposite edge_count under filleting.' },
+			{ path: 'workers/cad_validator/geometry/runtime.py', symbol: 'GEOMETRY_CHECKER_VERSION', description: 'Version 3 retires snapshots measured before they became derived observations of a persisted B-rep artifact.' },
+			{ path: 'supabase/migrations/20260712130000_geometry_snapshot_diagnostics.sql', symbol: 'diagnostics', description: 'Adds the diagnostics column whose absence failed every geometry_snapshots insert with PGRST204.' },
+			{ path: 'supabase/migrations/20260712140000_geometry_snapshot_shape_census.sql', symbol: 'planar_faces / non_planar_face_count / sharp_edge_count', description: 'Adds the shape-census columns to geometry_snapshots.' },
+			{ path: 'supabase/migrations/20260712150000_geometry_artifacts.sql', symbol: 'geometry_artifacts / geometry_artifact_id', description: 'Candidate-bound native B-rep artifacts, keyed on (source_sha256, geometry_checker_version), and the snapshot column naming the artifact it observed.' },
+			{ path: 'supabase/migrations/20260712160000_geometry_snapshot_surface_metrics.sql', symbol: 'surface_area_mm2 / vertex_count', description: 'Completes the snapshot vocabulary with the two metrics derivable from the same root.' },
 			{ path: 'workers/agent_3d/tools/geometry/geometry_tools.py', symbol: 'CheckGeometryTool', description: 'The Agent3D tool that queues and polls a geometry_check job.' },
 		]}
 	/>

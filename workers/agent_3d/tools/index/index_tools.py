@@ -103,19 +103,61 @@ def _index(context: ToolExecutionContext) -> dict[str, Any]:
     return parsed
 
 
+def _part_record(part: dict[str, Any]) -> dict[str, Any]:
+    """Return one part record with the predictable fields index tools rely on.
+
+    Applied to accepted-index and candidate-derived records alike, so the two
+    sources cannot diverge in shape at the point of use.
+    """
+
+    return {
+        **part,
+        "part_id": _text(part.get("part_id")),
+        "part_name": _text(part.get("part_name")),
+        "cad_parts": _records(part.get("cad_parts")),
+        "model_params": _records(part.get("model_params")),
+    }
+
+
 def _parts(index: dict[str, Any]) -> list[dict[str, Any]]:
     """Return sanitized part records with predictable fields needed by index tools."""
 
-    return [
-        {
-            **part,
-            "part_id": _text(part.get("part_id")),
-            "part_name": _text(part.get("part_name")),
-            "cad_parts": _records(part.get("cad_parts")),
-            "model_params": _records(part.get("model_params")),
-        }
-        for part in _records(index.get("parts"))
-    ]
+    return [_part_record(part) for part in _records(index.get("parts"))]
+
+
+def _current_part(context: ToolExecutionContext) -> dict[str, Any] | None:
+    """Return the authoritative record for the part this workflow is editing.
+
+    While an edit job holds a candidate, that candidate *is* the authoritative
+    version of the part: it carries every feature and parameter the job's
+    earlier plan steps created, none of which the accepted project index knows
+    about yet. Resolving here rather than in the tools keeps the agent-facing
+    contract to one meaning -- ``index_get_feature`` returns the current
+    version of the feature for the workflow being executed -- instead of
+    exposing separate candidate and canonical lookups.
+
+    Falls back to the accepted project index when there is no candidate (the
+    planning agent calls these same tools before one exists) or when the
+    candidate cannot currently produce a record. Parts other than the one
+    under edit always come from the accepted index; these tools never read
+    one, since both scope themselves to ``context.part_id``.
+
+    Returns ``None`` when the accepted index has no such part.
+    """
+
+    candidate_index = context.services.candidate_index
+    if context.candidate_id is not None and candidate_index is not None:
+        part = candidate_index.part_index()
+        if part is not None:
+            return _part_record(part)
+    return next(
+        (
+            part
+            for part in _parts(_index(context))
+            if part["part_id"] == context.part_id
+        ),
+        None,
+    )
 
 
 class IndexSearchInput(StrictToolModel):
@@ -210,14 +252,17 @@ class IndexSearchTool(AgentTool[IndexSearchInput, IndexSearchOutput]):
     This read-only discovery tool ranks each feature using its part name,
     semantic ID, role, function name, parameters, and search keys. Callers use
     the returned semantic IDs to request exact context with ``IndexGetFeatureTool``.
+
+    Searches the current version of the part -- see :func:`_current_part`.
     """
 
     tool_id = "index_search"
     version = 1
     description = (
         "Search semantic CAD features in the selected part. Use this to identify "
-        "relevant semantic IDs before requesting exact feature context. Requires a "
-        "fresh project index and does not read or modify CAD source."
+        "relevant semantic IDs before requesting exact feature context. Searches "
+        "the part's current state, including features added by earlier completed "
+        "plan steps. Does not read or modify CAD source."
     )
     input_model = IndexSearchInput
     output_model = IndexSearchOutput
@@ -236,34 +281,32 @@ class IndexSearchTool(AgentTool[IndexSearchInput, IndexSearchOutput]):
 
         try:
             matches: list[IndexSearchMatch] = []
-            for part in _parts(_index(context)):
-                if part["part_id"] != context.part_id:
+            part = _current_part(context)
+            for feature in (part or {}).get("cad_parts", []):
+                fields = [
+                    part["part_name"],
+                    _text(feature.get("semantic_id")),
+                    _text(feature.get("role")),
+                    _text(feature.get("function_name")),
+                    *_strings(feature.get("parameters")),
+                    *_strings(feature.get("search_keys")),
+                ]
+                score = max(
+                    (_relevance(tool_input.query, value) for value in fields),
+                    default=0,
+                )
+                semantic_id = _text(feature.get("semantic_id"))
+                if not semantic_id or score < 0.25:
                     continue
-                for feature in part["cad_parts"]:
-                    fields = [
-                        part["part_name"],
-                        _text(feature.get("semantic_id")),
-                        _text(feature.get("role")),
-                        _text(feature.get("function_name")),
-                        *_strings(feature.get("parameters")),
-                        *_strings(feature.get("search_keys")),
-                    ]
-                    score = max(
-                        (_relevance(tool_input.query, value) for value in fields),
-                        default=0,
+                matches.append(
+                    IndexSearchMatch(
+                        part_id=part["part_id"],
+                        part_name=part["part_name"],
+                        semantic_id=semantic_id,
+                        role=_text(feature.get("role")),
+                        score=round(score, 4),
                     )
-                    semantic_id = _text(feature.get("semantic_id"))
-                    if not semantic_id or score < 0.25:
-                        continue
-                    matches.append(
-                        IndexSearchMatch(
-                            part_id=part["part_id"],
-                            part_name=part["part_name"],
-                            semantic_id=semantic_id,
-                            role=_text(feature.get("role")),
-                            score=round(score, 4),
-                        )
-                    )
+                )
             matches.sort(
                 key=lambda match: (
                     -match.score,
@@ -296,14 +339,17 @@ class IndexGetFeatureTool(
     This read-only lookup is intentionally exact: it searches only the part in
     the execution context and only the supplied semantic ID. It is the follow-up
     tool for a feature discovered through ``IndexSearchTool``.
+
+    Resolves the current version of the feature -- see :func:`_current_part`.
     """
 
     tool_id = "index_get_feature"
     version = 1
     description = (
         "Retrieve detailed context for one exact semantic CAD feature in the "
-        "selected part. Use this after identifying its semantic ID. This tool does "
-        "not perform broad search or modify project source."
+        "selected part. Use this after identifying its semantic ID. Returns the "
+        "feature's current version, including one created by an earlier completed "
+        "plan step. This tool does not perform broad search or modify project source."
     )
     input_model = IndexGetFeatureInput
     output_model = IndexGetFeatureOutput
@@ -322,14 +368,7 @@ class IndexGetFeatureTool(
         """
 
         try:
-            part = next(
-                (
-                    candidate
-                    for candidate in _parts(_index(context))
-                    if candidate["part_id"] == context.part_id
-                ),
-                None,
-            )
+            part = _current_part(context)
             feature = next(
                 (
                     candidate

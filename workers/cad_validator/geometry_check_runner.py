@@ -11,15 +11,15 @@ WORKER_DIR = Path(__file__).resolve().parent
 
 # Invoked as ``python -I geometry_check_runner.py`` (isolated mode), which,
 # unlike a normal invocation, does not prepend the script's own directory to
-# sys.path -- so the sibling geometry_inspection import needs it added
-# explicitly before either import form below can succeed.
+# sys.path -- so the sibling geometry package import needs it added explicitly
+# before either import form below can succeed.
 if str(WORKER_DIR) not in sys.path:
     sys.path.insert(0, str(WORKER_DIR))
 
 try:
-    from .geometry_inspection import execution_failed_geometry, measure_geometry
+    from .geometry import GeometryExtractionError, build_geometry, empty_snapshot
 except ImportError:
-    from geometry_inspection import execution_failed_geometry, measure_geometry
+    from geometry import GeometryExtractionError, build_geometry, empty_snapshot
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,6 +29,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", required=True, type=Path)
     parser.add_argument("--params", required=True, type=Path)
     parser.add_argument("--result", required=True, type=Path)
+    # Where to write the native B-rep. The parent chooses the path and picks
+    # the file up afterwards; nothing but JSON crosses back out of this
+    # process, so the artifact travels on the shared filesystem the way
+    # model.py and params.json already do.
+    parser.add_argument("--brep", required=False, type=Path, default=None)
     return parser.parse_args()
 
 
@@ -73,7 +78,11 @@ def exception_result(exc: Exception, model_path: Path) -> dict:
     message = str(exc) or type(exc).__name__
     if frame is not None:
         message = f"{message} (in {frame.name}, model.py:{frame.lineno})"
-    return execution_failed_geometry(message)
+    return empty_snapshot(
+        execution_ok=False,
+        geometry_valid=None,
+        error_message=message,
+    )
 
 
 def execute(args: argparse.Namespace) -> dict:
@@ -84,7 +93,20 @@ def execute(args: argparse.Namespace) -> dict:
 
     module = import_model_module(args.model)
     params = module.ModelParams(**params_data)
-    return measure_geometry(module.build_model(params))
+    try:
+        built = build_geometry(module.build_model(params), args.brep)
+    except GeometryExtractionError as exc:
+        # A build that returns unusable geometry is a normal, expected outcome
+        # for an in-progress edit -- reported, never raised.
+        return empty_snapshot(
+            execution_ok=True,
+            geometry_valid=False,
+            error_message=exc.message,
+            solid_count=exc.solid_count,
+        )
+    result = dict(built.snapshot)
+    result["geometry_artifact"] = built.artifact
+    return result
 
 
 def main() -> int:

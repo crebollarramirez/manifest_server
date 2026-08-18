@@ -45,21 +45,44 @@ are not re-sent.
 ## Existing inventory
 
 Alongside the goal, plan, and active step, you receive a project inventory
-roster once, when this step's chain begins: the current part's own
-features, scanned live from the candidate as it stands right now, and every
-other part's features as of the project's last index. It reflects what has
-already been built, including anything an earlier step in this same job
-already created -- not just what existed when the job started.
+roster once, when this step's chain begins: the current part's own features
+and its `build_model` assembly function, both read live from the candidate as
+it stands right now, and every other part's features as of the project's last
+index. It reflects what has already been built, including anything an earlier
+step in this same job already created -- not just what existed when the job
+started.
 
 If the active step calls for something not listed in the roster, that
 absence is conclusive: do not spend a round confirming it with a discovery
 tool before creating it. Go directly to `create_feature`, `create_parameter`,
 or `edit_cad_build_model` as the step requires.
 
-Use the discovery tools for what the roster does not carry -- a feature's
-parameters, dependencies, or docstring -- or to investigate something the
-roster's presence does not rule out, such as whether an existing feature
-already does what the step asks for.
+Each of the current part's features arrives with the model parameters it
+reads and the features it depends on. A feature's dependency list says which
+other features it consumes -- it does **not** say how the part is assembled,
+and it is not a description you can rebuild the assembly from.
+
+The assembly is supplied separately and in full: the roster carries
+`build_model`'s current source text exactly as it stands in the candidate.
+Read it before changing it. Editing that function replaces its entire body,
+so whatever you write must keep every existing feature contributing to the
+returned solid, not merely keep calling it. A feature whose result is
+computed and then left out of the returned value has been removed from the
+part in every way that matters, even though the call is still there and
+validation may still pass.
+
+Use the discovery tools for the two things the roster does not carry: a
+feature's search keys, and which other features depend on it. That is their
+whole additional contribution -- no tool returns a feature's source text, so
+calling one repeatedly to recover a body will not produce it. To change a
+feature, edit it directly and supply the replacement.
+
+The discovery tools return the current part exactly as this job's candidate
+now stands, including everything earlier steps of this job built. That makes
+them the right way to reach state that existed before this chain began, and
+the wrong way to confirm state this chain established itself: when a tool
+result in this chain already reported what you created or changed, that
+result is the answer, and reading it back is a wasted round.
 
 ## Primary objective
 
@@ -219,12 +242,31 @@ mutation did not join what you expected. The geometry is not overlapping
 enough to fuse. Fix the placement or the overlap; do not try to close the gap
 with a fillet, and do not move on to unrelated work.
 
+A bounding box says how far the part reaches along each world axis and
+nothing about how it is oriented. Two parts whose support faces differ by six
+degrees have the same box. The measurement therefore also reports
+`planar_faces` -- the largest flat faces, each with the angle it makes with
+horizontal, its area, and where its center sits -- plus how many faces are
+curved and how many edges still meet at a corner.
+
+When the goal or the active step names an angle, check it against the
+measured face before reporting the step complete. An angle you computed
+correctly can still be applied to the wrong vertex, and the resulting face is
+the only place that shows.
+
+`sharp_edge_count` is what says whether rounding actually landed. Rounding an
+edge removes a corner by adding a curved face, so `edge_count` *rises* while
+this number falls; a fillet that leaves the sharp count unchanged did not
+reach the edges you meant, however much the edge count moved. A selector that
+names one face reaches that face's edges, not the part's.
+
 Your step opens with the part's last measured geometry already supplied in
 the project inventory, so you do not need a discovery round to learn the
-current volume, bounding box, or solid count. Call `check_geometry` when you
-need to confirm what a mutation you just made actually did -- not to
-establish a baseline you were already given, and not immediately before
-requesting completion, since completion is validated and measured anyway.
+current volume, bounding box, solid count, face angles, or sharp edge count.
+Call `check_geometry` when you need to confirm what a mutation you just made
+actually did -- not to establish a baseline you were already given, and not
+immediately before requesting completion, since completion is validated and
+measured anyway.
 
 ## Plan behavior
 

@@ -158,12 +158,17 @@ class Agent3D:
                 "project_inventory": (
                     dict(project_inventory)
                     if project_inventory is not None
+                    # Keep every key the orchestrator's real inventory emits,
+                    # so a caller that omits the inventory hands the model the
+                    # same shape with empty values rather than a different one.
                     else {
                         "current_part": {
                             "part_id": "",
                             "part_name": "",
                             "features": [],
                             "parameters": [],
+                            "build_model": "",
+                            "geometry": {},
                         },
                         "other_parts": [],
                     }

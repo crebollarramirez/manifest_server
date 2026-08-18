@@ -311,6 +311,23 @@ between turns -- all loop state lives in the orchestrator:
 - tool observations are scoped to the active step: they accumulate across
   that step's turns and are cleared the moment the active step changes, so a
   later step never inherits an earlier step's tool transcript;
+- `project_inventory.current_part` is what replaces that discarded
+  transcript. It is rebuilt at the start of every step's chain from the
+  candidate's own part index, not once per job, and lists every feature any
+  completed step of this job built -- semantic ID, function name, role, the
+  model parameters the feature reads, and what it depends on -- plus the
+  current `ModelParams` fields with their defaults and the part's last
+  measured geometry, and the full current text of `build_model`. Feature
+  entries stay a roster: no source bodies, since their job is to let a step
+  understand the feature set without rediscovering it, not to replace reading
+  a feature. `build_model` is the deliberate exception -- it is the one
+  function a step may replace wholesale, and the only record of how the
+  features compose into the returned solid, which no amount of `depends_on`
+  metadata conveys. `other_parts` still comes from the project's accepted
+  semantic index, which cannot contain this job's uncommitted work. A new
+  step therefore needs none of the previous step's reasoning to know what
+  exists or how it is currently assembled; see "Cross-step memory" in
+  `README.md`;
 - `validation_feedback` carries the diagnostics from a validation this
   candidate already failed -- this step's earlier attempt after a restart,
   or, for a repair step, the whole-plan failure that created it. It is a

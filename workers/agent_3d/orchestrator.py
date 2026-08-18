@@ -21,6 +21,7 @@ from .planning.resolver import resolve_deterministic_edit_target
 from .tools import ToolExecutionContext, ToolServices
 from .tools.base import tool_failure
 from .tools.hashing import source_hash
+from .tools.index.candidate_index import CandidatePartIndex
 from .tools.index.index_tools import _index as _load_semantic_index
 from .tools.index.index_tools import _parts as _semantic_index_parts
 from .tools.index.index_tools import _text as _index_text
@@ -353,6 +354,13 @@ def _geometry_summary(report: dict[str, Any]) -> dict[str, Any]:
 
     This is what lets a step open already knowing what the model measures,
     rather than spending its first round on ``check_geometry`` to find out.
+
+    The face census and sharp-edge count are here for the same reason the
+    counts are, and carry what the rest cannot: a bounding box is identical
+    for two parts whose support faces differ by six degrees, and rounding four
+    of forty-eight edges barely moves a volume. A step that opens without them
+    can only see how much material exists, never how it is oriented -- which
+    is the half most requirements are actually written about.
     """
 
     artifacts = _build_artifacts(report)
@@ -367,6 +375,9 @@ def _geometry_summary(report: dict[str, Any]) -> dict[str, Any]:
             "center_of_mass",
             "face_count",
             "edge_count",
+            "planar_faces",
+            "non_planar_face_count",
+            "sharp_edge_count",
         )
         if artifacts.get(key) is not None
     }
@@ -477,6 +488,18 @@ def _active_step(plan: CadPlan) -> PlanStepState | None:
         if step.status in ACTIVE_STEP_STATUSES:
             return step
     return None
+
+
+def _resolved_part_name(job: dict[str, Any]) -> str:
+    """Return the name of the part this job resolved to edit, or ``""``.
+
+    Blank until ``_resolve_planning_part`` has run, and blank for a job whose
+    resolved target carries no name -- neither is an error, so callers treat
+    the name as a label rather than an identifier.
+    """
+
+    resolved_targets = list(job.get("resolved_targets") or [])
+    return _index_text(resolved_targets[0].get("part_name")) if resolved_targets else ""
 
 
 def _extract_cad_features(source: str) -> list[dict[str, str]]:
@@ -1382,9 +1405,13 @@ class EditWorkflowOrchestrator:
 
         - ``index_search``/``index_get_feature``: an exact match of both tool
           ID and arguments anywhere in this step's observations is always
-          redundant -- the semantic index and query semantics do not change
-          mid-step, so a repeat can only return what an existing observation
-          already contains.
+          redundant. These resolve against the live candidate, so a repeat
+          after a mutation could technically return something different --
+          and it is still rejected on purpose. A step that just edited a
+          feature already knows what it wrote from its own successful tool
+          result; spending a round asking a read tool to confirm it is exactly
+          the rediscovery loop the reasoning policy exists to prevent. Read
+          tools are for state this chain did not establish itself.
         - ``check_geometry``: its arguments are always empty, so "same
           arguments" cannot distinguish calls. Instead, scan backwards for the
           most recent observation that is either a prior check_geometry call
@@ -1621,9 +1648,9 @@ class EditWorkflowOrchestrator:
 
         Call once per job -- the persisted index only changes at reindex
         time, well outside a running job. Excludes the part this job is
-        editing: that part's live state comes from
-        ``_current_part_inventory`` instead, never from this index, since the
-        index can be stale relative to this job's own in-progress edits.
+        editing: that part comes from the candidate instead, via
+        ``CandidatePartIndex``, never from this index, which by definition
+        cannot contain anything this job has not yet committed.
         Degrades to ``[]`` on any index problem (missing, malformed, or
         cross-project) rather than failing the job -- an inventory roster is
         an optimization, not a correctness requirement, the same stance
@@ -1665,6 +1692,7 @@ class EditWorkflowOrchestrator:
     def _current_part_inventory(
         self,
         job: dict[str, Any],
+        candidate_index: CandidatePartIndex,
         geometry: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """The part being edited's live features and parameters, scanned
@@ -1675,35 +1703,139 @@ class EditWorkflowOrchestrator:
         (``create_feature``, ``create_parameter``, ``edit_cad_build_model``),
         so a later step in the same job must see what an earlier step in the
         same job just built -- something the persisted semantic index cannot
-        supply, since it only reflects state as of the last reindex. A
-        candidate that can't yet be read fails open to empty feature and
-        parameter lists, mirroring ``_step_blocked_on_missing_geometry``'s
-        convention.
+        supply, since it only reflects state as of the last reindex.
+
+        Built from the same ``CandidatePartIndex`` the current-part read tools
+        resolve through, so the roster a step opens with and what
+        ``index_get_feature`` will tell it cannot disagree about which
+        features exist. Feature entries stay compact -- identity, parameters,
+        and dependencies, never their source bodies -- since their job is to
+        let a step understand the feature set without spending rounds
+        rediscovering it, not to replace reading a feature.
+
+        ``build_model`` is the deliberate exception, and is supplied in full.
+        It is the one function every step may rewrite wholesale
+        (``edit_cad_build_model`` replaces its entire body), and the only
+        thing that says how the features are actually composed into the single
+        solid the part returns. Nothing else carries that: a feature's
+        ``depends_on`` records that it consumes another feature, not that its
+        own result survives into the returned value. A step asked to rewrite
+        this function without seeing it has to reconstruct the assembly from
+        the roster, and a roster whose dependency graph has more than one sink
+        cannot describe a single return value -- which is how a feature ends
+        up invoked, correctly ordered, and silently dropped.
+
+        Source that is merely mid-edit still produces a full roster --
+        ``CandidatePartIndex`` reads it with its own tolerant scan. The local
+        fallback below is for the narrower case where the candidate will not
+        parse or cannot be read at all, and fails open to empty lists,
+        mirroring ``_step_blocked_on_missing_geometry``'s convention.
         """
 
-        resolved_targets = list(job.get("resolved_targets") or [])
-        part_name = (
-            _index_text(resolved_targets[0].get("part_name")) if resolved_targets else ""
-        )
-        try:
-            source = self.repository.read_text(self._candidate_path(job))
-        except WorkflowFailure:
-            features: list[dict[str, str]] = []
-            parameters: list[dict[str, str]] = []
+        part_name = _resolved_part_name(job)
+        features: list[dict[str, Any]]
+        parameters: list[dict[str, Any]]
+        part_index = candidate_index.part_index()
+        if part_index is not None:
+            features = [
+                {
+                    "semantic_id": _index_text(feature.get("semantic_id")),
+                    "function_name": _index_text(feature.get("function_name")),
+                    "role": _index_text(feature.get("role")),
+                    "parameters": [
+                        str(name) for name in (feature.get("parameters") or [])
+                    ],
+                    "depends_on": [
+                        str(name) for name in (feature.get("depends_on") or [])
+                    ],
+                }
+                for feature in (part_index.get("cad_parts") or [])
+            ]
+            parameters = [
+                {
+                    "name": _index_text(parameter.get("name")),
+                    "type_name": _index_text(parameter.get("type_name")),
+                    # The index calls a parameter's literal default
+                    # `default_source`; the roster has always called it
+                    # `default`. Same value, and renaming either side would
+                    # break a contract for no gain.
+                    "default": _index_text(parameter.get("default_source")),
+                }
+                for parameter in (part_index.get("model_params") or [])
+            ]
         else:
-            features = _extract_cad_features(source)
-            parameters = _extract_model_params(source)
+            try:
+                source = self.repository.read_text(self._candidate_path(job))
+            except WorkflowFailure:
+                features = []
+                parameters = []
+            else:
+                features = _extract_cad_features(source)
+                parameters = _extract_model_params(source)
         return {
             "part_id": str(job["resolved_part_id"]),
             "part_name": part_name,
             "features": features,
             "parameters": parameters,
+            # How those features are currently assembled. See this method's
+            # docstring for why the roster alone cannot stand in for it.
+            "build_model": candidate_index.build_model_source(),
             # What the last validated build of this part actually measured.
             # Supplied so a step can open knowing the current geometry rather
             # than spending its first round on check_geometry to ask. Empty
             # until the first validation of this job produces a measurement.
             "geometry": dict(geometry) if geometry else {},
         }
+
+    def _refresh_candidate_index(
+        self,
+        edit_job_id: str,
+        goal: CadGoal,
+        plan: CadPlan,
+        active_step: PlanStep,
+        candidate_index: CandidatePartIndex,
+    ) -> None:
+        """Re-derive the candidate's semantic view at a successful step boundary.
+
+        The orchestrator owns when this happens, and it happens in exactly one
+        place: a step whose completion survived the validation gate. Agent3D
+        never triggers it, never chooses which view is authoritative, and never
+        writes plan or step state.
+
+        Deliberately not run after individual mutating tool calls. While a step
+        is active its own reasoning chain already holds what it built, so
+        re-deriving per mutation would buy nothing; the view matters at the
+        boundary, where the next chain starts with none of that history.
+
+        Best-effort by construction: ``refresh`` cannot raise, and a candidate
+        that fails to extract keeps the last record that did. A degraded view
+        costs the next step a read tool call; failing the job here would cost
+        it everything already built.
+        """
+
+        started = time.monotonic()
+        correlation = dict(
+            goal_id=str(goal.goal_id),
+            plan_id=str(plan.plan_id),
+            step_id=active_step.step_id,
+        )
+        self._trace("candidate_index.started", edit_job_id, **correlation)
+        part_index = candidate_index.refresh()
+        self._trace(
+            "candidate_index.completed",
+            edit_job_id,
+            **correlation,
+            # Two plain facts rather than a derived verdict. They agree
+            # whenever a record was produced, which is the correspondence the
+            # handoff depends on; `mode` says how much of the source the
+            # record's contract could vouch for.
+            candidate_source_sha256=candidate_index.candidate_sha256,
+            candidate_index_source_sha256=candidate_index.source_sha256,
+            mode=candidate_index.mode,
+            feature_count=len((part_index or {}).get("cad_parts") or []),
+            parameter_count=len((part_index or {}).get("model_params") or []),
+            duration_seconds=round(time.monotonic() - started, 6),
+        )
 
     def _run_agent_loop(
         self,
@@ -1731,12 +1863,26 @@ class EditWorkflowOrchestrator:
         """
 
         edit_job_id = str(job["id"])
+        # Rebuilt per loop entry rather than carried on the orchestrator: its
+        # whole content is derived from candidate source, so a worker that
+        # resumes an in-progress step simply re-derives it from whatever the
+        # candidate currently is. That is what makes recovery need no
+        # persisted candidate index and no invalidation logic.
+        candidate_index = CandidatePartIndex(
+            repository=self.repository,
+            part_id=str(job["resolved_part_id"]),
+            part_name=_resolved_part_name(job),
+            candidate_path=candidate_path,
+        )
         tool_context = ToolExecutionContext(
             run_id=str(plan.plan_id),
             project_id=str(job["project_id"]),
             part_id=str(job["resolved_part_id"]),
             candidate_id=edit_job_id,
-            services=ToolServices(repository=self.repository),
+            services=ToolServices(
+                repository=self.repository,
+                candidate_index=candidate_index,
+            ),
         )
         other_parts_inventory = self._other_parts_inventory(tool_context)
         recent_messages = _recent_messages(job.get("messages"))
@@ -1910,10 +2056,27 @@ class EditWorkflowOrchestrator:
             )
             if starting_new_chain:
                 decision_observations = list(observations)
+                current_part_inventory = self._current_part_inventory(
+                    job, candidate_index, latest_geometry
+                )
                 decision_project_inventory = {
-                    "current_part": self._current_part_inventory(job, latest_geometry),
+                    "current_part": current_part_inventory,
                     "other_parts": other_parts_inventory,
                 }
+                # Traced where the roster is actually built rather than at the
+                # step boundary that preceded it, so the event records what
+                # this chain was really handed.
+                self._trace(
+                    "candidate_inventory.refreshed",
+                    edit_job_id,
+                    goal_id=str(goal.goal_id),
+                    plan_id=str(plan.plan_id),
+                    step_id=active_step.step_id,
+                    candidate_source_sha256=candidate_index.candidate_sha256,
+                    candidate_index_source_sha256=candidate_index.source_sha256,
+                    feature_count=len(current_part_inventory["features"]),
+                    parameter_count=len(current_part_inventory["parameters"]),
+                )
                 decision = self._with_heartbeat(
                     edit_job_id,
                     lambda: self.agent_3d.start_step(
@@ -2235,6 +2398,15 @@ class EditWorkflowOrchestrator:
                 )
 
             if step_completed:
+                # Before the checkpoint, not after: this is the handoff to the
+                # next step's chain, and that chain must never start against a
+                # candidate view older than the step that just passed. A step
+                # whose completion was rejected never reaches here, so a failed
+                # validation cannot advance the cross-step view -- the step
+                # stays in_progress and the same chain keeps working.
+                self._refresh_candidate_index(
+                    edit_job_id, goal, plan, active_step, candidate_index
+                )
                 plan = self._set_step_status(
                     edit_job_id,
                     plan,

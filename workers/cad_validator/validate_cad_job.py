@@ -6,14 +6,18 @@ from pathlib import Path
 
 try:
     from .cad_ast_validator import symbol_at_line, validate_cad_source
+    from .geometry import BUCKET, CandidateSourceRef, GeometryEngine
+    from .geometry.storage import cad_part_storage_path
     from .subprocess_sandbox import (
         bounded_output,
         run_sandboxed_runner,
         sanitized_validation_environment,
         validation_timeout_seconds,
     )
-except ImportError:
+except ImportError:  # pragma: no cover - flat layout inside the worker image
     from cad_ast_validator import symbol_at_line, validate_cad_source
+    from geometry import BUCKET, CandidateSourceRef, GeometryEngine
+    from geometry.storage import cad_part_storage_path
     from subprocess_sandbox import (
         bounded_output,
         run_sandboxed_runner,
@@ -22,13 +26,8 @@ except ImportError:
     )
 
 
-BUCKET = "3dProjects"
 WORKER_DIR = Path(__file__).resolve().parent
 VALIDATION_RUNNER = WORKER_DIR / "cad_validation_runner.py"
-
-
-def cad_part_storage_path(project_id: str, part_id: str, filename: str) -> str:
-    return f"{project_id}/parts/cad/{part_id}/{filename}"
 
 
 def validation_source_path(job: dict) -> str:
@@ -56,12 +55,20 @@ def download_file(supabase, storage_path: str, local_path: Path) -> None:
     local_path.write_bytes(data)
 
 
-def run_model(model_path: Path, params_path: Path, workdir: Path) -> dict:
+def run_model(
+    model_path: Path,
+    params_path: Path,
+    workdir: Path,
+    brep_path: Path | None = None,
+) -> dict:
     timeout = validation_timeout_seconds()
     result_path = workdir / "runtime-result.json"
+    runner_args = ["--model", str(model_path), "--params", str(params_path)]
+    if brep_path is not None:
+        runner_args += ["--brep", str(brep_path)]
     outcome = run_sandboxed_runner(
         VALIDATION_RUNNER,
-        ["--model", str(model_path), "--params", str(params_path)],
+        runner_args,
         result_path=result_path,
         workdir=workdir,
         timeout_seconds=timeout,
@@ -206,6 +213,53 @@ def enrich_runtime_result(
     }
 
 
+def _record_geometry(
+    supabase,
+    *,
+    job: dict,
+    project_id: str,
+    part_id: str,
+    source_path: str,
+    source_sha256: str,
+    snapshot: dict | None,
+    artifact_descriptor: dict | None,
+    brep_path: Path,
+) -> None:
+    """Persist the geometry a passing validation just produced.
+
+    Candidate validation runs on every mutation, so producing the artifact here
+    is what makes a candidate's geometry exist as a consequence of building it
+    rather than as a consequence of the agent asking about it. A later
+    ``check_geometry`` for the same source hash then reuses this instead of
+    executing the candidate a second time.
+
+    Every failure in here is swallowed. Geometry persistence is a side effect of
+    validation, not part of its verdict: a source that validated must not be
+    reported as invalid because a bucket was unreachable. This is also the
+    direct lesson of the PGRST204 incident recorded in
+    ``20260712130000_geometry_snapshot_diagnostics.sql``, where a re-raised
+    persistence error escaped its handler and took the whole worker down.
+    """
+
+    if not isinstance(snapshot, dict):
+        return
+    try:
+        GeometryEngine(supabase).record(
+            CandidateSourceRef(
+                project_id=project_id,
+                part_id=part_id,
+                candidate_id=job.get("edit_job_id"),
+                source_storage_path=source_path,
+                source_sha256=source_sha256,
+            ),
+            snapshot=snapshot,
+            artifact_descriptor=artifact_descriptor,
+            brep_path=brep_path,
+        )
+    except Exception as exc:  # pragma: no cover - defensive by design
+        print(f"[validate_cad] geometry persistence skipped: {exc}", flush=True)
+
+
 def validate_cad_job(supabase, job: dict) -> dict:
     job_id = str(job["id"])
     project_id = str(job["project_id"])
@@ -283,7 +337,8 @@ def validate_cad_job(supabase, job: dict) -> dict:
         report = validate_cad_source(source, file_path=source_path)
         report["source_sha256"] = actual_hash
         if report["safe_to_execute"]:
-            runtime = run_model(model_path, params_path, workdir)
+            brep_path = workdir / "model.brep"
+            runtime = run_model(model_path, params_path, workdir, brep_path)
             runtime_result = enrich_runtime_result(
                 source,
                 source_path,
@@ -305,6 +360,26 @@ def validate_cad_job(supabase, job: dict) -> dict:
                 ],
             }
             runtime_result = None
+        if runtime_result is not None:
+            # The snapshot and artifact descriptor are for the geometry layer,
+            # not for the validation report. `build_artifacts` already carries
+            # the agent-facing projection, so leaving these in would double the
+            # geometry payload stored on every generation_jobs row and change a
+            # report shape that consumers already depend on.
+            snapshot = runtime_result.pop("geometry", None)
+            artifact_descriptor = runtime_result.pop("geometry_artifact", None)
+            if runtime_result.get("status") == "passed":
+                _record_geometry(
+                    supabase,
+                    job=job,
+                    project_id=project_id,
+                    part_id=part_id,
+                    source_path=source_path,
+                    source_sha256=actual_hash,
+                    snapshot=snapshot,
+                    artifact_descriptor=artifact_descriptor,
+                    brep_path=brep_path,
+                )
         report["runtime"] = runtime
         if runtime_result is not None:
             report.update(runtime_result)

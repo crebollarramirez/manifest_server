@@ -10,8 +10,12 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 LOGGER = logging.getLogger(__name__)
 
 
-# Read-only lookups. Their results depend only on their arguments and on the
-# persisted semantic index, which does not change while a job runs.
+# Read-only lookups. They never mutate anything, and a batch is dispatched
+# strictly sequentially, so no call in a read batch can invalidate another one
+# in the same round. (Their results are *not* fixed for the whole job: a
+# current-part lookup resolves against the live candidate, which this job's own
+# mutating tools move. Reusing an earlier round's answer instead of calling
+# again is the reasoning policy's job, not this group's.)
 BATCH_GROUP_READ = "read"
 
 # ModelParams field creation. Safe together because each call re-reads the
@@ -105,6 +109,26 @@ class ToolRepository(Protocol):
         ...
 
 
+class CandidateIndex(Protocol):
+    """Semantic view of the part an edit job is currently editing.
+
+    Supplied only while a candidate exists. Read tools scoped to the part
+    under edit resolve through this instead of the persisted project index,
+    which cannot contain anything this job has not yet committed.
+    """
+
+    def part_index(self) -> dict[str, Any] | None:
+        """Return the current candidate's part record, or ``None`` when unavailable.
+
+        The record uses the same shape the project index stores per part, so a
+        caller can treat it and an accepted-index part record identically.
+        ``None`` means no candidate view could be derived and the caller should
+        fall back to the accepted project index.
+        """
+
+        ...
+
+
 @dataclass(frozen=True)
 class ToolServices:
     """Container for external services that a tool may use during execution.
@@ -114,6 +138,9 @@ class ToolServices:
     """
 
     repository: ToolRepository
+    # Absent outside a candidate's lifetime -- planning runs before one exists,
+    # and resolves reads against the accepted project index instead.
+    candidate_index: CandidateIndex | None = None
 
 
 @dataclass(frozen=True)

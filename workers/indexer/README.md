@@ -245,6 +245,30 @@ The separation is intentional:
 - The worker loop does not need to understand index structure.
 - The CAD editor calls the Getter without changing index creation.
 
+### `extract_part_index` has a second, in-process consumer
+
+`workers/agent_3d/tools/index/candidate_index.py` imports `extract_part_index`
+directly and runs it against an edit job's *candidate* source, so a plan step
+can read features that earlier steps of the same job created but have not yet
+committed. It goes nowhere near this worker, the `index_jobs` queue, or the
+published `semantic_index.json` -- it is the same pure function applied to
+different bytes, which is exactly what keeps a candidate's semantic view and
+the project's own agreeing on what a part record means.
+
+Two consequences for changes here:
+
+- **The per-part record shape is a cross-worker contract.** `part_id`,
+  `part_name`, `content_hash`, `model_params`, `cad_parts`, `functions`, and
+  `build_model` are consumed by `agent_3d`'s index tools and its project
+  inventory. `workers/agent_3d/Dockerfile` already copies `indexer/` into that
+  image, so a shape change ships to both.
+- **Strictness has a cost there that it does not have here.** This worker only
+  ever indexes accepted source, which has passed validation. A candidate is
+  routinely mid-edit -- a feature written but not yet wired into `build_model`
+  -- so `agent_3d` falls back to a tolerant scan when the contract check
+  refuses. Tightening a rule in `extractor.py` widens that fallback rather
+  than breaking it.
+
 ## Important Guarantees
 
 | Guarantee | Why it matters |

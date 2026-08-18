@@ -98,6 +98,104 @@ is the committed hash, and `index_job_id`/`export_job_id` are real job IDs.
 
 `CAD_EDITOR_PLANNING_ONLY` is vestigial -- no code reads it.
 
+### Cross-step memory: the candidate is the handoff
+
+Each plan step runs its own reasoning chain, and a new step starts with
+`previous_response_id = None` and an empty observation list. Nothing the
+previous step reasoned about survives, by design -- so a later step has to be
+able to reconstruct everything relevant from the candidate alone.
+
+Two kinds of memory, with a hard line between them:
+
+| | Scope | Holds |
+|---|---|---|
+| The step's reasoning chain | One step | What this step has decided, called, and been told |
+| The candidate + its part index | The whole job | Every feature and parameter any completed step built |
+
+`CandidatePartIndex` (`tools/index/candidate_index.py`) is what makes the
+second row readable. It derives the same per-part record the project indexer
+produces (`workers/indexer/indexer/extractor.py`), but from
+`{project}/candidates/cad/{part}/{edit_job_id}/model.py` rather than from
+accepted source. Derivation is a pure `ast.parse` -- no execution, no
+network, no model call.
+
+**Freshness is source identity, nothing else.** A record is served only when
+its `source_sha256` equals the hash of the bytes actually stored at the
+candidate path; when they differ the record is re-derived before anything is
+returned. A record built from superseded bytes is never served, so "the index
+is stale" is not a state this can be in. Reading is therefore cheap and
+verified rather than scheduled: an unchanged candidate costs one storage read
+and no parsing.
+
+**Where it is refreshed.** The orchestrator calls `refresh()` at exactly one
+point -- a step whose `request_step_completion` survived the validation gate,
+before the completed-step checkpoint. Not after individual mutating tool
+calls: while a step is active, its own chain already holds what it built, so
+re-deriving per mutation buys nothing. A step whose completion was rejected
+never reaches that point, so a failed validation cannot advance the
+cross-step view; the step stays `in_progress` on the same chain.
+
+**Where it is read.** Two places, deliberately the same source so they cannot
+contradict each other:
+
+- `project_inventory.current_part` -- the roster each new chain opens with:
+  per feature, its semantic ID, function name, role, the parameters it reads,
+  and what it depends on. Never feature source bodies.
+- `index_search` / `index_get_feature` -- resolved through `_current_part`
+  in `tools/index/index_tools.py`.
+
+`build_model` is the one deliberate exception to "no source in the roster":
+its full current text ships in `current_part.build_model`. It is the only
+function a step may replace *wholesale* -- `edit_cad_build_model` swaps the
+entire body -- and the only thing that records how the features actually
+compose into the single solid the part returns.
+
+The feature roster cannot stand in for it. `depends_on` records that a
+feature *consumes* another, not that its own result survives into the
+returned value; a feature can be invoked, in correct dependency order, with
+every declared dependency satisfied, and still contribute nothing. Worse, a
+dependency graph with more than one sink cannot describe a single return
+value at all -- linearizing it forces a choice, and the branch not chosen is
+silently dropped. A step rewriting this function from the roster alone is
+therefore reconstructing information the roster does not contain, which is
+exactly how a committed part lost its mounting plate while passing every
+gate (all features invoked, dependency graph valid, `solid_count == 1`).
+
+**Candidate versus accepted.** `_current_part` picks the source per call:
+
+```
+context.candidate_id is not None  ->  candidate part index
+otherwise (planning, no candidate yet)  ->  accepted project index
+```
+
+Both tools scope themselves to `context.part_id`, so they only ever read the
+part under edit; every other part continues to come from
+`{project}/index/semantic_index.json`, which stays authoritative for accepted
+state and for project-wide retrieval. The agent sees one tool with one
+meaning -- *the current version of this feature for the workflow I am
+executing* -- and never chooses between a candidate and a canonical lookup.
+
+**Degrading.** `extract_part_index` is a contract check as much as a reader:
+it rejects a part whose `build_model` does not yet invoke every feature, which
+is the normal state between a `create_feature` call and the
+`edit_cad_build_model` call that wires it in. Refusing to describe the part in
+those windows would make a feature that demonstrably exists unreadable, so a
+lenient scan of *the same source* fills in instead (`mode: "lenient"` in the
+trace). Only source that will not parse yields no record, and then reads fall
+back to the accepted index and the roster to its own tolerant scan.
+
+Nothing is persisted: the record is in-memory and dies with the loop. A worker
+that resumes an in-progress step builds a fresh one and re-derives from
+whatever the candidate currently is, which is why recovery needs no
+invalidation logic and no candidate-scoped index artifact. Commit is
+unaffected -- `_reindex_after_commit` still rebuilds the project index from
+accepted source once the candidate lands.
+
+Traced as `candidate_index.started` / `candidate_index.completed` (carrying
+`candidate_source_sha256`, `candidate_index_source_sha256`, `mode`,
+`feature_count`, `parameter_count`, `duration_seconds`) and
+`candidate_inventory.refreshed` where the roster is actually built.
+
 ### Planning and reasoning debug logs
 
 After a high-level plan is checkpointed, the worker writes one text file per

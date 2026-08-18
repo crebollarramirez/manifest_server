@@ -45,6 +45,21 @@ class GeometryBoundingBox(StrictToolModel):
     size: tuple[float, float, float]
 
 
+class PlanarFace(StrictToolModel):
+    """One flat face of the built model, with how it is oriented and where.
+
+    ``angle_from_horizontal_deg`` is supplied already derived from the normal:
+    a horizontal face reports 0, a vertical face 90, and a support surface
+    reports the angle a requirement would name it by. ``centroid`` says which
+    face this is, since a normal alone does not distinguish parallel faces.
+    """
+
+    normal: tuple[float, float, float]
+    angle_from_horizontal_deg: float
+    area_mm2: float
+    centroid: tuple[float, float, float]
+
+
 class GeometryFacts(StrictToolModel):
     """Deterministic measured geometry for one exact source version.
 
@@ -55,11 +70,23 @@ class GeometryFacts(StrictToolModel):
     execution_ok: bool
     valid: bool | None
     volume_mm3: float | None
+    # Total area of every face. This is what separates two shapes a volume
+    # delta calls unchanged: hollowing a part raises its area sharply while
+    # barely moving its volume.
+    surface_area_mm2: float | None
     bounding_box: GeometryBoundingBox | None
     center_of_mass: tuple[float, float, float] | None
     solid_count: int | None
     face_count: int | None
     edge_count: int | None
+    vertex_count: int | None
+    # The largest flat faces, biggest first. Truncated, so a complete list is
+    # the one whose length equals face_count minus non_planar_face_count.
+    planar_faces: tuple[PlanarFace, ...]
+    non_planar_face_count: int | None
+    # Edges whose two faces still meet at a corner. Filleting lowers this while
+    # raising edge_count, so the two are not substitutes.
+    sharp_edge_count: int | None
 
 
 class GeometryDelta(StrictToolModel):
@@ -76,6 +103,7 @@ class GeometryDelta(StrictToolModel):
     solid_count: int | None
     face_count: int | None
     edge_count: int | None
+    sharp_edge_count: int | None
     validity_changed: bool | None
 
 
@@ -117,6 +145,39 @@ def _bounding_box(value: Any) -> GeometryBoundingBox | None:
     return GeometryBoundingBox(min=bounds[0], max=bounds[1], size=bounds[2])
 
 
+def _planar_faces(value: Any) -> tuple[PlanarFace, ...]:
+    """Build the face census, dropping any record that is not fully measured.
+
+    A partially measured face is discarded rather than reported with holes:
+    the census exists to be compared against a stated angle, and a record
+    missing its normal or its area cannot answer that.
+    """
+
+    if not isinstance(value, list):
+        return ()
+    faces: list[PlanarFace] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        normal = _vector3(item.get("normal"))
+        centroid = _vector3(item.get("centroid"))
+        angle = item.get("angle_from_horizontal_deg")
+        area = item.get("area_mm2")
+        if normal is None or centroid is None:
+            continue
+        if not isinstance(angle, (int, float)) or not isinstance(area, (int, float)):
+            continue
+        faces.append(
+            PlanarFace(
+                normal=normal,
+                angle_from_horizontal_deg=float(angle),
+                area_mm2=float(area),
+                centroid=centroid,
+            )
+        )
+    return tuple(faces)
+
+
 def _geometry_facts(value: Any) -> GeometryFacts | None:
     if not isinstance(value, dict):
         return None
@@ -124,11 +185,16 @@ def _geometry_facts(value: Any) -> GeometryFacts | None:
         execution_ok=bool(value.get("execution_ok")),
         valid=value.get("geometry_valid"),
         volume_mm3=value.get("volume_mm3"),
+        surface_area_mm2=value.get("surface_area_mm2"),
         bounding_box=_bounding_box(value.get("bounding_box")),
         center_of_mass=_vector3(value.get("center_of_mass")),
         solid_count=value.get("solid_count"),
         face_count=value.get("face_count"),
         edge_count=value.get("edge_count"),
+        vertex_count=value.get("vertex_count"),
+        planar_faces=_planar_faces(value.get("planar_faces")),
+        non_planar_face_count=value.get("non_planar_face_count"),
+        sharp_edge_count=value.get("sharp_edge_count"),
     )
 
 
@@ -143,6 +209,7 @@ def _geometry_delta(value: Any) -> GeometryDelta | None:
         solid_count=value.get("solid_count"),
         face_count=value.get("face_count"),
         edge_count=value.get("edge_count"),
+        sharp_edge_count=value.get("sharp_edge_count"),
         validity_changed=value.get("validity_changed"),
     )
 
@@ -193,9 +260,11 @@ class CheckGeometryTool(AgentTool[CheckGeometryInput, CheckGeometryOutput]):
     """Inspect the current candidate's actual geometry and its immediate delta.
 
     check_geometry inspects the current edit-scoped candidate's actual
-    executed geometry -- volume, bounding box, center of mass, and
-    solid/face/edge counts -- by running it in the validation container, and
-    compares it against the candidate immediately before the latest
+    executed geometry -- volume, surface area, bounding box, center of mass,
+    solid/face/edge/vertex counts, the largest planar faces with their angles,
+    and how many edges remain sharp -- derived from the candidate's B-rep in
+    the validation container,
+    and compares it against the candidate immediately before the latest
     mutation. It never modifies CAD source. The result is deterministic
     geometric evidence only: it reports what changed, not whether that
     change matches the intent behind the last mutation -- use it to confirm
@@ -206,14 +275,20 @@ class CheckGeometryTool(AgentTool[CheckGeometryInput, CheckGeometryOutput]):
     version = 1
     description = (
         "Inspect the current edit-scoped candidate's actual executed geometry "
-        "(volume, bounding box, center of mass, solid/face/edge counts) and "
-        "compare it against the candidate immediately before the latest "
-        "mutation. Runs the candidate in the validation container; never "
-        "modifies CAD source. Returns deterministic geometric facts and "
-        "warnings only -- it does not judge whether the change matches your "
-        "intent. Call this after a mutation to confirm it actually had a "
-        "geometric effect (for example, a volume delta of zero after "
-        "attempting to cut a cavity means the mutation likely had no effect)."
+        "(volume, surface area, bounding box, center of mass, "
+        "solid/face/edge/vertex counts, the "
+        "largest planar faces with their angle from horizontal, and how many "
+        "edges still meet at a corner) and compare it against the candidate "
+        "immediately before the latest mutation. Runs the candidate in the "
+        "validation container; never modifies CAD source. Returns "
+        "deterministic geometric facts and warnings only -- it does not judge "
+        "whether the change matches your intent. Call this after a mutation to "
+        "confirm it actually had a geometric effect (for example, a volume "
+        "delta of zero after attempting to cut a cavity means the mutation "
+        "likely had no effect; a surface area that barely moved after "
+        "attempting to hollow a part means the same; and an unchanged sharp "
+        "edge count after filleting means the fillet did not reach the edges "
+        "you meant)."
     )
     input_model = CheckGeometryInput
     output_model = CheckGeometryOutput

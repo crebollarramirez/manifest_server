@@ -97,10 +97,19 @@ predating it must not fail candidates that otherwise validated.
 
 This costs nothing extra. The validator already builds the model, so it now
 reports the full measurement — volume, bounding box, center of mass, solid,
-face and edge counts — from the execution it was doing anyway. That
-measurement is also handed to the next step in its opening context, so a step
-begins knowing what the part currently *is* rather than spending its first
-round on `check_geometry` to ask.
+face and edge counts, the largest planar faces with their inclination from
+horizontal, and how many edges still meet at a corner — from the execution it
+was doing anyway. That measurement is also handed to the next step in its
+opening context, so a step begins knowing what the part currently *is* rather
+than spending its first round on `check_geometry` to ask.
+
+The face and edge census is there because the rest of that list describes
+extent, not shape: a bounding box is identical for two parts whose support
+faces differ by six degrees, and rounding four of forty-eight edges barely
+moves a volume. Both are shipped defects the earlier measurement could not
+describe. Neither gates anything — unlike the solid count, "every edge
+rounded" and "this face sits at 65°" are requirements of a particular goal
+rather than universal truths about parts.
 
 The gate exists because of a specific run: the model split in two at PS-4,
 validated clean four times, and the next step then spent its entire turn

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import unittest
 
-from workers.cad_validator.geometry_check_job import geometry_check_job
+from workers.cad_validator.geometry_check_job import _GEOMETRY_FIELDS, geometry_check_job
+from workers.cad_validator.geometry_inspection import GEOMETRY_CHECKER_VERSION
 
 
 PROJECT_ID = "11111111-1111-4111-8111-111111111111"
@@ -36,27 +38,26 @@ def build_model(params: ModelParams):
 HASH_A = hashlib.sha256(MODEL_A.encode()).hexdigest()
 HASH_B = hashlib.sha256(MODEL_B.encode()).hexdigest()
 
-GEOMETRY_FIELDS = (
-    "execution_ok",
-    "geometry_valid",
-    "error_message",
-    "volume_mm3",
-    "bounding_box",
-    "center_of_mass",
-    "solid_count",
-    "face_count",
-    "edge_count",
-)
+# Imported rather than copied. A local duplicate silently went stale once
+# already -- it was still missing `diagnostics` long after the worker started
+# persisting it -- so a snapshot fixture built here would have kept passing
+# while the real insert was crashing the validator.
+GEOMETRY_FIELDS = _GEOMETRY_FIELDS
 
 
 class _FakeBucket:
     def __init__(self, files: dict[str, bytes]):
         self.files = files
         self.downloads: list[str] = []
+        self.uploads: list[str] = []
 
     def download(self, path: str) -> bytes:
         self.downloads.append(path)
         return self.files[path]
+
+    def upload(self, *, path: str, file: bytes, file_options: dict) -> None:
+        self.uploads.append(path)
+        self.files[path] = bytes(file)
 
 
 class _FakeStorage:
@@ -95,8 +96,10 @@ class _FakeTable:
             )
             if key in self.rows:
                 raise _DuplicateKeyError()
-            self.rows[key] = dict(self._insert_payload)
-            return _Response([dict(self._insert_payload)])
+            row = dict(self._insert_payload)
+            row.setdefault("id", f"row-{len(self.rows) + 1}")
+            self.rows[key] = row
+            return _Response([dict(row)])
         matches = [
             row
             for row in self.rows.values()
@@ -118,10 +121,18 @@ class _FakeSupabase:
     def __init__(self, files: dict[str, bytes]):
         self.storage = _FakeStorage(_FakeBucket(files))
         self.snapshot_rows: dict[tuple, dict] = {}
+        self.artifact_rows: dict[tuple, dict] = {}
 
     def table(self, name: str) -> _FakeTable:
-        assert name == "geometry_snapshots"
-        return _FakeTable(self.snapshot_rows)
+        # Both tables are keyed on (source_sha256, geometry_checker_version),
+        # which is what pairs a snapshot with the artifact it observed.
+        assert name in ("geometry_snapshots", "geometry_artifacts"), name
+        rows = (
+            self.snapshot_rows
+            if name == "geometry_snapshots"
+            else self.artifact_rows
+        )
+        return _FakeTable(rows)
 
 
 def _job(**overrides) -> dict:
@@ -167,8 +178,8 @@ class GeometryCheckJobTests(unittest.TestCase):
         supabase = self._supabase()
         geometry_check_job(supabase, _job())
 
-        row_a = supabase.snapshot_rows[(HASH_A, 1)]
-        row_b = supabase.snapshot_rows[(HASH_B, 1)]
+        row_a = supabase.snapshot_rows[(HASH_A, GEOMETRY_CHECKER_VERSION)]
+        row_b = supabase.snapshot_rows[(HASH_B, GEOMETRY_CHECKER_VERSION)]
 
         self.assertEqual(row_a["source_sha256"], HASH_A)
         self.assertEqual(row_b["source_sha256"], HASH_B)
@@ -176,9 +187,9 @@ class GeometryCheckJobTests(unittest.TestCase):
 
     def test_snapshot_for_hash_a_is_never_returned_for_hash_b(self):
         supabase = self._supabase()
-        supabase.snapshot_rows[(HASH_A, 1)] = {
+        supabase.snapshot_rows[(HASH_A, GEOMETRY_CHECKER_VERSION)] = {
             "source_sha256": HASH_A,
-            "geometry_checker_version": 1,
+            "geometry_checker_version": GEOMETRY_CHECKER_VERSION,
             **{field: None for field in GEOMETRY_FIELDS},
             "execution_ok": True,
             "geometry_valid": True,
@@ -191,9 +202,9 @@ class GeometryCheckJobTests(unittest.TestCase):
 
     def test_existing_compatible_snapshot_is_reused_without_recomputing(self):
         supabase = self._supabase()
-        supabase.snapshot_rows[(HASH_B, 1)] = {
+        supabase.snapshot_rows[(HASH_B, GEOMETRY_CHECKER_VERSION)] = {
             "source_sha256": HASH_B,
-            "geometry_checker_version": 1,
+            "geometry_checker_version": GEOMETRY_CHECKER_VERSION,
             "execution_ok": True,
             "geometry_valid": True,
             "error_message": None,
@@ -204,9 +215,9 @@ class GeometryCheckJobTests(unittest.TestCase):
             "face_count": 6,
             "edge_count": 12,
         }
-        supabase.snapshot_rows[(HASH_A, 1)] = {
+        supabase.snapshot_rows[(HASH_A, GEOMETRY_CHECKER_VERSION)] = {
             "source_sha256": HASH_A,
-            "geometry_checker_version": 1,
+            "geometry_checker_version": GEOMETRY_CHECKER_VERSION,
             "execution_ok": True,
             "geometry_valid": True,
             "error_message": None,
@@ -229,9 +240,9 @@ class GeometryCheckJobTests(unittest.TestCase):
 
     def test_incompatible_checker_version_snapshot_is_not_reused(self):
         supabase = self._supabase()
-        supabase.snapshot_rows[(HASH_B, 2)] = {
+        supabase.snapshot_rows[(HASH_B, GEOMETRY_CHECKER_VERSION + 1)] = {
             "source_sha256": HASH_B,
-            "geometry_checker_version": 2,
+            "geometry_checker_version": GEOMETRY_CHECKER_VERSION + 1,
             "execution_ok": True,
             "geometry_valid": True,
             "volume_mm3": 99999.0,
@@ -239,8 +250,9 @@ class GeometryCheckJobTests(unittest.TestCase):
 
         outcome = geometry_check_job(supabase, _job())
 
-        # Version 2's row is a different cache identity; version 1 is
-        # (re)computed for real rather than trusting the incompatible row.
+        # A row measured under a different checker version is a different
+        # cache identity; the current version is (re)computed for real rather
+        # than trusting a row whose measurements may mean something else.
         self.assertNotEqual(outcome["report"]["geometry"]["volume_mm3"], 99999.0)
         self.assertAlmostEqual(outcome["report"]["geometry"]["volume_mm3"], 2000.0, places=6)
 
@@ -394,6 +406,110 @@ def build_model(params: ModelParams):
             geometry["error_message"],
             "Source failed static safety checks and was not executed.",
         )
+
+
+class GeometryArtifactPersistenceTests(unittest.TestCase):
+    """The B-rep artifact is produced by the job, not by agent reasoning."""
+
+    def _supabase(self, **files) -> _FakeSupabase:
+        merged = {
+            CANDIDATE_PATH: MODEL_B.encode(),
+            ORIGINAL_PATH: MODEL_A.encode(),
+            PARAMS_PATH: b"{}",
+        }
+        merged.update(files)
+        return _FakeSupabase(merged)
+
+    def test_a_checked_candidate_leaves_a_brep_artifact_bound_to_its_source(self):
+        supabase = self._supabase()
+
+        geometry_check_job(supabase, _job())
+
+        artifacts = list(supabase.artifact_rows.values())
+        self.assertEqual(len(artifacts), 2, "current and previous both persist")
+        current = [a for a in artifacts if a["source_sha256"] == HASH_B][0]
+        self.assertEqual(current["project_id"], PROJECT_ID)
+        self.assertEqual(current["part_id"], PART_ID)
+        self.assertEqual(current["edit_job_id"], EDIT_JOB_ID)
+        self.assertEqual(current["artifact_format"], "brep")
+        self.assertEqual(len(current["artifact_digest"]), 64)
+        self.assertGreater(current["artifact_bytes"], 0)
+
+    def test_the_artifact_bytes_land_in_storage_beside_their_source(self):
+        supabase = self._supabase()
+
+        geometry_check_job(supabase, _job())
+
+        expected = f"{PROJECT_ID}/candidates/cad/{PART_ID}/{EDIT_JOB_ID}/geometry/{HASH_B}.brep"
+        self.assertIn(expected, supabase.storage.bucket.uploads)
+        # A real B-rep, not an empty placeholder.
+        self.assertTrue(supabase.storage.bucket.files[expected].startswith(b"DBRep"))
+
+    def test_the_digest_matches_the_bytes_that_were_stored(self):
+        supabase = self._supabase()
+
+        geometry_check_job(supabase, _job())
+
+        current = [a for a in supabase.artifact_rows.values() if a["source_sha256"] == HASH_B][0]
+        stored = supabase.storage.bucket.files[current["artifact_storage_path"]]
+        self.assertEqual(
+            current["artifact_digest"], hashlib.sha256(stored).hexdigest()
+        )
+        # Source hash and artifact digest identify different things.
+        self.assertNotEqual(current["artifact_digest"], current["source_sha256"])
+
+    def test_the_snapshot_names_the_artifact_it_was_derived_from(self):
+        supabase = self._supabase()
+
+        geometry_check_job(supabase, _job())
+
+        snapshot = [s for s in supabase.snapshot_rows.values() if s["source_sha256"] == HASH_B][0]
+        artifact = [a for a in supabase.artifact_rows.values() if a["source_sha256"] == HASH_B][0]
+        self.assertIsNotNone(snapshot["geometry_artifact_id"])
+        self.assertEqual(snapshot["geometry_artifact_id"], artifact["id"])
+
+    def test_the_artifact_records_the_runtime_that_produced_it(self):
+        supabase = self._supabase()
+
+        geometry_check_job(supabase, _job())
+
+        current = [a for a in supabase.artifact_rows.values() if a["source_sha256"] == HASH_B][0]
+        runtime = current["geometry_runtime"]
+        self.assertIn("cadquery", runtime)
+        self.assertIn("geometry_checker_version", runtime)
+
+    def test_source_that_never_executes_persists_no_artifact(self):
+        """A snapshot can exist without geometry; an artifact cannot."""
+
+        broken = "def build_model(params):\n    raise ValueError('boom')\n"
+        broken_hash = hashlib.sha256(broken.encode()).hexdigest()
+        supabase = self._supabase(**{CANDIDATE_PATH: broken.encode()})
+
+        result = geometry_check_job(supabase, _job(source_sha256=broken_hash))
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(
+            [a for a in supabase.artifact_rows.values() if a["source_sha256"] == broken_hash],
+            [],
+        )
+        snapshot = [s for s in supabase.snapshot_rows.values() if s["source_sha256"] == broken_hash][0]
+        self.assertIsNone(snapshot["geometry_artifact_id"])
+
+    def test_raw_brep_topology_never_reaches_the_report(self):
+        """The report is what Agent3D reads. It carries numbers, never a shape.
+
+        The artifact is referenced by storage path and digest; the bytes stay
+        in the bucket.
+        """
+
+        supabase = self._supabase()
+
+        result = geometry_check_job(supabase, _job())
+
+        serialized = json.dumps(result["report"])
+        self.assertNotIn("DBRep", serialized)
+        self.assertNotIn("CASCADE Topology", serialized)
+        self.assertNotIn(".brep", serialized)
 
 
 if __name__ == "__main__":

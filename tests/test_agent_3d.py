@@ -185,6 +185,11 @@ class Agent3DStartStepTests(unittest.TestCase):
                     "part_name": "",
                     "features": [],
                     "parameters": [],
+                    # Present even when empty: the default has to carry every
+                    # key the orchestrator's real inventory emits, or an
+                    # omitted inventory would hand the model a different shape.
+                    "build_model": "",
+                    "geometry": {},
                 },
                 "other_parts": [],
             },

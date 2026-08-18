@@ -147,6 +147,34 @@ class CompareGeometryTests(unittest.TestCase):
 
         self.assertIsNone(delta["volume_mm3"])
         self.assertIsNone(delta["solid_count"])
+        self.assertIsNone(delta["sharp_edge_count"])
+
+    def test_rounding_edges_moves_the_two_edge_counts_in_opposite_directions(self):
+        # Why sharp_edge_count is reported alongside edge_count rather than
+        # instead of it: rounding removes corners by adding faces, so the total
+        # rises exactly when the corner count falls. A step that read only the
+        # total would see filleting as if it had added geometry.
+        before = measure_geometry(cq.Workplane("XY").box(10, 20, 30))
+        after = measure_geometry(cq.Workplane("XY").box(10, 20, 30).edges().fillet(2.0))
+
+        delta = compare_geometry(before, after)
+
+        self.assertGreater(delta["edge_count"], 0)
+        self.assertEqual(delta["sharp_edge_count"], -12)
+
+    def test_rounding_that_missed_its_edges_reports_no_corner_change(self):
+        # `.faces(">Z").edges()` selects one face's edges rather than the
+        # part's. The volume barely moves and the total edge count rises, so
+        # this delta is the only one that says the rounding did not land.
+        before = measure_geometry(cq.Workplane("XY").box(10, 20, 30))
+        after = measure_geometry(
+            cq.Workplane("XY").box(10, 20, 30).faces(">Z").edges().fillet(2.0)
+        )
+
+        delta = compare_geometry(before, after)
+
+        self.assertGreater(delta["edge_count"], 0)
+        self.assertEqual(delta["sharp_edge_count"], 0)
 
 
 if __name__ == "__main__":

@@ -36,10 +36,13 @@ from workers.agent_3d.planning.agent_contracts import (
     CadPlanModelOutput,
 )
 from workers.agent_3d.tools.hashing import source_hash
+from workers.agent_3d.tools.index.candidate_index import CandidatePartIndex
 from workers.agent_3d.tools import (
     CreateFeatureTool,
     CreateParameterTool,
+    DeleteFeatureTool,
     EditCadBuildModelTool,
+    EditFeatureTool,
     IndexGetFeatureTool,
     RequestStepCompletionTool,
     ToolExecutionContext,
@@ -700,6 +703,8 @@ class FakeAgent3D:
             {"type": "function", "name": "index_search"},
             {"type": "function", "name": "index_get_feature"},
             {"type": "function", "name": "create_feature"},
+            {"type": "function", "name": "edit_feature"},
+            {"type": "function", "name": "delete_feature"},
             {"type": "function", "name": "create_parameter"},
             {"type": "function", "name": "edit_cad_build_model"},
         )
@@ -735,6 +740,8 @@ class RecordingToolExecutor:
         registry = ToolRegistry()
         registry.register(RequestStepCompletionTool())
         registry.register(CreateFeatureTool())
+        registry.register(EditFeatureTool())
+        registry.register(DeleteFeatureTool())
         registry.register(EditCadBuildModelTool())
         registry.register(IndexGetFeatureTool())
         registry.register(CreateParameterTool())
@@ -1372,6 +1379,15 @@ class BatchValidationTests(unittest.TestCase):
 
 class ProjectInventoryTests(unittest.TestCase):
     @staticmethod
+    def _candidate_index(repository: FakeRepository) -> CandidatePartIndex:
+        return CandidatePartIndex(
+            repository=repository,
+            part_id=PART_ID,
+            part_name="Bracket",
+            candidate_path=CANDIDATE_PATH,
+        )
+
+    @staticmethod
     def _tool_context(repository: FakeRepository) -> ToolExecutionContext:
         return ToolExecutionContext(
             run_id="run-1",
@@ -1463,7 +1479,9 @@ class ProjectInventoryTests(unittest.TestCase):
         repository.files[CANDIDATE_PATH] = ACCEPTED_SOURCE
         orchestrator, *_rest = runtime(repository)
 
-        inventory = orchestrator._current_part_inventory(repository.jobs[EDIT_JOB_ID])
+        inventory = orchestrator._current_part_inventory(
+            repository.jobs[EDIT_JOB_ID], self._candidate_index(repository)
+        )
 
         self.assertEqual(
             inventory,
@@ -1475,6 +1493,11 @@ class ProjectInventoryTests(unittest.TestCase):
                         "semantic_id": "bracket_body",
                         "function_name": "build_bracket_body",
                         "role": "primary_body",
+                        # Carried so a step can understand the feature set --
+                        # what each feature is driven by and what it builds on
+                        # -- without spending rounds reading features back.
+                        "parameters": ["bracket_length_mm"],
+                        "depends_on": [],
                     }
                 ],
                 "parameters": [
@@ -1484,6 +1507,13 @@ class ProjectInventoryTests(unittest.TestCase):
                         "default": "100.0",
                     }
                 ],
+                # Supplied verbatim: it is the only thing that says how the
+                # features are composed, and any step may replace it whole.
+                "build_model": (
+                    "def build_model(params: ModelParams):\n"
+                    "    body = build_bracket_body(params)\n"
+                    "    return body"
+                ),
                 "geometry": {},
             },
         )
@@ -1494,7 +1524,9 @@ class ProjectInventoryTests(unittest.TestCase):
         orchestrator, *_rest = runtime(repository)
 
         inventory = orchestrator._current_part_inventory(
-            repository.jobs[EDIT_JOB_ID], {"solid_count": 1, "volume_mm3": 70200.0}
+            repository.jobs[EDIT_JOB_ID],
+            self._candidate_index(repository),
+            {"solid_count": 1, "volume_mm3": 70200.0},
         )
 
         # Supplied so a step opens knowing what the model measures instead of
@@ -1509,7 +1541,9 @@ class ProjectInventoryTests(unittest.TestCase):
         repository = FakeRepository()
         orchestrator, *_rest = runtime(repository)
 
-        inventory = orchestrator._current_part_inventory(repository.jobs[EDIT_JOB_ID])
+        inventory = orchestrator._current_part_inventory(
+            repository.jobs[EDIT_JOB_ID], self._candidate_index(repository)
+        )
 
         self.assertEqual(
             inventory,
@@ -1518,6 +1552,7 @@ class ProjectInventoryTests(unittest.TestCase):
                 "part_name": "Bracket",
                 "features": [],
                 "parameters": [],
+                "build_model": "",
                 "geometry": {},
             },
         )
@@ -1552,8 +1587,414 @@ class ProjectInventoryAcrossStepsTests(unittest.TestCase):
                     "semantic_id": "base_plate",
                     "function_name": "build_base_plate",
                     "role": "primary_body",
+                    "parameters": [],
+                    "depends_on": [],
                 }
             ],
+        )
+
+
+def seed_plan(repository: FakeRepository, count: int) -> None:
+    """Checkpoint a pending plan of ``count`` sequential steps."""
+
+    repository.jobs[EDIT_JOB_ID]["history"] = [
+        {"event": "job_started"},
+        {"event": "goal_created", "goal": goal().model_dump(mode="json")},
+        {
+            "event": "plan_created",
+            "plan": {
+                "plan_id": "55555555-5555-4555-8555-555555555555",
+                "goal_id": GOAL_ID,
+                "version": 1,
+                "summary": "Build the bracket.",
+                "target_bindings": [],
+                "steps": [
+                    {
+                        "step_id": f"PS-{index}",
+                        "sequence": index,
+                        "objective": f"Step {index}.",
+                        "depends_on": [f"PS-{index - 1}"] if index > 1 else [],
+                        "addresses_criteria": ["GC-1"],
+                        "status": "pending",
+                    }
+                    for index in range(1, count + 1)
+                ],
+            },
+        },
+    ]
+
+
+def edit_feature_turn(semantic_id: str, role: str, call_id: str = "call-1"):
+    """Build a decision that changes one existing feature's role."""
+
+    return [tool_call("edit_feature", call_id, semantic_id=semantic_id, role=role)]
+
+
+def delete_feature_turn(semantic_id: str, call_id: str = "call-1"):
+    """Build a decision that removes one existing feature."""
+
+    return [tool_call("delete_feature", call_id, semantic_id=semantic_id)]
+
+
+def create_parameter_turn(name: str, value: float, call_id: str = "call-1"):
+    """Build a decision that adds one ModelParams field."""
+
+    return [tool_call("create_parameter", call_id, parameter_name=name, value=value)]
+
+
+def wire_build_model_turn(*names: str, call_id: str = "call-1"):
+    """Build a decision that rewrites build_model to assemble ``names`` in order."""
+
+    calls = "\n".join(f"    {name} = build_{name}(params)" for name in names)
+    joined = ".union(".join(names) + ")" * (len(names) - 1)
+    return [
+        tool_call(
+            "edit_cad_build_model",
+            call_id,
+            function_body=f"{calls}\n    return {joined}",
+        )
+    ]
+
+
+def get_feature_turn(semantic_id: str, call_id: str = "call-1"):
+    """Build a decision that reads one feature back through the index tool."""
+
+    return [tool_call("index_get_feature", call_id, semantic_id=semantic_id)]
+
+
+class CandidateIndexStepBoundaryTests(unittest.TestCase):
+    """The candidate becomes the durable handoff between plan steps.
+
+    Each step runs its own reasoning chain, so nothing the previous step
+    thought survives into the next one. What has to survive is the candidate
+    itself: reindexed when a step passes, and readable by the next step both
+    as an opening roster and through the read tools.
+    """
+
+    @staticmethod
+    def _events(orchestrator, *event_types: str) -> list[dict]:
+        return [
+            call
+            for call in orchestrator.trace_writer.calls
+            if call["event"] in event_types
+        ]
+
+    @staticmethod
+    def _roster(agent_3d, index: int) -> list[dict]:
+        inventory = agent_3d.start_step_requests[index]["project_inventory"]
+        return inventory["current_part"]["features"]
+
+    @classmethod
+    def _semantic_ids(cls, agent_3d, index: int) -> list[str]:
+        return [feature["semantic_id"] for feature in cls._roster(agent_3d, index)]
+
+    def test_a_passing_step_reindexes_the_candidate_before_checkpointing_it(self):
+        repository = FakeRepository()
+        orchestrator, *_rest = runtime(repository)
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        boundary = self._events(
+            orchestrator, "candidate_index.started", "candidate_index.completed",
+            "step.completed",
+        )
+        # Order is the contract: the next step's chain must never open against
+        # a candidate view older than the step that just passed.
+        self.assertEqual(
+            [event["event"] for event in boundary],
+            ["candidate_index.started", "candidate_index.completed", "step.completed"],
+        )
+        self.assertEqual(boundary[0]["step_id"], "PS-1")
+        self.assertEqual(boundary[1]["edit_job_id"], EDIT_JOB_ID)
+
+    def test_the_reindex_records_the_hash_of_the_candidate_it_read(self):
+        repository = FakeRepository()
+        orchestrator, *_rest = runtime(repository)
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        completed = self._events(orchestrator, "candidate_index.completed")[0]
+        # Both hashes describe the same bytes, which is what makes the record
+        # usable as the completed-step handoff rather than merely recent.
+        self.assertEqual(
+            completed["candidate_source_sha256"],
+            completed["candidate_index_source_sha256"],
+        )
+        self.assertEqual(completed["mode"], "strict")
+        self.assertEqual(completed["feature_count"], 1)
+        self.assertEqual(completed["parameter_count"], 1)
+
+    def test_a_failed_step_validation_does_not_advance_the_cross_step_view(self):
+        repository = FakeRepository()
+        repository.validation_outcomes = [
+            {"status": "failed", "result": repairable_report(line=21)},
+        ]
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository,
+            agent_script=[
+                completion_turn(call_id="call-1"),
+                create_feature_turn(call_id="call-2"),
+                completion_turn(call_id="call-3"),
+            ],
+        )
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        # The rejected completion is not a step boundary: the step stayed in
+        # progress on the same chain, so only the eventual pass reindexed.
+        self.assertEqual(len(self._events(orchestrator, "candidate_index.completed")), 1)
+        self.assertEqual(len(agent_3d.start_step_requests), 1)
+
+    def test_each_step_opens_with_everything_earlier_steps_built(self):
+        repository = FakeRepository()
+        repository.files[ACCEPTED_SOURCE_PATH] = EMPTY_SKELETON_SOURCE
+        seed_plan(repository, 3)
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository,
+            agent_script=[
+                create_feature_turn("call-1", "mounting_plate"),
+                completion_turn(call_id="call-2"),
+                create_feature_turn("call-3", "corner_holes"),
+                completion_turn(call_id="call-4"),
+                completion_turn(call_id="call-5"),
+            ],
+        )
+
+        result = orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(len(agent_3d.start_step_requests), 3)
+        self.assertEqual(self._semantic_ids(agent_3d, 0), [])
+        self.assertEqual(self._semantic_ids(agent_3d, 1), ["mounting_plate"])
+        self.assertEqual(
+            self._semantic_ids(agent_3d, 2), ["mounting_plate", "corner_holes"]
+        )
+
+    def test_the_roster_carries_parameters_and_dependencies_per_feature(self):
+        repository = FakeRepository()
+        seed_plan(repository, 2)
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository,
+            agent_script=[completion_turn(call_id="call-1"), completion_turn(call_id="call-2")],
+        )
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(
+            self._roster(agent_3d, 1),
+            [
+                {
+                    "semantic_id": "bracket_body",
+                    "function_name": "build_bracket_body",
+                    "role": "primary_body",
+                    "parameters": ["bracket_length_mm"],
+                    "depends_on": [],
+                }
+            ],
+        )
+
+    def test_each_step_opens_with_the_assembly_its_predecessor_left(self):
+        # The gap that let a committed part lose its mounting plate: a step
+        # rewrote build_model wholesale without ever seeing what it replaced,
+        # and reconstructed the assembly from the feature roster instead --
+        # which records that a feature is consumed, not that its result
+        # reaches the returned solid.
+        repository = FakeRepository()
+        repository.files[ACCEPTED_SOURCE_PATH] = EMPTY_SKELETON_SOURCE
+        seed_plan(repository, 3)
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository,
+            agent_script=[
+                create_feature_turn("call-1", "mounting_plate"),
+                wire_build_model_turn("mounting_plate", call_id="call-2"),
+                completion_turn(call_id="call-3"),
+                create_feature_turn("call-4", "support_arm"),
+                wire_build_model_turn("mounting_plate", "support_arm", call_id="call-5"),
+                completion_turn(call_id="call-6"),
+                completion_turn(call_id="call-7"),
+            ],
+        )
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        assemblies = [
+            request["project_inventory"]["current_part"]["build_model"]
+            for request in agent_3d.start_step_requests
+        ]
+        self.assertTrue(
+            all(text.startswith("def build_model(") for text in assemblies), assemblies
+        )
+        # Each step sees exactly what the candidate holds, so a step that
+        # replaces this function can preserve what is already in it.
+        self.assertNotIn("mounting_plate", assemblies[0])
+        self.assertIn("mounting_plate", assemblies[1])
+        self.assertIn("support_arm", assemblies[2])
+
+    def test_the_assembly_matches_the_candidate_the_roster_describes(self):
+        repository = FakeRepository()
+        seed_plan(repository, 2)
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository,
+            agent_script=[completion_turn(call_id="call-1"), completion_turn(call_id="call-2")],
+        )
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        current_part = agent_3d.start_step_requests[1]["project_inventory"]["current_part"]
+        # Roster and assembly are derived from one read of one candidate, so
+        # every feature named in the roster is visible in the assembly text.
+        for feature in current_part["features"]:
+            with self.subTest(semantic_id=feature["semantic_id"]):
+                self.assertIn(feature["function_name"], current_part["build_model"])
+
+    def test_a_parameter_created_in_an_earlier_step_is_in_the_next_roster(self):
+        repository = FakeRepository()
+        seed_plan(repository, 2)
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository,
+            agent_script=[
+                create_parameter_turn("wall_thickness_mm", 3.0, "call-1"),
+                completion_turn(call_id="call-2"),
+                completion_turn(call_id="call-3"),
+            ],
+        )
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        parameters = agent_3d.start_step_requests[1]["project_inventory"]["current_part"][
+            "parameters"
+        ]
+        self.assertIn(
+            {"name": "wall_thickness_mm", "type_name": "float", "default": "3.0"},
+            parameters,
+        )
+
+    def test_a_feature_edited_in_an_earlier_step_shows_its_current_metadata(self):
+        repository = FakeRepository()
+        seed_plan(repository, 2)
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository,
+            agent_script=[
+                edit_feature_turn("bracket_body", "reinforced_primary_body", "call-1"),
+                completion_turn(call_id="call-2"),
+                completion_turn(call_id="call-3"),
+            ],
+        )
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(self._roster(agent_3d, 0)[0]["role"], "primary_body")
+        self.assertEqual(
+            self._roster(agent_3d, 1)[0]["role"], "reinforced_primary_body"
+        )
+
+    def test_a_feature_deleted_in_an_earlier_step_is_absent_from_the_next_roster(self):
+        # delete_feature only removes agent-created features, so the roster
+        # has to watch one appear before it can watch it go. Two are created
+        # because deleting the last one would trip the empty-part gate rather
+        # than reaching a step boundary.
+        repository = FakeRepository()
+        repository.files[ACCEPTED_SOURCE_PATH] = EMPTY_SKELETON_SOURCE
+        seed_plan(repository, 3)
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository,
+            agent_script=[
+                create_feature_turn("call-1", "mounting_plate"),
+                create_feature_turn("call-2", "support_arm"),
+                completion_turn(call_id="call-3"),
+                delete_feature_turn("support_arm", "call-4"),
+                completion_turn(call_id="call-5"),
+                completion_turn(call_id="call-6"),
+            ],
+        )
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(self._semantic_ids(agent_3d, 0), [])
+        self.assertEqual(
+            self._semantic_ids(agent_3d, 1), ["mounting_plate", "support_arm"]
+        )
+        self.assertEqual(self._semantic_ids(agent_3d, 2), ["mounting_plate"])
+
+    def test_the_roster_and_the_read_tools_agree_about_what_exists(self):
+        # The contradiction this whole mechanism exists to remove: a roster
+        # naming a feature that index_get_feature then reports as not_found.
+        repository = FakeRepository()
+        repository.files[ACCEPTED_SOURCE_PATH] = EMPTY_SKELETON_SOURCE
+        seed_plan(repository, 2)
+        orchestrator, _creator, _planner, _trace, agent_3d, tools = runtime(
+            repository,
+            agent_script=[
+                create_feature_turn("call-1", "support_arm"),
+                completion_turn(call_id="call-2"),
+                get_feature_turn("support_arm", "call-3"),
+                completion_turn(call_id="call-4"),
+            ],
+        )
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(self._semantic_ids(agent_3d, 1), ["support_arm"])
+        read_back = json.loads(
+            agent_3d.continue_step_requests[-1]["tool_outputs"][0]["output"]
+        )
+        self.assertTrue(read_back["ok"])
+        self.assertEqual(read_back["data"]["status"], "ok")
+        self.assertEqual(read_back["data"]["target"]["semantic_id"], "support_arm")
+
+    def test_a_new_step_needs_none_of_the_previous_steps_reasoning_history(self):
+        repository = FakeRepository()
+        repository.files[ACCEPTED_SOURCE_PATH] = EMPTY_SKELETON_SOURCE
+        seed_plan(repository, 2)
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository,
+            agent_script=[
+                create_feature_turn("call-1", "mounting_plate"),
+                completion_turn(call_id="call-2"),
+                completion_turn(call_id="call-3"),
+            ],
+        )
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        # PS-2 opens a brand new chain with no observations carried over --
+        # and still sees what PS-1 built, because the candidate carried it.
+        self.assertEqual(len(agent_3d.start_step_requests), 2)
+        self.assertEqual(agent_3d.start_step_requests[1]["observations"], [])
+        self.assertEqual(self._semantic_ids(agent_3d, 1), ["mounting_plate"])
+
+    def test_a_resumed_step_sees_a_candidate_that_moved_after_the_last_boundary(self):
+        # A worker died mid-step. Its in-memory view died with it, and the
+        # candidate holds mutations made after the last completed step's
+        # reindex. The replacement's chain must still open against the truth.
+        repository = FakeRepository()
+        seed_plan(repository, 2)
+        repository.jobs[EDIT_JOB_ID]["history"].append(
+            {
+                "event": "plan_updated",
+                "plan": {
+                    **repository.jobs[EDIT_JOB_ID]["history"][-1]["plan"],
+                    "steps": [
+                        {**step, "status": status}
+                        for step, status in zip(
+                            repository.jobs[EDIT_JOB_ID]["history"][-1]["plan"]["steps"],
+                            ("completed", "in_progress"),
+                        )
+                    ],
+                },
+            }
+        )
+        repository.files[CANDIDATE_PATH] = ACCEPTED_SOURCE.replace(
+            '    role="primary_body",', '    role="role_written_before_the_crash",'
+        )
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(repository)
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        self.assertEqual(len(agent_3d.start_step_requests), 1)
+        self.assertEqual(agent_3d.start_step_requests[0]["active_step"].step_id, "PS-2")
+        self.assertEqual(
+            self._roster(agent_3d, 0)[0]["role"], "role_written_before_the_crash"
         )
 
 
@@ -3122,6 +3563,64 @@ class DisconnectedSolidsGateTests(unittest.TestCase):
         geometry = second["project_inventory"]["current_part"]["geometry"]
         self.assertEqual(geometry["solid_count"], 1)
         self.assertEqual(geometry["volume_mm3"], 70200.0)
+
+    def test_a_step_opens_knowing_how_the_part_is_oriented(self):
+        """Orientation reaches the next chain without a discovery round.
+
+        A bounding box is identical for two parts whose support faces differ
+        by six degrees, so a step that opens with only the box cannot check
+        the angle a requirement names. This is the path that carries it.
+        """
+
+        repository = FakeRepository()
+        repository.validation_result = passed_report(
+            solid_count=1,
+            volume_mm3=70200.0,
+            planar_faces=[
+                {
+                    "normal": [-0.9063, 0.0, 0.4226],
+                    "angle_from_horizontal_deg": 65.0,
+                    "area_mm2": 9930.4,
+                    "centroid": [16.7, -45.0, 50.0],
+                }
+            ],
+            non_planar_face_count=0,
+            sharp_edge_count=44,
+        )
+        AgentLoopTests._seed_two_step_plan(repository)
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository,
+            agent_script=[completion_turn(call_id="call-1"), completion_turn(call_id="call-2")],
+        )
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        geometry = agent_3d.start_step_requests[1]["project_inventory"]["current_part"][
+            "geometry"
+        ]
+        self.assertEqual(geometry["planar_faces"][0]["angle_from_horizontal_deg"], 65.0)
+        self.assertEqual(geometry["non_planar_face_count"], 0)
+        self.assertEqual(geometry["sharp_edge_count"], 44)
+
+    def test_a_report_without_a_census_still_produces_an_inventory(self):
+        # Reports predating this vocabulary carry no census; the summary drops
+        # what is absent rather than fabricating zeros for it.
+        repository = FakeRepository()
+        repository.validation_result = passed_report(solid_count=1, volume_mm3=70200.0)
+        AgentLoopTests._seed_two_step_plan(repository)
+        orchestrator, _creator, _planner, _trace, agent_3d, _tools = runtime(
+            repository,
+            agent_script=[completion_turn(call_id="call-1"), completion_turn(call_id="call-2")],
+        )
+
+        orchestrator.run(repository.edit_job(EDIT_JOB_ID))
+
+        geometry = agent_3d.start_step_requests[1]["project_inventory"]["current_part"][
+            "geometry"
+        ]
+        self.assertEqual(geometry["volume_mm3"], 70200.0)
+        self.assertNotIn("planar_faces", geometry)
+        self.assertNotIn("sharp_edge_count", geometry)
 
 
 class RunMetricsTests(unittest.TestCase):

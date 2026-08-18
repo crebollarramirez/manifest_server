@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import unittest
 
 from workers.agent_3d.failures import WorkflowFailure
@@ -22,12 +23,30 @@ COMPLETED_RESULT = {
     "geometry": {
         "execution_ok": True,
         "geometry_valid": True,
+        "surface_area_mm2": 600.0,
         "volume_mm3": 1000.0,
         "bounding_box": {"min": [-5, -5, -5], "max": [5, 5, 5], "size": [10, 10, 10]},
         "center_of_mass": [0, 0, 0],
         "solid_count": 1,
         "face_count": 6,
+        "vertex_count": 8,
         "edge_count": 12,
+        "planar_faces": [
+            {
+                "normal": [0.0, 0.0, 1.0],
+                "angle_from_horizontal_deg": 0.0,
+                "area_mm2": 100.0,
+                "centroid": [0.0, 0.0, 5.0],
+            },
+            {
+                "normal": [-0.9063, 0.0, 0.4226],
+                "angle_from_horizontal_deg": 65.0,
+                "area_mm2": 80.0,
+                "centroid": [-2.0, 0.0, 0.0],
+            },
+        ],
+        "non_planar_face_count": 0,
+        "sharp_edge_count": 12,
     },
     "delta": {
         "volume_mm3": 500.0,
@@ -37,6 +56,7 @@ COMPLETED_RESULT = {
         "solid_count": 0,
         "face_count": 0,
         "edge_count": 0,
+        "sharp_edge_count": -4,
         "validity_changed": False,
     },
     "warnings": [],
@@ -134,6 +154,78 @@ class CheckGeometryToolUnitTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(result.data.geometry.volume_mm3, 1000.0)
         self.assertAlmostEqual(result.data.delta.volume_mm3, 500.0)
         self.assertEqual(len(sleeps), 2)  # polled twice before completion
+
+    async def test_the_face_census_survives_strict_schema_conversion(self):
+        """The report's JSON lists must reach the agent as typed faces.
+
+        ``StrictToolModel`` does no coercion, so a list where a tuple is
+        declared is a validation error rather than a conversion. The census
+        arrives from a JSON report as lists of lists, which is exactly the
+        shape that has to be rebuilt by hand.
+        """
+
+        import hashlib
+
+        content_hash = hashlib.sha256(MODEL_SOURCE.encode()).hexdigest()
+        repository = FakeRepository(
+            job_sequence=[
+                {
+                    "status": "completed",
+                    "source_sha256": content_hash,
+                    "result": COMPLETED_RESULT,
+                }
+            ]
+        )
+        tool = CheckGeometryTool(
+            timeout_seconds=10.0,
+            poll_interval_seconds=0.01,
+            sleep=lambda _seconds: None,
+            monotonic=lambda: 0.0,
+        )
+
+        result = await tool.run({}, make_context(repository))
+
+        faces = result.data.geometry.planar_faces
+        self.assertEqual(len(faces), 2)
+        self.assertIsInstance(faces, tuple)
+        self.assertIsInstance(faces[1].normal, tuple)
+        self.assertAlmostEqual(faces[1].angle_from_horizontal_deg, 65.0)
+        self.assertAlmostEqual(faces[1].area_mm2, 80.0)
+        self.assertEqual(result.data.geometry.non_planar_face_count, 0)
+        self.assertEqual(result.data.geometry.sharp_edge_count, 12)
+        self.assertEqual(result.data.delta.sharp_edge_count, -4)
+
+    async def test_a_report_without_a_census_yields_an_empty_one(self):
+        # A snapshot measured before this vocabulary existed carries no census.
+        # Absent must read as "nothing reported", not fail the whole result.
+        import hashlib
+
+        content_hash = hashlib.sha256(MODEL_SOURCE.encode()).hexdigest()
+        legacy = {
+            **COMPLETED_RESULT,
+            "geometry": {
+                key: value
+                for key, value in COMPLETED_RESULT["geometry"].items()
+                if key not in {"planar_faces", "non_planar_face_count", "sharp_edge_count"}
+            },
+        }
+        repository = FakeRepository(
+            job_sequence=[
+                {"status": "completed", "source_sha256": content_hash, "result": legacy}
+            ]
+        )
+        tool = CheckGeometryTool(
+            timeout_seconds=10.0,
+            poll_interval_seconds=0.01,
+            sleep=lambda _seconds: None,
+            monotonic=lambda: 0.0,
+        )
+
+        result = await tool.run({}, make_context(repository))
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data.geometry.planar_faces, ())
+        self.assertIsNone(result.data.geometry.sharp_edge_count)
 
     async def test_a_failed_check_job_is_reported_as_a_tool_failure(self):
         import hashlib
@@ -309,6 +401,52 @@ class CheckGeometryToolUnitTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result.ok)
         self.assertEqual(result.error.code, "TOOL_INPUT_INVALID")
+
+
+class DerivedMetricSurfacingTests(unittest.IsolatedAsyncioTestCase):
+    """The two metrics added when snapshots became B-rep-derived reach the agent."""
+
+    async def test_surface_area_and_vertex_count_are_surfaced(self):
+        content_hash = hashlib.sha256(MODEL_SOURCE.encode()).hexdigest()
+        repository = FakeRepository(
+            job_sequence=[
+                {
+                    "id": "job-1",
+                    "status": "completed",
+                    "source_sha256": content_hash,
+                    "result": COMPLETED_RESULT,
+                }
+            ],
+        )
+
+        result = await CheckGeometryTool().run({}, make_context(repository))
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data.geometry.surface_area_mm2, 600.0)
+        self.assertEqual(result.data.geometry.vertex_count, 8)
+
+    async def test_a_snapshot_missing_the_new_metrics_reports_absence(self):
+        """A cached pre-B-rep row is unreachable, but absence must not crash."""
+
+        content_hash = hashlib.sha256(MODEL_SOURCE.encode()).hexdigest()
+        geometry = {k: v for k, v in COMPLETED_RESULT["geometry"].items()
+                    if k not in ("surface_area_mm2", "vertex_count")}
+        repository = FakeRepository(
+            job_sequence=[
+                {
+                    "id": "job-1",
+                    "status": "completed",
+                    "source_sha256": content_hash,
+                    "result": {**COMPLETED_RESULT, "geometry": geometry},
+                }
+            ],
+        )
+
+        result = await CheckGeometryTool().run({}, make_context(repository))
+
+        self.assertTrue(result.ok)
+        self.assertIsNone(result.data.geometry.surface_area_mm2)
+        self.assertIsNone(result.data.geometry.vertex_count)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,9 @@ contain agent decision-making or CAD editing logic.
 For the `check_geometry` tool specifically (`geometry/geometry_tools.py`) and
 the geometry-check job it queues, see
 [`workers/cad_validator/GEOMETRY_CHECK.md`](../../cad_validator/GEOMETRY_CHECK.md).
+For the geometry layer that job sits on -- B-rep artifacts, snapshot derivation,
+and comparison -- see
+[`workers/cad_validator/geometry/README.md`](../../cad_validator/geometry/README.md).
 
 ## Recommended reading order
 
@@ -76,7 +79,7 @@ produce a structured `TOOL_INPUT_INVALID` failure rather than being coerced.
 
 | Tool | Params | Summary |
 | --- | --- | --- |
-| `check_geometry` | none — identity comes from `ToolExecutionContext` | Inspect the candidate's actual executed geometry (volume, bounding box, center of mass, solid/face/edge counts) against the immediately preceding candidate. Deterministic evidence only — never modifies source, never gates anything. A check that measured nothing (unreadable candidate, failed check job, timeout) returns a `GEOMETRY_CHECK_FAILED` failure rather than a success carrying no geometry. See [`workers/cad_validator/GEOMETRY_CHECK.md`](../../cad_validator/GEOMETRY_CHECK.md). |
+| `check_geometry` | none — identity comes from `ToolExecutionContext` | Inspect the candidate's actual executed geometry (volume, bounding box, center of mass, solid/face/edge counts, the largest planar faces with their angle from horizontal, and how many edges still meet at a corner) against the immediately preceding candidate. Deterministic evidence only — never modifies source, never gates anything. A check that measured nothing (unreadable candidate, failed check job, timeout) returns a `GEOMETRY_CHECK_FAILED` failure rather than a success carrying no geometry. See [`workers/cad_validator/GEOMETRY_CHECK.md`](../../cad_validator/GEOMETRY_CHECK.md). |
 
 ### step
 
